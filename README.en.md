@@ -1,14 +1,14 @@
 <p align="right">
-  <b>English</b> · <a href="https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/README.md">简体中文</a>
+  <b>English</b> · <a href="README.md">简体中文</a>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/assets/hero-brand.svg" alt="Video2Agent — video understanding for AI agents, a DSH plugin (dsh-video2agent)" width="100%">
+  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — video understanding for AI agents, a DSH plugin (dsh-video2agent)" width="100%">
 </p>
 
 <p align="center">
   <a href="https://github.com/Harm0ny-AI/DSH-Video2Agent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Harm0ny-AI/DSH-Video2Agent/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6ee7b7"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6ee7b7"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776ab">
   <a href="https://github.com/topics/dsh-plugin"><img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-60a5fa"></a>
   <img alt="Local-first" src="https://img.shields.io/badge/local--first-8b5cf6">
@@ -21,6 +21,8 @@
   Ask Bilibili and local videos: what happens, which one is better, is it worth watching.
 </p>
 
+<p align="center"><sub>Local-first · optional cloud ASR/OCR (any OpenAI-compatible provider) · Bilibili QR login unlocks CC/AI subtitles</sub></p>
+
 <p align="center">
   <a href="#faster-broader-cheaper">Benchmarks</a> ·
   <a href="#quick-start">Quick start</a> ·
@@ -31,7 +33,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/assets/demo/video2agent-demo.gif" alt="Real DSH recording: video in, processing, answer" width="860">
+  <img src="docs/assets/demo/video2agent-demo.gif" alt="Real DSH recording: video in, processing, answer" width="860">
   <br>
   <sub>Real recording; waiting sections compressed.</sub>
 </p>
@@ -44,13 +46,13 @@
 
 One video: **2m09s** to produce an 8-row cheat sheet + 6 source frames; the web path takes **2m26s**. **4** source types vs **1** for text-only, and **~99%** fewer tokens than a video model.
 
-![Faster, broader, cheaper](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/assets/task-fit.en.png)
+![Faster, broader, cheaper](docs/assets/task-fit.en.png)
 
 ## Video-MME leaderboard
 
-On the [llm-stats](https://llm-stats.com/benchmarks/video-mme) Video-MME board (2026-11, 2,700 questions), the orange row is **Video2Agent\* 87.8** (4.1 Flash Max), alongside frontier models; \* marks a [90-question subset](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/BENCH-VIDEOMME.md).
+On the [llm-stats](https://llm-stats.com/benchmarks/video-mme) Video-MME board (2026-11, 2,700 questions), the orange row is **Video2Agent\* 87.8** (4.1 Flash Max), alongside frontier models; \* marks a [90-question subset](docs/BENCH-VIDEOMME.md).
 
-![Video-MME full leaderboard and the plugin's 90-question subset](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/assets/videomme-compare.en.png)
+![Video-MME full leaderboard and the plugin's 90-question subset](docs/assets/videomme-compare.en.png)
 
 ## What it does
 
@@ -85,6 +87,11 @@ After QR login, browse favorites, history and folders; see duration, uploader an
 generate a classification draft grouped by uploader. The DSH `account` tool is read-only; folder edits
 and batch classification stay in the CLI behind `--confirm`, and cookies stay local.
 
+## Local, cloud and accounts
+
+- **Local by default.** Transcription (Whisper), on-screen text (RapidOCR), scene split and frame sampling all run on your machine; video files never leave it. No GPU and no API key required.
+- **Cloud is optional.** The settings page can connect any OpenAI-compatible ASR/OCR provider (a default one with free quota is built in): transcription uploads audio only, and cloud OCR reads only the frames you explicitly ask about — a batch of sampled frames is never sent to a paid image model. The key is encrypted with Windows DPAPI on your machine and never appears in config, argv, logs or route responses.
+- **Bilibili login is optional.** After QR login you get CC/AI subtitles (anonymous requests cannot list them), candidate search with uploader/date filters, and read access to favorites, history and folders plus a classification draft. Cookies stay in `~/.video2agent/cookies/`; the `account` tool is read-only and folder writes require `--confirm` on the CLI.
 ## Quick start
 
 **Requirements:** Python 3.11+, FFmpeg on `PATH`, and DSH for the plugin surface.
@@ -159,19 +166,19 @@ sequenceDiagram
 
 | DSH plugin | Batch table | Settings |
 |---|---|---|
-| ![Composer preview](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/preview-shot.png) | ![Batch table](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/selected-table-shot.png) | ![Settings](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/settings-page-shot.png) |
+| ![Composer preview](docs/preview-shot.png) | ![Batch table](docs/selected-table-shot.png) | ![Settings](docs/settings-page-shot.png) |
 
-The dark social card and marketplace card live in [`docs/assets/`](https://github.com/Harm0ny-AI/DSH-Video2Agent/tree/main/docs/assets).
+The dark social card and marketplace card live in [`docs/assets/`](docs/assets).
 
 ## Docs
 
-- [Architecture and invariants](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/ARCHITECTURE.md)
-- [Benchmark method and per-task results](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/BENCH-VIDEOMME.md)
-- [Limits and known failure modes](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/LIMITS.md)
-- [Plugin benchmark: routes, latency, polling](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/PLUGIN-BENCH.md)
-- [Long-video runs](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/LONG-VIDEO-BENCH.md)
-- [Bilibili subtitles and login](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/BILIBILI-SUBTITLES.md)
-- [CLI command reference](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/ARCHITECTURE.md) · `video2agent --help`
+- [Architecture and invariants](docs/ARCHITECTURE.md)
+- [Benchmark method and per-task results](docs/BENCH-VIDEOMME.md)
+- [Limits and known failure modes](docs/LIMITS.md)
+- [Plugin benchmark: routes, latency, polling](docs/PLUGIN-BENCH.md)
+- [Long-video runs](docs/LONG-VIDEO-BENCH.md)
+- [Bilibili subtitles and login](docs/BILIBILI-SUBTITLES.md)
+- [CLI command reference](docs/ARCHITECTURE.md) · `video2agent --help`
 
 ## Status
 
@@ -202,8 +209,11 @@ node tests/test_plugin_campaign.mjs
 node tests/test_plugin_dock_state.mjs
 ```
 
+## Usage and content rights
+
+This is a local tool: it does not host, cache or distribute any video content, and it does not provide a public download service. Process only content you have the right to access and use. Downloading videos through platform links and storing transcripts or frames may be subject to platform terms and copyright law; lawful use of that material is the user's responsibility. Do not use it for bulk scraping, mirrored redistribution or commercial redistribution. Report infringement or abuse privately via `SECURITY.md`.
 ## License
 
-Apache-2.0. Third-party notices are in [THIRD_PARTY_LICENSES.md](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/THIRD_PARTY_LICENSES.md).
+Apache-2.0. Third-party notices are in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 <p align="center"><sub>If this saves you from scrubbing one more timeline, a ⭐ helps other agents find it.</sub></p>

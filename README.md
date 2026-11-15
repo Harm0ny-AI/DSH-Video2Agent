@@ -1,14 +1,14 @@
 <p align="right">
-  <a href="https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/README.en.md">English</a> · <b>简体中文</b>
+  <a href="README.en.md">English</a> · <b>简体中文</b>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/assets/hero-brand.svg" alt="Video2Agent — 让 AI Agent 看懂视频，DSH 插件 dsh-video2agent" width="100%">
+  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — 让 AI Agent 看懂视频，DSH 插件 dsh-video2agent" width="100%">
 </p>
 
 <p align="center">
   <a href="https://github.com/Harm0ny-AI/DSH-Video2Agent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Harm0ny-AI/DSH-Video2Agent/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6ee7b7"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6ee7b7"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776ab">
   <a href="https://github.com/topics/dsh-plugin"><img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-60a5fa"></a>
   <img alt="Local-first" src="https://img.shields.io/badge/local--first-8b5cf6">
@@ -21,6 +21,8 @@
   B 站和本地视频都能问：讲了什么、哪条更好、值不值得看。
 </p>
 
+<p align="center"><sub>本地优先 · 云端 ASR/OCR 可选（任意 OpenAI 兼容服务商） · B 站扫码登录解锁 CC/AI 字幕</sub></p>
+
 <p align="center">
   <a href="#更快更全面更省">实测</a> ·
   <a href="#快速开始">快速开始</a> ·
@@ -31,7 +33,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/assets/demo/video2agent-demo.gif" alt="真实 DSH 录制：视频输入、处理、回答" width="860">
+  <img src="docs/assets/demo/video2agent-demo.gif" alt="真实 DSH 录制：视频输入、处理、回答" width="860">
   <br>
   <sub>实录；等待部分已压缩。</sub>
 </p>
@@ -44,13 +46,13 @@
 
 一条视频：**2m09s** 做出 8 行速查表 + 6 张原片截图；走网页要 **2m26s**。信息源 **4 类**，纯文字只有 **1 类**；比视频大模型少 **~99%** tokens。
 
-![更快、更全面、更省](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/assets/task-fit.png)
+![更快、更全面、更省](docs/assets/task-fit.png)
 
 ## Video-MME 排行
 
-在 [llm-stats](https://llm-stats.com/benchmarks/video-mme) 2026-11 的 Video-MME 全量榜（2,700 题）上，橙色那行是 **Video2Agent\* 87.8**（4.1 Flash Max），与前沿模型同榜；\* 表示 [90 题子集](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/BENCH-VIDEOMME.md)。
+在 [llm-stats](https://llm-stats.com/benchmarks/video-mme) 2026-11 的 Video-MME 全量榜（2,700 题）上，橙色那行是 **Video2Agent\* 87.8**（4.1 Flash Max），与前沿模型同榜；\* 表示 [90 题子集](docs/BENCH-VIDEOMME.md)。
 
-![Video-MME 全量排行与本插件 90 题子集](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/assets/videomme-compare.png)
+![Video-MME 全量排行与本插件 90 题子集](docs/assets/videomme-compare.png)
 
 ## 它能做什么
 
@@ -74,6 +76,11 @@
 
 扫码登录后，能看收藏夹、历史、文件夹，统计时长、UP 主和未看完，按 UP 主生成分类草案。DSH 里的 `account` 工具只读；真正整理文件夹、批量分类，回 CLI 加 `--confirm` 才动手，Cookie 只留在本地。
 
+## 本地、云端与账号
+
+- **默认全本地。** 转写（Whisper）、画面文字（RapidOCR）、场景切分和抽帧都在本机跑，视频文件不出机器；不需要 GPU，不需要 API Key。
+- **云端可选。** 设置页可以接入任意 OpenAI 兼容的 ASR/OCR 服务商（内置默认服务商，有免费额度）：转写只上传音频，云端 OCR 只读你点名时刻的画帧，不会把整批抽帧发给付费图像模型。Key 用 Windows DPAPI 加密存在本机，不写进配置、argv、日志或接口响应。
+- **B 站登录可选。** 扫码登录后解锁 CC/AI 字幕（匿名请求拿不到字幕列表）、按 UP 主/发布时间筛选候选，以及收藏夹、历史、文件夹的读取与分类草案。Cookie 只留在 `~/.video2agent/cookies/`；`account` 工具只读，改文件夹/批量分类要回 CLI 加 `--confirm`。
 ## 快速开始
 
 **环境：** Python 3.11+、FFmpeg（在 `PATH` 中），以及 DSH（用插件界面时需要）。
@@ -142,19 +149,19 @@ sequenceDiagram
 
 | DSH 插件 | 批量任务 | 设置 |
 |---|---|---|
-| ![输入框预览](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/preview-shot.png) | ![批量任务表](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/selected-table-shot.png) | ![设置页](https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/docs/settings-page-shot.png) |
+| ![输入框预览](docs/preview-shot.png) | ![批量任务表](docs/selected-table-shot.png) | ![设置页](docs/settings-page-shot.png) |
 
-深色社交分享图和插件市场卡片在 [`docs/assets/`](https://github.com/Harm0ny-AI/DSH-Video2Agent/tree/main/docs/assets)。
+深色社交分享图和插件市场卡片在 [`docs/assets/`](docs/assets)。
 
 ## 文档
 
-- [架构与设计约束](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/ARCHITECTURE.md)
-- [基准方法与逐题结果](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/BENCH-VIDEOMME.md)
-- [限制与已知问题](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/LIMITS.md)
-- [插件基准：接口、延迟与轮询](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/PLUGIN-BENCH.md)
-- [长视频实测](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/LONG-VIDEO-BENCH.md)
-- [B 站字幕与登录](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/BILIBILI-SUBTITLES.md)
-- [CLI 命令参考](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/docs/ARCHITECTURE.md) · `video2agent --help`
+- [架构与设计约束](docs/ARCHITECTURE.md)
+- [基准方法与逐题结果](docs/BENCH-VIDEOMME.md)
+- [限制与已知问题](docs/LIMITS.md)
+- [插件基准：接口、延迟与轮询](docs/PLUGIN-BENCH.md)
+- [长视频实测](docs/LONG-VIDEO-BENCH.md)
+- [B 站字幕与登录](docs/BILIBILI-SUBTITLES.md)
+- [CLI 命令参考](docs/ARCHITECTURE.md) · `video2agent --help`
 
 ## 状态
 
@@ -184,8 +191,11 @@ node tests/test_plugin_campaign.mjs
 node tests/test_plugin_dock_state.mjs
 ```
 
+## 使用与内容权利
+
+本项目是一个本地运行的工具：不托管、不缓存、不分发任何视频内容，也不提供公开的视频下载服务。请只处理你有权访问和使用的内容。通过平台链接下载视频、保存转写与截图可能受平台服务条款和著作权法约束，这些内容的合法使用由使用者自行负责；请勿用于批量抓取、镜像传播或商业再分发。发现侵权或滥用，请按 `SECURITY.md` 的方式私下联系。
 ## 许可证
 
-Apache-2.0。第三方声明见 [THIRD_PARTY_LICENSES.md](https://github.com/Harm0ny-AI/DSH-Video2Agent/blob/main/THIRD_PARTY_LICENSES.md)。
+Apache-2.0。第三方声明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
 
 <p align="center"><sub>如果它帮你少拖了一次进度条，点个 ⭐ 能让更多 Agent 找到它。</sub></p>
