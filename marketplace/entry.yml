@@ -1,0 +1,9 @@
+# DRAFT — not submittable yet: the public repo was deleted; recreate it and
+# update url/icon before opening the awesome PR. Nothing here is published.
+url: https://github.com/Harm0ny-AI/DSH-Video2Agent/tree/main/packages/dsh-video2agent
+name: Harm0ny-AI/DSH-Video2Agent#dsh-video2agent
+category: vision
+description:
+  en: 'Video search and understanding for DSH. One library for local files and Bilibili links: cross-video search with video and timecode, exact-frame evidence, and 1–10 video batch analysis. Local-first; cloud ASR/OCR is optional. Bilibili login is optional and adds discovery, favorites/history/folders and CC/AI subtitles.'
+  zh: '让 DSH 获得视频检索与理解能力：本地文件与 B 站链接合成一个库，跨视频搜索并返回视频与时间码，按时间码取帧作证据，一次分析 1–10 个视频。本地优先，云端 ASR/OCR 可选；B 站登录可选，解锁搜候选、收藏夹/历史/文件夹与 CC/AI 字幕。'
+icon: https://raw.githubusercontent.com/Harm0ny-AI/DSH-Video2Agent/main/packages/dsh-video2agent/assets/icon-180.png

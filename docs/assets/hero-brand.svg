@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="960" viewBox="0 0 2400 960" role="img" aria-labelledby="title desc">
+  <title id="title">Video2Agent — video search and understanding for DeepSeek Harness</title>
+  <desc id="desc">A deep blue field with soft light bands. Centered: a video frame with a play glyph and an orange agent cursor, the wordmark Video2Agent, a DSH PLUGIN pill, and the plugin name dsh-video2agent.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.15" y2="1">
+      <stop offset="0" stop-color="#0a162b"/>
+      <stop offset="0.42" stop-color="#1b3b63"/>
+      <stop offset="0.72" stop-color="#102542"/>
+      <stop offset="1" stop-color="#081221"/>
+    </linearGradient>
+    <radialGradient id="centerGlow" cx="0.44" cy="0.42" r="0.58">
+      <stop offset="0" stop-color="#6b95cc" stop-opacity="0.42"/>
+      <stop offset="0.55" stop-color="#3c6398" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#0a162b" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vig" cx="0.5" cy="0.47" r="0.74">
+      <stop offset="0.4" stop-color="#040a14" stop-opacity="0"/>
+      <stop offset="1" stop-color="#040a14" stop-opacity="0.58"/>
+    </radialGradient>
+    <filter id="softWide" x="-35%" y="-45%" width="170%" height="190%">
+      <feGaussianBlur stdDeviation="118"/>
+    </filter>
+    <filter id="softMid" x="-35%" y="-45%" width="170%" height="190%">
+      <feGaussianBlur stdDeviation="78"/>
+    </filter>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.92" numOctaves="3" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.032"/>
+      </feComponentTransfer>
+    </filter>
+  </defs>
+
+  <rect width="2400" height="960" fill="url(#bg)"/>
+  <rect width="2400" height="960" fill="url(#centerGlow)"/>
+
+  <g filter="url(#softWide)" fill="none" stroke-linecap="round">
+    <path d="M-320 300 C 140 90 520 80 820 250 C 1080 396 1260 500 1540 440 C 1820 380 2080 300 2440 380"
+          stroke="#a6c6ec" stroke-width="250" opacity="0.37"/>
+    <path d="M-220 790 C 260 590 590 550 900 670 C 1190 782 1500 842 1830 710 C 2080 610 2320 590 2580 680"
+          stroke="#7fa6d4" stroke-width="280" opacity="0.33"/>
+    <path d="M1430 560 C 1600 330 1930 270 2160 430 C 2340 556 2280 760 2060 810"
+          stroke="#89b1df" stroke-width="150" opacity="0.16"/>
+  </g>
+
+  <g filter="url(#softMid)" fill="none" stroke-linecap="round">
+    <path d="M-320 300 C 140 90 520 80 820 250 C 1080 396 1260 500 1540 440 C 1820 380 2080 300 2440 380"
+          stroke="#e2efff" stroke-width="56" opacity="0.16"/>
+    <path d="M420 -160 C 620 160 1000 230 1270 70 C 1530 -84 1840 -50 2150 180"
+          stroke="#d5e6fa" stroke-width="120" opacity="0.13"/>
+  </g>
+
+  <rect width="2400" height="960" fill="url(#vig)"/>
+  <rect width="2400" height="960" filter="url(#grain)" opacity="0.5"/>
+
+  <!-- mark: frame, play, agent cursor -->
+  <g transform="translate(571 322)">
+    <rect x="0" y="0" width="108" height="108" rx="26" fill="#0d1c36" stroke="#f7fbff" stroke-width="6"/>
+    <path d="M40 35 L40 73 L75 54 Z" fill="#f7fbff"/>
+    <path d="M79 76 L79 114 L90 104 L97 120 L105 116 L98 100 L112 100 Z"
+          fill="#ff7a45" stroke="#0d1c36" stroke-width="3" stroke-linejoin="round"/>
+  </g>
+
+  <text x="711" y="440" fill="#f7fbff" font-family="Inter, 'Segoe UI', system-ui, Helvetica, Arial, sans-serif" font-size="148" font-weight="600" letter-spacing="-3.8">Video2Agent</text>
+
+  <g>
+    <rect x="1590" y="370" width="238" height="66" rx="33" fill="#ffffff" fill-opacity="0.06" stroke="#eef6ff" stroke-opacity="0.82" stroke-width="2"/>
+    <text x="1709" y="413" text-anchor="middle" fill="#f7fbff" font-family="Inter, 'Segoe UI', system-ui, Helvetica, Arial, sans-serif" font-size="25" font-weight="600" letter-spacing="3.8">DSH PLUGIN</text>
+  </g>
+
+  <text x="1200" y="570" text-anchor="middle" fill="#b9cbe6" font-family="Inter, 'Segoe UI', system-ui, Helvetica, Arial, sans-serif" font-size="32" font-weight="400" letter-spacing="0.3">dsh-video2agent  ·  video search with receipts</text>
+  <text x="1200" y="632" text-anchor="middle" fill="#8fa8c8" font-family="Inter, 'Segoe UI', system-ui, Helvetica, Arial, sans-serif" font-size="20" font-weight="400" letter-spacing="2.2">FOR DEEPSEEK HARNESS</text>
+</svg>

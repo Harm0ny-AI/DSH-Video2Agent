@@ -1,0 +1,4 @@
+# dsh-video2agent bundle patch
+- insert:
+    - id: dsh-video2agent
+      name: dsh-video2agent

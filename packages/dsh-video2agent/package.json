@@ -1,0 +1,56 @@
+{
+  "name": "dsh-video2agent",
+  "version": "0.1.0",
+  "private": false,
+  "description": "DSH-Video2Agent for DeepSeek Harness: index a video locally, search what was said and shown, cite exact frames, and optionally manage a logged-in Bilibili library.",
+  "type": "module",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Harm0ny-AI/DSH-Video2Agent.git"
+  },
+  "homepage": "https://github.com/Harm0ny-AI/DSH-Video2Agent#readme",
+  "bugs": {
+    "url": "https://github.com/Harm0ny-AI/DSH-Video2Agent/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-tool"
+      ]
+    }
+  },
+  "files": [
+    "index.js",
+    "campaign.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "screenshots.json",
+    "assets/"
+  ],
+  "keywords": ["dsh", "deepseek", "video", "bilibili", "video-qa", "video-search", "timestamp", "asr", "ocr", "local-first"],
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.1 <0.3.0-0",
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true }
+  }
+}
