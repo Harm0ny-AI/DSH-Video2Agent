@@ -175,7 +175,7 @@ The dark social card and marketplace card live in [`docs/assets/`](https://githu
 
 ## Status
 
-- **Release candidate 0.1.0.** CLI and Skill are stable; the DSH plugin is verified in an isolated profile.
+- **0.1.0 released (2026-11-15).** CLI, Skill and the DSH plugin are available; install from PyPI or npm.
 - Local-first by default; no GPU required. Cloud is optional.
 - Published on PyPI and npm (`pip install video2agent`, `npm i dsh-video2agent`); the marketplace entry is prepared in the awesome-list format.
 - Known limits: single-character CJK search, OCR on tiny/low-contrast text, counting across shots.

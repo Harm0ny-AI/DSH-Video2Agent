@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.1.0 release candidate (2026-11-02)
+## 0.1.0 (2026-11-15)
 
 The first public release is built from this state; nothing is published yet.
 
