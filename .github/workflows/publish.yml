@@ -33,8 +33,14 @@ jobs:
           mv ./*.tgz ../../dist/
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/
+          name: python-dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-dist
+          path: dist/*.tgz
 
   pypi:
     needs: build
@@ -44,7 +50,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: python-dist
           path: dist
       - name: Publish to PyPI (trusted publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -80,7 +86,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: python-dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugin-dist
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
