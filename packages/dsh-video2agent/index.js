@@ -51,6 +51,73 @@ export const Config = Schema
 function binPath() {
   return process.env.VIDEO2AGENT_BIN || 'video2agent'
 }
+// Tools the plugin can provide to the Python CLI. FFmpeg may be installed after
+// the app started (PATH is a snapshot), so the setup card records where winget/brew
+// put it and every CLI spawn gets FFMPEG_BIN/FFPROBE_BIN.
+function v2aHomePath() {
+  return process.env.VIDEO2AGENT_HOME || path.join(os.homedir(), '.video2agent')
+}
+
+function managedToolsPath() {
+  return path.join(v2aHomePath(), 'tools', 'ffmpeg.json')
+}
+
+function readManagedTools() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(managedToolsPath(), 'utf8'))
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function managedToolEnv(baseEnv = process.env) {
+  const env = { ...baseEnv }
+  const tools = readManagedTools()
+  if (tools.ffmpeg && fs.existsSync(tools.ffmpeg)) env.FFMPEG_BIN = tools.ffmpeg
+  if (tools.ffprobe && fs.existsSync(tools.ffprobe)) env.FFPROBE_BIN = tools.ffprobe
+  return env
+}
+
+// Spawn any helper command (python, pip, winget, ffmpeg) with the same capture and
+// timeout rules as the CLI runner.
+function runCommand(command, args, timeoutMs = 600000, env = managedToolEnv()) {
+  return new Promise((resolve) => {
+    let out = ''
+    let err = ''
+    let done = false
+    const finish = (value) => {
+      if (done) return
+      done = true
+      resolve(value)
+    }
+    let child
+    try {
+      child = spawn(command, args, { windowsHide: true, env })
+    } catch (e) {
+      finish({ code: -1, out: '', err: String((e && e.message) || e) })
+      return
+    }
+    const timer = setTimeout(() => {
+      killTree(child)
+      finish({ code: -2, out: out.trim(), err: 'Timed out.' })
+    }, timeoutMs)
+    try { child.stdin.end() } catch {}
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (d) => { out = appendCapture(out, d) })
+    child.stderr.on('data', (d) => { err = appendCapture(err, d) })
+    child.on('error', (e) => {
+      clearTimeout(timer)
+      finish({ code: -1, out: out.trim(), err: String((e && e.message) || e) })
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      finish({ code, out: out.trim(), err: err.trim() })
+    })
+  })
+}
+
 const MAX_CAPTURE = 2 * 1024 * 1024
 const WORKER_IDLE_MS = 10 * 60 * 1000
 const WORKER_COMMANDS = new Set(['search', 'overview', 'transcript', 'compare', 'digest', 'perceive', 'evidence', 'frames', 'map', 'candidates', 'ocr-window', 'list', 'find', 'outline', 'read', 'admin'])
@@ -106,7 +173,7 @@ function runCli(args, timeoutMs = 600000, input = null) {
     }
     let child
     try {
-      child = spawn(binPath(), args, { windowsHide: true, env: process.env })
+      child = spawn(binPath(), args, { windowsHide: true, env: managedToolEnv() })
     } catch (e) {
       finish({ code: -1, out: '', err: 'Cannot start video2agent: ' + (e?.message || e) })
       return
@@ -176,7 +243,7 @@ function _workerIdle(worker) {
 }
 
 function _workerStart() {
-  const child = spawn(binPath(), ['__worker'], { windowsHide: true, env: process.env })
+  const child = spawn(binPath(), ['__worker'], { windowsHide: true, env: managedToolEnv() })
   const worker = { child, pending: null, buffer: '', stderr: '', idle: null }
   WORKER = worker
   // The worker is an optimization, not a reason for the Host to stay alive.
@@ -985,6 +1052,225 @@ export function apply(ctx, config) {
             res.end(JSON.stringify({ error: 'internal error', code: 'E_ROUTE' }))
           }
         },
+    })
+  })
+
+  // ---- Environment check + one-click install --------------------------------
+  // The plugin is a thin DSH layer; the video work runs in a Python CLI that
+  // needs Python 3.11+ and FFmpeg. The settings page checks those and can install
+  // what is missing. Only the page can start an install (loopback JSON POST,
+  // guardWrite); the model-facing tool has no command that reaches it.
+  const SETUP_INSTALL_TIMEOUT = 15 * 60 * 1000
+
+  function pythonCandidates() {
+    const list = []
+    if (process.env.VIDEO2AGENT_PYTHON) list.push(String(process.env.VIDEO2AGENT_PYTHON))
+    if (process.platform === 'win32') list.push('py', 'python')
+    else list.push('python3', 'python')
+    return list
+  }
+
+  async function detectPython() {
+    for (const command of pythonCandidates()) {
+      const prefix = command === 'py' ? ['-3'] : []
+      const r = await runCommand(command, [...prefix, '-c', 'import sys; print(sys.version.split()[0])'], 30000)
+      if (r.code !== 0) continue
+      const version = String(r.out || '').trim().split('\n').pop() || ''
+      const [major, minor] = version.split('.').map((x) => Number(x) || 0)
+      const ok = major > 3 || (major === 3 && minor >= 11)
+      return { ok, version, command, prefix, tooOld: major === 3 && minor < 11 }
+    }
+    return { ok: false, version: '', command: '', prefix: [], tooOld: false }
+  }
+
+  async function detectFfmpeg() {
+    const managed = readManagedTools()
+    const managedFfmpeg = managed.ffmpeg && fs.existsSync(managed.ffmpeg) ? managed.ffmpeg : ''
+    const managedProbe = managed.ffprobe && fs.existsSync(managed.ffprobe) ? managed.ffprobe : ''
+    const ffmpeg = await runCommand(managedFfmpeg || 'ffmpeg', ['-version'], 20000)
+    if (ffmpeg.code !== 0) return { ok: false, detail: '未安装', managed: false }
+    const ffprobe = await runCommand(managedProbe || 'ffprobe', ['-version'], 20000)
+    const first = String(ffmpeg.out || '').split('\n')[0] || ''
+    return {
+      ok: ffprobe.code === 0,
+      detail: (managedFfmpeg ? '插件安装 · ' : '') + first.slice(0, 120),
+      managed: !!managedFfmpeg,
+      path: managedFfmpeg,
+    }
+  }
+
+  async function setupStatus() {
+    const python = await detectPython()
+    const cliRun = await runCli(['--version'], 30000)
+    const cliOk = cliRun.code === 0
+    const cliVersion = cliOk ? String(cliRun.out || cliRun.err || '').trim().split('\n').pop() : ''
+    const ffmpeg = await detectFfmpeg()
+    const ffmpegHint = process.platform === 'win32'
+      ? 'winget install Gyan.FFmpeg'
+      : process.platform === 'darwin' ? 'brew install ffmpeg' : 'sudo apt install ffmpeg'
+    return {
+      ok: true,
+      platform: process.platform,
+      home: v2aHomePath(),
+      python: { ok: python.ok, detail: python.version ? 'Python ' + python.version : '未找到', tooOld: !!python.tooOld },
+      cli: { ok: cliOk, detail: cliOk ? (cliVersion || '已安装') : '未安装', bin: binPath() },
+      ffmpeg: { ok: ffmpeg.ok, detail: ffmpeg.detail, managed: ffmpeg.managed, path: ffmpeg.path || '' },
+      hints: {
+        python: '安装 Python 3.11+：https://www.python.org/downloads/（Windows 可 winget install Python.Python.3.12）',
+        cli: 'pip install video2agent',
+        ffmpeg: ffmpegHint,
+      },
+      canInstall: { cli: python.ok && !cliOk, ffmpeg: !ffmpeg.ok },
+    }
+  }
+
+  async function installCli() {
+    const before = await setupStatus()
+    if (before.cli.ok) return { ok: true, already: true, output: '', status: before }
+    const python = await detectPython()
+    if (!python.ok) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_PYTHON',
+          message: python.tooOld ? 'Python 版本低于 3.11' : '没有找到 Python',
+          remedy: '安装 Python 3.11+ 后重试：https://www.python.org/downloads/（Windows 可 winget install Python.Python.3.12）',
+        },
+        status: before,
+      }
+    }
+    const r = await runCommand(python.command, [...python.prefix, '-m', 'pip', 'install', '--upgrade', 'video2agent'], SETUP_INSTALL_TIMEOUT)
+    const output = ((String(r.out || '') + '\n' + String(r.err || '')).trim()).slice(-6000)
+    if (r.code !== 0) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_PIP',
+          message: 'pip install video2agent 失败',
+          remedy: '检查网络和 pip 后可手动运行：' + python.command + ' ' + python.prefix.join(' ') + ' -m pip install --upgrade video2agent',
+        },
+        output,
+        status: await setupStatus(),
+      }
+    }
+    return { ok: true, output, status: await setupStatus() }
+  }
+
+  function findExecutable(root, name, depth = 0) {
+    if (!root || depth > 4) return null
+    let entries = []
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true })
+    } catch {
+      return null
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.toLowerCase() === name) return path.join(root, entry.name)
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const hit = findExecutable(path.join(root, entry.name), name, depth + 1)
+      if (hit) return hit
+    }
+    return null
+  }
+
+  function saveManagedFfmpeg(ffmpeg, ffprobe, source) {
+    try {
+      fs.mkdirSync(path.dirname(managedToolsPath()), { recursive: true })
+      fs.writeFileSync(managedToolsPath(), JSON.stringify({ ffmpeg, ffprobe: ffprobe || '', source, at: new Date().toISOString() }, null, 2), 'utf8')
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  function winGetPackageRoot() {
+    const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+    return path.join(local, 'Microsoft', 'WinGet', 'Packages')
+  }
+
+  async function installFfmpeg() {
+    const before = await setupStatus()
+    if (before.ffmpeg.ok) return { ok: true, already: true, output: '', status: before }
+    let r = null
+    if (process.platform === 'win32') {
+      const where = await runCommand('where', ['winget'], 20000)
+      if (where.code !== 0) {
+        return {
+          ok: false,
+          error: { code: 'E_WINGET', message: '这台机器没有 winget', remedy: '手动安装 FFmpeg，或把 FFMPEG_BIN 指向 ffmpeg.exe 后重试' },
+          status: before,
+        }
+      }
+      r = await runCommand('winget', ['install', '--id', 'Gyan.FFmpeg', '-e', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'], SETUP_INSTALL_TIMEOUT)
+      if (r.code === 0 || /already installed|已安装/i.test(String(r.out) + String(r.err))) {
+        const root = winGetPackageRoot()
+        let ffmpeg = ''
+        let ffprobe = ''
+        if (fs.existsSync(root)) {
+          const packageDir = fs.readdirSync(root).find((name) => name.toLowerCase().includes('ffmpeg')) || ''
+          const base = packageDir ? path.join(root, packageDir) : root
+          ffmpeg = findExecutable(base, 'ffmpeg.exe') || ''
+          ffprobe = findExecutable(base, 'ffprobe.exe') || ''
+        }
+        if (ffmpeg) saveManagedFfmpeg(ffmpeg, ffprobe, 'winget')
+      }
+    } else if (process.platform === 'darwin') {
+      r = await runCommand('brew', ['install', 'ffmpeg'], SETUP_INSTALL_TIMEOUT)
+      const which = await runCommand('which', ['ffmpeg'], 20000)
+      if (which.code === 0) {
+        const ffmpeg = String(which.out || '').trim()
+        const probe = await runCommand('which', ['ffprobe'], 20000)
+        saveManagedFfmpeg(ffmpeg, String(probe.out || '').trim(), 'brew')
+      }
+    } else {
+      return {
+        ok: false,
+        error: { code: 'E_MANUAL_INSTALL', message: 'Linux 需要 sudo 安装 FFmpeg', remedy: 'sudo apt install ffmpeg' },
+        status: before,
+      }
+    }
+    const output = (String((r && r.out) || '') + '\n' + String((r && r.err) || '')).trim().slice(-6000)
+    const after = await setupStatus()
+    if (!after.ffmpeg.ok) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_FFMPEG_INSTALL',
+          message: 'FFmpeg 安装后仍未找到',
+          remedy: '重开 DSH 再检测；或把 FFMPEG_BIN 指向 ffmpeg.exe 后重试',
+        },
+        output,
+        status: after,
+      }
+    }
+    return { ok: true, output, status: after }
+  }
+
+  // Environment check + installs. GET is read-only; POST goes through the same
+  // loopback+JSON guard as settings writes.
+  whenWebServer(ctx, 'setup route', (webServer) => {
+    webServer.register({
+      kind: 'exact',
+      path: '/api/video2agent/setup',
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'GET') return sendJson(res, 200, await setupStatus())
+          if (!guardWrite(req, res)) return
+          const body = await readBody(req, 8 * 1024)
+          let incoming = null
+          try { incoming = JSON.parse(body || '{}') } catch { incoming = null }
+          if (!incoming || typeof incoming !== 'object') return sendJson(res, 400, { error: 'invalid request' })
+          const action = String(incoming.action || '')
+          if (action === 'refresh') return sendJson(res, 200, await setupStatus())
+          if (action === 'install-cli') return sendJson(res, 200, await installCli())
+          if (action === 'install-ffmpeg') return sendJson(res, 200, await installFfmpeg())
+          return sendJson(res, 400, { error: 'unknown action' })
+        } catch (e) {
+          return sendJson(res, 500, { error: 'internal error', code: 'E_ROUTE', detail: String((e && e.message) || e).slice(0, 300) })
+        }
+      },
     })
   })
 
@@ -2303,6 +2589,11 @@ function guardWrite(req, res) {
   const campaigns = createCampaignManager({ home: video2agentHome, startShortlistJobs, readJobSidecar })
   __test.campaigns = campaigns
   __test.timeoutPayload = timeoutPayload
+  __test.setupStatus = setupStatus
+  __test.installCli = installCli
+  __test.installFfmpeg = installFfmpeg
+  __test.managedToolEnv = managedToolEnv
+  __test.readManagedTools = readManagedTools
 
 
   // Register a plain registry-ready definition instead of importing

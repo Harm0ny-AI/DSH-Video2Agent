@@ -33,6 +33,7 @@ assert.ok(routes.has('/api/video2agent/settings'), 'settings route missing')
 assert.ok(routes.has('/api/video2agent/doctor'), 'doctor route missing')
 assert.ok(routes.has('/api/video2agent/retry'), 'retry route missing')
 assert.ok(routes.has('/api/video2agent/jobs/cancel'), 'cancel route missing')
+assert.ok(routes.has('/api/video2agent/setup'), 'env-check/setup route missing')
 
 function call(method, body, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -92,6 +93,24 @@ assert.deepEqual(__test.commandArgs({ command: 'find', query: '一' }),
 
 const cancelMissing = await call('POST', JSON.stringify({ job_id: 'job_missing_xyz' }), { path: '/api/video2agent/jobs/cancel' })
 assert.equal(cancelMissing.status, 404, 'cancel must not create a marker for a missing job')
+
+// The environment card reads real state (python exists on the CI runner, the
+// harness points VIDEO2AGENT_BIN at a missing binary) and never fakes "installed".
+const setup = await call('GET', undefined, { path: '/api/video2agent/setup' })
+assert.equal(setup.status, 200, 'setup status must be readable: ' + setup.body.slice(0, 200))
+const setupData = JSON.parse(setup.body)
+assert.equal(setupData.ok, true)
+for (const key of ['python', 'cli', 'ffmpeg']) {
+  assert.equal(typeof (setupData[key] || {}).ok, 'boolean', key + ' must be measured, not assumed')
+}
+assert.equal(setupData.cli.ok, false, 'the missing CLI must show as missing')
+assert.equal(typeof setupData.hints.cli, 'string', 'the CLI hint must be copy-pasteable')
+const badSetupAction = await call('POST', JSON.stringify({ action: 'not-a-real-action' }), { path: '/api/video2agent/setup' })
+assert.equal(badSetupAction.status, 400, 'unknown setup actions must be refused')
+const noJsonSetup = await call('POST', JSON.stringify({ action: 'refresh' }), { path: '/api/video2agent/setup', contentType: 'text/plain' })
+assert.equal(noJsonSetup.status, 415, 'setup installs must require a JSON body')
+assert.equal(__test.readManagedTools().ffmpeg, undefined, 'no managed ffmpeg is recorded in a fresh home')
+assert.equal(__test.managedToolEnv({ PATH: process.env.PATH }).FFMPEG_BIN, undefined, 'no FFMPEG_BIN without a managed install')
 
 const doctor = await call('GET', undefined, { path: '/api/video2agent/doctor' })
 assert.equal(doctor.status, 502, 'doctor route must not fake success when the CLI is missing')

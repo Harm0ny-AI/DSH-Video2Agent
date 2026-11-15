@@ -84,7 +84,7 @@
 ## 快速开始
 
 **环境：** Python 3.11+、FFmpeg（在 `PATH` 中），以及 DSH（用插件界面时需要）。
-从插件市场安装的只是 DSH 集成层：实际处理视频还需要先装 CLI ——`pip install video2agent`（FFmpeg 缺失时先 `winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg`，或设置 `FFMPEG_BIN`）。
+从插件市场安装的只是 DSH 集成层：实际处理视频还需要 CLI 和 FFmpeg。安装后打开插件设置页的「环境检查」，缺什么可以一键安装（CLI 走 pip，FFmpeg 走 winget/brew），也可以手动 `pip install video2agent`（FFmpeg 缺失时先 `winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg`，或设置 `FFMPEG_BIN`）。
 视频没有字幕时，才需要语音模型（`small` 约 464 MB，**不会自动下载**，用 `video2agent models download` 显式安装）。
 
 已发布到 PyPI 和 npm，可以直接安装：

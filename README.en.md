@@ -95,7 +95,7 @@ and batch classification stay in the CLI behind `--confirm`, and cookies stay lo
 ## Quick start
 
 **Requirements:** Python 3.11+, FFmpeg on `PATH`, and DSH for the plugin surface.
-The marketplace install is only the DSH integration layer; video work needs the CLI: `pip install video2agent`. Missing FFmpeg? `winget install Gyan.FFmpeg` (Windows), `brew install ffmpeg` (macOS), `apt install ffmpeg` (Linux), or point `FFMPEG_BIN` at an existing binary.
+The marketplace install is only the DSH integration layer; video work needs the CLI and FFmpeg. After installing, the plugin settings page has an environment check with one-click installs (CLI via pip, FFmpeg via winget/brew); or do it manually: `pip install video2agent`. Missing FFmpeg? `winget install Gyan.FFmpeg` (Windows), `brew install ffmpeg` (macOS), `apt install ffmpeg` (Linux), or point `FFMPEG_BIN` at an existing binary.
 A speech model is only needed when a video has no captions (about 464 MB for `small`).
 
 Published on PyPI and npm — install directly:

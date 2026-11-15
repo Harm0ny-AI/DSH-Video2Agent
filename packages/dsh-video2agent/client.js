@@ -1979,6 +1979,84 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // Environment check + one-click install. The plugin cannot run the Python
+    // CLI by itself, so this card is where a new user finds out what is missing
+    // and fixes it without a terminal. Installs are initiated here only.
+    function EnvironmentCard() {
+      const [setup, setSetup] = React.useState({ state: 'loading', data: null })
+      const [busy, setBusy] = React.useState('')
+      const [log, setLog] = React.useState('')
+      const load = async () => {
+        try {
+          const response = await fetch('/api/video2agent/setup')
+          const data = await response.json().catch(() => null)
+          if (!response.ok || !data || data.ok === false) throw new Error('read failed')
+          setSetup({ state: 'ready', data })
+        } catch {
+          setSetup((current) => ({ ...current, state: 'error' }))
+        }
+      }
+      React.useEffect(() => { load() }, [])
+      const install = async (action) => {
+        setBusy(action)
+        setLog('')
+        try {
+          const response = await fetch('/api/video2agent/setup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+          })
+          const data = await response.json().catch(() => null)
+          if (data && data.status) setSetup({ state: 'ready', data: data.status })
+          if (data && data.ok === false) {
+            const error = (data.error && [data.error.message, data.error.remedy].filter(Boolean).join('：')) || '安装失败'
+            setLog(error + (data.output ? '\n' + data.output : ''))
+          } else if (data && data.output) {
+            setLog(data.output)
+          }
+        } catch (e) {
+          setLog(String((e && e.message) || e))
+        } finally {
+          setBusy('')
+        }
+      }
+      const data = setup.data
+      const row = (label, item, hint) => {
+        const value = item && typeof item === 'object' ? item : { ok: false, detail: '未知' }
+        return h('div', { 'data-vp-env-row': '', style: { display: 'flex', gap: '10px', alignItems: 'baseline', padding: '3px 0' } },
+          h('span', { style: { minWidth: '132px', fontWeight: '600' } }, label),
+          h('span', { 'data-vp-env-state': value.ok ? 'ok' : 'missing', style: { minWidth: '44px', color: value.ok ? 'var(--vp-ok,#2ea043)' : 'var(--vp-bad,#d9534f)' } }, value.ok ? '正常' : '缺失'),
+          h('span', { style: { opacity: '.72', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, hint || value.detail || ''),
+        )
+      }
+      return h('div', { 'data-vp-env': '', style: { borderTop: '1px solid rgba(128,128,128,.16)', paddingTop: '12px', marginTop: '2px' } },
+        h('div', { 'data-vp-bili-head': '' }, h('span', { 'data-vp-bili-title': '' }, '环境检查')),
+        h('div', { 'data-vp-bili-hint': '', style: { marginTop: '2px' } }, '处理视频需要 Python 3.11+、video2agent CLI 和 FFmpeg；缺什么可以在这里直接装。'),
+        setup.state === 'error'
+          ? h('div', { 'data-vp-bili-err': '' }, '读取失败，点“重新检测”重试。')
+          : setup.state === 'loading' || !data
+            ? h('div', { 'data-vp-bili-hint': '', style: { marginTop: '6px' } }, '检测中…')
+            : h('div', { style: { marginTop: '4px' } },
+              row('Python 3.11+', data.python),
+              row('video2agent CLI', data.cli),
+              row('FFmpeg / ffprobe', data.ffmpeg),
+              h('div', { 'data-vp-bili-actions': '', style: { marginTop: '8px', flexWrap: 'wrap' } },
+                h('button', { 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => load() }, busy ? '请稍候…' : '重新检测'),
+                data.canInstall && data.canInstall.cli
+                  ? h('button', { 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => install('install-cli') }, busy === 'install-cli' ? '安装中…' : '一键安装 CLI')
+                  : null,
+                data.canInstall && data.canInstall.ffmpeg
+                  ? h('button', { 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => install('install-ffmpeg') }, busy === 'install-ffmpeg' ? '安装中…' : '一键安装 FFmpeg')
+                  : null,
+              ),
+              data.python && !data.python.ok
+                ? h('div', { 'data-vp-bili-hint': '', style: { marginTop: '6px' } }, data.hints && data.hints.python ? data.hints.python : '先安装 Python 3.11+。')
+                : null,
+              log ? h('pre', { 'data-vp-env-log': '', style: { marginTop: '8px', maxHeight: '160px', overflow: 'auto', fontSize: '11px', whiteSpace: 'pre-wrap' } }, log) : null,
+            ),
+      )
+    }
+
     function SettingsSection(props) {
       const settings = useSettings()
       const settingsState = useSettingsState()
@@ -2415,6 +2493,8 @@ window.__ModuleLoader__.load({
       return h('div', { 'data-vp-settings': '', 'data-loading': (cloud.state === 'loading' || models.state === 'loading') ? '1' : undefined },
         h('h1', { 'data-vp-settings-title': '' }, 'Video2Agent'),
         h('p', { 'data-vp-settings-note': '' }, '云模型、B 站、本机模型和界面设置。'),
+
+        EnvironmentCard(),
 
         h('div', { 'data-vp-cloud': '' },
           h('div', { 'data-vp-bili-head': '' },

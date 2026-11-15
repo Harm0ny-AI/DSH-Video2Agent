@@ -133,6 +133,7 @@ function fakeCtx({ withWebServer = false, provideWebServer = null } = {}) {
     '/api/video2agent/resolve',
     '/api/video2agent/retry',
     '/api/video2agent/settings',
+    '/api/video2agent/setup',
   ])
 }
 
