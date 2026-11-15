@@ -364,7 +364,7 @@ function cliError(r) {
   const code = r.code === -2 ? 'E_TIMEOUT' : r.code === -1 ? 'E_SPAWN' : 'E_CLI'
   const message = String(r.err || r.out || 'video2agent failed').slice(0, 1000)
   const remedy = code === 'E_SPAWN'
-    ? 'Install the video2agent CLI (pip install "git+https://github.com/Harm0ny-AI/DSH-Video2Agent.git", or a wheel from Releases) or set VIDEO2AGENT_BIN to its full path.'
+    ? 'Install the video2agent CLI: `pip install video2agent` (needs Python 3.11+), then reopen the app; or set VIDEO2AGENT_BIN to its full path. FFmpeg is also required (`winget install Gyan.FFmpeg` on Windows, `brew install ffmpeg` on macOS, `apt install ffmpeg` on Linux) — `video2agent doctor` checks both.'
     : code === 'E_TIMEOUT'
       ? 'Reduce the batch/limit and check the account before retrying; video ingest can use --detach and poll jobs.'
       : 'Run video2agent doctor and inspect the CLI error.'

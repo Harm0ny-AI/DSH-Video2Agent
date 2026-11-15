@@ -20,7 +20,7 @@ from typing import Any, Iterator
 import numpy as np
 
 from .db import Database
-from .util import Video2AgentError, no_window_kwargs, not_ready_error
+from .util import Video2AgentError, install_hint, no_window_kwargs, not_ready_error
 
 DECODE_W, DECODE_H = 160, 90
 ROWS, COLS = 5, 8
@@ -59,8 +59,8 @@ def _require_tool(name: str) -> str:
     if not found:
         raise Video2AgentError(
             "E_FFMPEG",
-            f"{name} not found on PATH",
-            "Install FFmpeg and reopen the terminal (video2agent doctor checks this).",
+            f"{name} 未安装或不在 PATH 上（视频探测/抽帧需要它）。",
+            install_hint(name),
         )
     return found
 

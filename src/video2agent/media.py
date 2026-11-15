@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import tempfile
 import urllib.request
@@ -21,11 +22,11 @@ except Exception:
 
 
 def _ffmpeg() -> str:
-    return which("ffmpeg") or "ffmpeg"
+    return os.environ.get("FFMPEG_BIN") or which("ffmpeg") or "ffmpeg"
 
 
 def _ffprobe() -> str:
-    return which("ffprobe") or "ffprobe"
+    return os.environ.get("FFPROBE_BIN") or which("ffprobe") or "ffprobe"
 
 
 def _fps(value: str | None) -> float | None:

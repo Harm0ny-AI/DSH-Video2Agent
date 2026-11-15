@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -230,6 +231,31 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
+FFMPEG_TOOLS = ("ffmpeg", "ffprobe")
+
+
+def install_hint(tool: str) -> str:
+    """A copy-pasteable install command for an external tool we shell out to.
+
+    The agent (or the user) gets this text from a failure, so it must name the
+    real command for the platform instead of "install FFmpeg somehow" — a user in
+    DSH asks the assistant to fix the error, and this is what it will run.
+    """
+    name = str(tool).lower()
+    if name not in FFMPEG_TOOLS:
+        return f"Install {tool} and make sure it is on PATH."
+    if sys.platform == "win32":
+        command = "winget install Gyan.FFmpeg"
+    elif sys.platform == "darwin":
+        command = "brew install ffmpeg"
+    else:
+        command = "sudo apt install ffmpeg"
+    return (
+        f"{command}（装好后重开终端）。"
+        "如果 FFmpeg 已经装在别的目录，把 FFMPEG_BIN / FFPROBE_BIN 设为它的完整路径。"
+    )
+
+
 def _subprocess_kwargs(cwd: str | Path | None = None) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "cwd": str(cwd) if cwd else None,
@@ -269,6 +295,13 @@ def run(cmd: Sequence[str], *, timeout: float | None = 120, cwd: str | Path | No
     try:
         proc = subprocess.run(args, timeout=timeout, **_subprocess_kwargs(cwd))
     except FileNotFoundError as e:
+        tool = Path(args[0]).name.lower()
+        if tool in FFMPEG_TOOLS:
+            raise Video2AgentError(
+                "E_FFMPEG",
+                f"{tool} 未安装或不在 PATH 上（视频探测/抽帧需要它）。",
+                install_hint(tool),
+            ) from e
         raise Video2AgentError("E_TOOL_MISSING", f"Command not found: {args[0]}", "Run: video2agent doctor") from e
     except subprocess.TimeoutExpired as e:
         raise Video2AgentError("E_TIMEOUT", f"Command timed out after {timeout}s: {args[0]}", "Try a shorter range or smaller profile.") from e
@@ -320,5 +353,11 @@ def iter_json_lines(text: str) -> Iterable[dict[str, Any]]:
 def require_tool(name: str, remedy: str | None = None) -> str:
     path = which(name)
     if not path:
+        if name.lower() in FFMPEG_TOOLS:
+            raise Video2AgentError(
+                "E_FFMPEG",
+                f"{name} 未安装或不在 PATH 上（视频探测/抽帧需要它）。",
+                remedy or install_hint(name),
+            )
         raise Video2AgentError("E_TOOL_MISSING", f"Required tool not found: {name}", remedy or "Run: video2agent doctor")
     return path

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .util import ensure_dir, human_bytes, which
+from .util import ensure_dir, human_bytes, install_hint, which
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "asr_model": "small",
@@ -169,7 +169,7 @@ def doctor(cfg: Config | None = None) -> dict[str, Any]:
     add("python", sys.version_info >= (3, 11), sys.version.split()[0], "Install Python 3.11 or newer.")
     for tool in ("ffmpeg", "ffprobe"):
         p = which(tool)
-        add(tool, bool(p), p or "not found", "Install ffmpeg and make sure it is on PATH.")
+        add(tool, bool(p), p or "not found", install_hint(tool))
     ytdlp = which("yt-dlp")
     add("yt-dlp", bool(ytdlp), ytdlp or "not found", "pip install yt-dlp", required=False)
     add("yt_dlp_python", package_available("yt_dlp"), "python package", "pip install yt-dlp", required=False)
