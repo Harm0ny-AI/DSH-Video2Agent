@@ -90,6 +90,14 @@ and batch classification stay in the CLI behind `--confirm`, and cookies stay lo
 **Requirements:** Python 3.11+, FFmpeg on `PATH`, and DSH for the plugin surface.
 A speech model is only needed when a video has no captions (about 464 MB for `small`).
 
+Published on PyPI and npm — install directly:
+
+```bash
+pip install video2agent
+dsh plugin --profile web add dsh-video2agent
+```
+
+Use the clone route below for source or development.
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent
@@ -169,7 +177,7 @@ The dark social card and marketplace card live in [`docs/assets/`](https://githu
 
 - **Release candidate 0.1.0.** CLI and Skill are stable; the DSH plugin is verified in an isolated profile.
 - Local-first by default; no GPU required. Cloud is optional.
-- PyPI/npm publication is pending; the marketplace entry is prepared in the awesome-list format.
+- Published on PyPI and npm (`pip install video2agent`, `npm i dsh-video2agent`); the marketplace entry is prepared in the awesome-list format.
 - Known limits: single-character CJK search, OCR on tiny/low-contrast text, counting across shots.
 
 ## Marketplace

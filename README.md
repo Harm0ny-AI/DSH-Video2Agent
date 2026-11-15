@@ -79,6 +79,14 @@
 **环境：** Python 3.11+、FFmpeg（在 `PATH` 中），以及 DSH（用插件界面时需要）。
 视频没有字幕时，才需要语音模型（`small` 约 464 MB）。
 
+已发布到 PyPI 和 npm，可以直接安装：
+
+```bash
+pip install video2agent
+dsh plugin --profile web add dsh-video2agent
+```
+
+想用源码或参与开发，走下面的克隆方式。
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent
@@ -152,7 +160,7 @@ sequenceDiagram
 
 - **0.1.0 候选版。** CLI 和 Skill 已经稳定；DSH 插件也在隔离环境里验证过。
 - 默认在本地跑，不需要 GPU；云端可选。
-- PyPI/npm 还没发布；插件市场条目已按 awesome 列表格式准备好。
+- 已发布到 PyPI 和 npm：`pip install video2agent`、`npm i dsh-video2agent`；插件市场条目已按 awesome 列表格式准备好。
 - 已知限制：单字中文搜索、小字/低对比度文字的 OCR、跨镜头计数。
 
 ## 插件市场
