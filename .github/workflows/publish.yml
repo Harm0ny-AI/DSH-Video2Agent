@@ -1,4 +1,4 @@
-name: publish
+﻿name: publish
 
 # Publishing is token-free: PyPI and npm exchange a GitHub OIDC token for a
 # short-lived publish credential (trusted publishing). No API keys in secrets.
@@ -57,7 +57,7 @@ jobs:
         with:
           packages-dir: dist
           # Skip the plugin tarball; PyPI only takes wheel + sdist.
-          skip-existing: false
+          skip-existing: true
 
   npm:
     needs: build
