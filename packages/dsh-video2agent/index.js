@@ -1195,6 +1195,20 @@ export function apply(ctx, config) {
     if (before.ffmpeg.ok) return { ok: true, already: true, output: '', status: before }
     let r = null
     if (process.platform === 'win32') {
+      // An FFmpeg can be installed but missing from this process's PATH (the app
+      // started before the install). Adopt it instead of running an upgrade the
+      // user did not ask for.
+      const installedRoot = winGetPackageRoot()
+      if (fs.existsSync(installedRoot)) {
+        const packageDir = fs.readdirSync(installedRoot).find((name) => name.toLowerCase().includes('ffmpeg')) || ''
+        const base = packageDir ? path.join(installedRoot, packageDir) : installedRoot
+        const existing = findExecutable(base, 'ffmpeg.exe')
+        if (existing) {
+          saveManagedFfmpeg(existing, findExecutable(base, 'ffprobe.exe') || '', 'found')
+          const adopted = await setupStatus()
+          if (adopted.ffmpeg.ok) return { ok: true, already: true, adopted: true, output: '', status: adopted }
+        }
+      }
       const where = await runCommand('where', ['winget'], 20000)
       if (where.code !== 0) {
         return {
