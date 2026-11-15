@@ -24,6 +24,7 @@ from .text import (
     coverage_score,
     find_sidecar,
     fts_match_query,
+    has_kana,
     language_hint,
     leading_timecode,
     literal_terms,
@@ -207,6 +208,26 @@ def _wanted_visual(query: str) -> list[str]:
 def _noop(stage: str, pct: float, msg: str) -> None:
     return None
 
+
+def _asr_language_hint(language: str | None, resolved: dict[str, Any]) -> str | None:
+    """The language handed to local ASR: an explicit choice, else a safe prior.
+
+    With no language, faster-whisper guesses from the first 30 seconds of audio.
+    A Chinese Bilibili video with loud background music came back as Japanese
+    (measured 2026-11-15: 四千元台 / 五千元ちょい), which then cost the model a
+    line-by-line read. A Chinese title on Bilibili is a far better prior than that
+    guess; a title with kana keeps auto-detection so Japanese content is not
+    forced into Chinese.
+    """
+    if language:
+        return str(language)
+    if str(resolved.get("language") or "") != "zh":
+        return None
+    if "bili" not in str(resolved.get("platform") or "").lower():
+        return None
+    if has_kana(str(resolved.get("title") or "")):
+        return None
+    return "zh"
 
 def _warn(code: str, message: str, severity: str = "warn", remedy: str | None = None) -> dict[str, Any]:
     return {"code": code, "severity": severity, "message": message, "remedy": remedy}
@@ -552,6 +573,8 @@ def analyze(
 
     step("resolving", 0.02, "解析来源", 0)
     resolved = resolve_source(source, cfg)
+    # One language prior for the whole analysis: captions do not need it, ASR does.
+    asr_language = _asr_language_hint(language, resolved)
     tick("resolve")
     vid = _video_id_for(resolved)
     info = resolved.get("probe") or probe(resolved["path"])
@@ -989,7 +1012,7 @@ def analyze(
                     model_size=str(asr_model or "small"),
                     device=str(cfg.get("asr_device") or "auto"),
                     compute_type=str(cfg.get("asr_compute_type") or "int8"),
-                    language=language,
+                    language=asr_language,
                     beam_size=int(cfg.get("asr_beam_size") or 1),
                     word_timestamps=bool(cfg.get("asr_word_timestamps")),
                     cpu_threads=int(cfg.get("asr_cpu_threads") or 0),
@@ -1002,7 +1025,18 @@ def analyze(
                     "seconds": round(time.perf_counter() - asr_started, 1),
                     "segments": len(asr_segments),
                     "no_speech": not asr_segments,
+                    # What was requested vs what the model heard; a mis-detected
+                    # transcript is otherwise impossible to diagnose afterwards.
+                    "language": lang or asr_language,
+                    "language_hint": asr_language,
                 }
+                if asr_language and not language:
+                    warnings.append(_warn(
+                        "ASR_LANGUAGE_HINT",
+                        f"按标题语言用 {asr_language} 转写（自动检测曾把中文视频判成日语）。",
+                        severity="info",
+                        remedy="转写语言仍不对时，重跑 ingest 并传 language 指定语言。",
+                    ))
                 segments = asr_segments
                 transcript_source = "asr"
                 if lang and not language:
@@ -2811,6 +2845,48 @@ def _media_end(video: dict[str, Any]) -> int:
     return int(video.get("duration_ms") or 0)
 
 
+def _fit_request_times(video: dict[str, Any], *, at_ms: int | None = None, start_ms: int | None = None,
+                        end_ms: int | None = None) -> dict[str, Any]:
+    """Fit a request to what the media can answer, instead of failing on rounding.
+
+    Two real calls from 2026-11-15 cost a round trip each and returned nothing:
+    `read --start 18:50 --end 22:14` on a 22:13.100 video (0.9s over), and
+    `read --start 940000 --end 1130000` where the numbers were milliseconds.
+    An end within a small tolerance of the media end is clamped (reading "to the
+    end" is legitimate); a bare number whose millisecond reading is inside the
+    media is a unit slip, not an out-of-range request. A request that is genuinely
+    far outside still raises in _require_in_range.
+    """
+    media_end = _media_end(video)
+    fitted: dict[str, Any] = {
+        "at_ms": at_ms, "start_ms": start_ms, "end_ms": end_ms,
+        "unit_fixed": False, "clamped_end": False, "clamped_at": False, "clamped_ms": None,
+    }
+    if not media_end:
+        return fitted
+    # Only a wildly-out-of-range number is a unit slip: 940000 (seconds) is 705x a
+    # 22-minute video, while a 20s request on a 10s clip is just over the end and
+    # must stay an error.
+    slip_floor = max(media_end * 20, 60 * 60 * 1000)
+    for key in ("at_ms", "start_ms", "end_ms"):
+        value = fitted[key]
+        if value is not None and value > slip_floor and value // 1000 <= media_end:
+            fitted[key] = int(value // 1000)
+            fitted["unit_fixed"] = True
+            fitted["clamped_ms"] = int(value // 1000)
+    tolerance = max(2_000, media_end // 100)
+    if fitted["end_ms"] is not None and media_end < fitted["end_ms"] <= media_end + tolerance:
+        fitted["end_ms"] = media_end
+        fitted["clamped_end"] = True
+    if fitted["at_ms"] is not None and media_end <= fitted["at_ms"] <= media_end + tolerance:
+        fitted["at_ms"] = max(0, media_end - 1)
+        fitted["clamped_at"] = True
+    return fitted
+
+
+
+
+
 # How far a stored OCR anchor may be from the asked moment and still answer it.
 # Beyond this the answer belongs to another moment: read the requested frame instead.
 OCR_FALLBACK_MAX_MS = 5000
@@ -3314,8 +3390,9 @@ def ocr_window(cfg: Config, video_id: str, *, start_ms: int, end_ms: int,
     with Database(cfg.db_path) as db:
         video = require_ready(db.get_video(video_id), video_id)
         _require_media(video)
-        start = int(start_ms)
-        end = int(end_ms)
+        fitted = _fit_request_times(video, start_ms=int(start_ms), end_ms=int(end_ms))
+        start = int(fitted["start_ms"] or 0)
+        end = int(fitted["end_ms"] or 0)
         _require_in_range(video, start_ms=start, end_ms=end)
     if end <= start:
         raise Video2AgentError("E_ARGS", "区间为空：--end 必须晚于 --start", "把 --end 放到 --start 之后。")
@@ -3569,6 +3646,9 @@ def evidence(cfg: Config, *, video_id: str, at_ms: int | None = None, start_ms: 
                 "时间从 0 开始；要引用开头，用 --at 0。",
             )
         at_ms = int(at_ms or 0)
+        requested_at = at_ms
+        fitted = _fit_request_times(video, at_ms=at_ms, start_ms=start_ms, end_ms=end_ms)
+        at_ms, start_ms, end_ms = fitted["at_ms"], fitted["start_ms"], fitted["end_ms"]
         media_end = _require_in_range(video, at_ms=at_ms, start_ms=start_ms, end_ms=end_ms)
         seg = db.get_segment_at(video_id, at_ms) if (start_ms is None and end_ms is None) else None
         if seg:
@@ -3833,13 +3913,14 @@ def evidence(cfg: Config, *, video_id: str, at_ms: int | None = None, start_ms: 
             "range": {"start_ms": start, "end_ms": end, "timecode": format_timecode(start)},
             # Say what was asked for versus what the media can actually give, so a
             # snapped citation is visible instead of looking exact.
-            "requested_ms": None if range_only else (at_ms if at_ms is not None else None),
+            "requested_ms": None if range_only else (requested_at if requested_at is not None else None),
             "range_requested": bool(range_only),
             "media_end_ms": media_end,
-            "requested_timecode": format_timecode(at_ms) if at_ms is not None else None,
+            "requested_timecode": format_timecode(requested_at) if requested_at is not None else None,
             # True only when the requested moment itself was moved (clamped to the
             # media); a transcript segment starting earlier is not a snap.
-            "snapped": bool(at_ms is not None and image_ms is not None and abs(image_ms - at_ms) > 1500),
+            "snapped": bool(fitted["clamped_at"] or fitted["clamped_end"]
+                            or (at_ms is not None and image_ms is not None and abs(image_ms - at_ms) > 1500)),
             # What the picture actually is, so a citation never pretends to be exact:
             # frame_ms is the moment of images[0] (null when no image is returned), and
             # ocr_frame_ms is the frame the returned text was read from — with
@@ -4056,8 +4137,9 @@ def frames(cfg: Config, video_id: str, *, at_ms: int | None = None, count: int =
         windows_meta: list[dict[str, Any]] = []
         coverage: dict[str, Any] = {}
         if windows is not None:
-            start = int(start_ms or 0)
-            end = int(end_ms or 0)
+            fitted = _fit_request_times(video, start_ms=int(start_ms or 0), end_ms=int(end_ms or 0))
+            start = int(fitted["start_ms"] or 0)
+            end = int(fitted["end_ms"] or 0)
             _require_in_range(video, start_ms=start, end_ms=end)
             span = end - start
             if span <= 0:
@@ -4084,6 +4166,9 @@ def frames(cfg: Config, video_id: str, *, at_ms: int | None = None, count: int =
             _validate_change_budget(mode, max_frames)
             start = int(start_ms if start_ms is not None else (at_ms or 0))
             end = int(end_ms if end_ms is not None else start + 1000)
+            fitted = _fit_request_times(video, start_ms=start, end_ms=end)
+            start = int(fitted["start_ms"] or 0)
+            end = int(fitted["end_ms"] or 0)
             _require_in_range(video, start_ms=start, end_ms=end)
             candidate_cap = min(DENSE_CANDIDATE_MAX, max(1, int(max_frames or 12)) * 2) if mode == "change" else None
             times, dense_warnings, effective_end = _dense_times(start, end, fps, max_frames, candidate_cap=candidate_cap)
@@ -4100,7 +4185,9 @@ def frames(cfg: Config, video_id: str, *, at_ms: int | None = None, count: int =
         else:
             if at_ms is None:
                 at_ms = 0
-            _require_in_range(video, at_ms=int(at_ms))
+            fitted = _fit_request_times(video, at_ms=int(at_ms))
+            at_ms = int(fitted["at_ms"] or 0)
+            _require_in_range(video, at_ms=at_ms)
             times = [int(at_ms) + i * 1000 for i in range(max(1, min(count, 8)))]
             dense_warnings = []
         media_end = _media_end(video)

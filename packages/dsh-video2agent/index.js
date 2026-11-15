@@ -541,6 +541,8 @@ function commandArgs(args) {
     const cookies = persistedCookiesPath()
     if (cookies) ingest.push('--cookies', cookies)
     if (args.force) ingest.push('--force')
+    // An explicit ASR language is the only repair for a mis-detected transcript.
+    if (args.language && !badPositional(args.language)) ingest.push('--language', String(args.language))
     ingest.push('--detach', '--json')
     return ingest
   }
@@ -550,7 +552,10 @@ function commandArgs(args) {
     // A blocking wait beats asking the model to poll. `wait_ms` is honoured by
     // bounding the CLI's own wait to it (capped below the tool's process timeout),
     // so the call returns before the plugin kills the process.
-    const seconds = clampInt(Number(args.wait_ms) / 1000, 300, 5, 540)
+    // A single wait must fit inside the harness's per-program budget (~120s in
+    // run_code): a 200s wait made the whole program die with the wait half done
+    // and nothing to show. 90s leaves room to parse and answer.
+    const seconds = clampInt(Number(args.wait_ms) / 1000, 45, 5, 90)
     return ['jobs', '--id', String(args.job_id), '--wait', '--wait-timeout', String(seconds), '--json']
   }
   if (command === 'overview') {
@@ -1811,6 +1816,31 @@ export function apply(ctx, config) {
     }
   }
 
+  // Shape of a timed-out wait. The CLI answers E_TIMEOUT without the row, so this
+  // used to hardcode state:'running' — a job that was only queued behind the single
+  // ingest slot looked like it was making progress (real turn 2026-11-15: three
+  // polls before the download failure surfaced). The worker mirror knows better.
+  function timeoutPayload(jobId, waitedMs) {
+    const id = String(jobId || '')
+    const mirror = readJobSidecar(id) || {}
+    const state = String(mirror.state || 'running')
+    const waited = Math.round(Number(waitedMs) || 0)
+    const payload = {
+      ok: true,
+      job_id: id,
+      state,
+      still_running: true,
+      waited_ms: waited,
+    }
+    if (mirror.stage) payload.stage = String(mirror.stage)
+    if (mirror.message) payload.message = String(mirror.message)
+    if (Number.isFinite(Number(mirror.progress))) payload.progress = Number(mirror.progress)
+    payload.note = state === 'queued' || mirror.stage === 'queued'
+      ? '排队中：一次只运行一个入库任务，这个任务还没开始。不要反复轮询；先处理主视频，需要它时再用一次 wait_ms。'
+      : '仍在处理。不要循环等待：只有结论必须依赖这个任务时再等一次（≤90s），否则先读已经完成的视频。'
+    return payload
+  }
+
   function readRawUiSettings() {
     try {
       const parsed = JSON.parse(fs.readFileSync(settingsPath(), 'utf8'))
@@ -2272,6 +2302,7 @@ function guardWrite(req, res) {
   __test.discoveryLastPath = discoveryLastPath
   const campaigns = createCampaignManager({ home: video2agentHome, startShortlistJobs, readJobSidecar })
   __test.campaigns = campaigns
+  __test.timeoutPayload = timeoutPayload
 
 
   // Register a plain registry-ready definition instead of importing
@@ -2661,7 +2692,8 @@ function guardWrite(req, res) {
           description: 'For shortlist: optional video_id -> one-sentence reason shown in the status table.',
         },
         job_id: { type: 'string', description: 'ingest: job id to poll.' },
-        wait_ms: { type: 'number', description: 'ingest: block until the job finishes (ms).' },
+        wait_ms: { type: 'number', description: 'ingest: wait for one job (ms, clamped to 5000-90000). One wait per job: never loop waits over several jobs in one program; read already-finished videos instead.' },
+        language: { type: 'string', description: 'ingest: ASR language when the video has no captions (zh, en, ja, ...). Omit to auto-detect; pass it when the transcript came out in the wrong language.' },
         at: { type: 'string', description: 'evidence/frames: the moment (01:12:34, 548s, or 548000ms); comma list for evidence.' },
         timestamp: { type: 'string', description: 'Alias of at (evidence/frames); at wins when both are set.' },
         max_images: { type: 'number', description: 'evidence: image budget for a multi-moment call (1-6).' },
@@ -2774,7 +2806,7 @@ function guardWrite(req, res) {
       // process timeout, otherwise the wait is killed before the CLI answers.
       const waiting = cliCommand === 'jobs' && args.wait_ms
       const timeout = waiting
-        ? Math.min(600000, clampInt(Number(args.wait_ms), 300000, 5000, 540000) + 60000)
+        ? Math.min(105000, clampInt(Number(args.wait_ms), 45000, 5000, 90000) + 15000)
         : 600000
       const cmd = cliCommand
       const accountWrite = cmd === 'account' && ['create-folder', 'rename-folder', 'add', 'classify-apply'].includes(String(args.account_action || ''))
@@ -2829,17 +2861,9 @@ function guardWrite(req, res) {
       // CLI reports E_TIMEOUT, and flattening that to the message text made the
       // model's JSON.parse throw and abort the turn. Answer with a normal payload.
       if (cliCommand === 'jobs' && structured && structured.code === 'E_TIMEOUT') {
-        // commandArgs clamps the wait to 5-540s; report what actually elapsed.
-        const waitedSeconds = Math.min(540, Math.max(5, Math.round((Number(args.wait_ms) || 0) / 1000)))
-        const payload = {
-          ok: true,
-          job_id: String(args.job_id || ''),
-          state: 'running',
-          still_running: true,
-          waited_ms: waitedSeconds * 1000,
-          note: 'The job is still running, or still queued behind another ingest. Poll again with a longer wait_ms.',
-        }
-        return { ok: true, text: JSON.stringify(payload) }
+        // commandArgs clamps the wait to 5-90s; report what actually elapsed.
+        const waitedSeconds = Math.min(90, Math.max(5, Math.round((Number(args.wait_ms) || 0) / 1000)))
+        return { ok: true, text: JSON.stringify(timeoutPayload(args.job_id, waitedSeconds * 1000)) }
       }
       // discover is search-only. It returns candidates to the model but does not
       // publish a card: the model filters them and calls shortlist. This is what

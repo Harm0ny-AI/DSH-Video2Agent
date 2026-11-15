@@ -8,7 +8,15 @@ from pathlib import Path
 from video2agent import cli
 from video2agent.config import load_config
 from video2agent.db import Database
-from video2agent.pipeline import _clip, _require_in_range, evidence, overview, search, visual_map
+from video2agent.pipeline import (
+    _clip,
+    _fit_request_times,
+    _require_in_range,
+    evidence,
+    overview,
+    search,
+    visual_map,
+)
 from video2agent.util import Video2AgentError
 
 VID = "vid_boundary"
@@ -80,11 +88,35 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "E_OUT_OF_RANGE")
         self.assertIn("00:00:10", ctx.exception.message + ctx.exception.remedy)
 
-    def test_evidence_at_the_exact_end_is_rejected(self):
-        # 10.0s is not addressable: the last frame starts at 9.96s.
-        with self.assertRaises(Video2AgentError) as ctx:
-            evidence(self.cfg, video_id=VID, at_ms=MEDIA_MS, image_budget=0)
-        self.assertEqual(ctx.exception.code, "E_OUT_OF_RANGE")
+    def test_evidence_at_the_exact_end_clamps_instead_of_failing(self):
+        # 10.0s is not addressable (last frame starts at 9.96s), but asking for the
+        # exact end is rounding, not a mistake: it clamps to the last addressable
+        # moment instead of costing the caller a round trip (real turn 2026-11-15:
+        # read --end 22:14 on a 22:13.100 video returned nothing).
+        data = evidence(self.cfg, video_id=VID, at_ms=MEDIA_MS, image_budget=0)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["requested_ms"], MEDIA_MS)
+        self.assertLessEqual(data["range"]["end_ms"], MEDIA_MS)
+
+    def test_an_end_rounded_past_the_media_is_clamped(self):
+        data = evidence(self.cfg, video_id=VID, start_ms=5_000, end_ms=MEDIA_MS + 900, image_budget=0)
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["range"]["end_ms"], MEDIA_MS, "the end must be clamped to the media")
+
+    def test_a_millisecond_value_is_read_as_milliseconds_instead_of_raising(self):
+        # 940000 passed for 15:40 -> parse_time_ms reads seconds (940000000 ms, 261
+        # hours out); the same number as milliseconds is well inside the media, so
+        # it is a unit slip, not an out-of-range request.
+        video = {"duration_ms": 1_333_100, "status": "ready"}
+        fitted = _fit_request_times(video, start_ms=940_000_000, end_ms=1_130_000_000)
+        self.assertEqual(fitted["start_ms"], 940_000)
+        self.assertEqual(fitted["end_ms"], 1_130_000)
+        self.assertTrue(fitted["unit_fixed"])
+
+    def test_a_slightly_over_end_is_left_for_the_validator_in_evidence(self):
+        # Far over the media is a real mistake, not rounding: it must still error.
+        with self.assertRaises(Video2AgentError):
+            evidence(self.cfg, video_id=VID, start_ms=0, end_ms=99_000, image_budget=0)
 
     def test_evidence_inside_reports_request_and_media_end(self):
         data = evidence(self.cfg, video_id=VID, at_ms=8_000, image_budget=0)

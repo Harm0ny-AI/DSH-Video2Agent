@@ -69,7 +69,10 @@ A pasted URL → `find` with `url` (title/cover/duration, no download), then
 
 `ingest` with `source` (local path or URL) returns a job id. Never ingest a
 `find` candidate by URL again; the shortlist already started it. Must wait?
-`ingest` with `job_id` and `wait_ms`.
+`ingest` with `job_id` and `wait_ms` — once, one job (clamped to 90s; a program
+dies near 120s: no loops over several jobs). `queued` = the ingest slot is busy
+and the job has not started; do not poll it again. Wrong transcript language →
+`ingest` with `language`.
 
 ### 3. Read
 
@@ -91,9 +94,8 @@ timestamped transcript/OCR lines, keyframes, scene cuts, and coverage. Then:
 For a clip under ~6 minutes where the question is about **what was said** (not
 what was on screen), skip `outline` and call `read` directly: the whole
 transcript usually fits one reply (~150–800 tokens) versus ~1.4k tokens plus a
-contact-sheet image for `outline`. Six minutes is measured, not guessed: the
-6,000-character `read` cap covers ~8 minutes of a fast Chinese commentary
-(2,017 chars for 2.7 min) and ~5.5–7 minutes of English at 150–200 wpm. If the
+contact-sheet image for `outline`. Measured: the 6,000-character `read` cap
+covers ~8 min of fast Chinese commentary and ~5.5–7 min of English. If the
 reply carries `next_start_ms`, it was cut — switch to `search`/`outline` for
 the rest instead of paging. Use `outline` when you need structure, on-screen
 text, or visuals; use `perceive` for motion. If the user pastes the
@@ -103,8 +105,7 @@ for the moments that need a picture.
 ### 4. Look (evidence / frames)
 
 `evidence` with `at` returns the frame plus its on-screen text and transcript.
-Default 2 images; `images:0` for text only, `images:1` for one picture. This is
-the receipt to cite.
+Default 2 images; `images:0` for text only, `images:1` for one picture.
 
 `frames` is for what text cannot answer (counting, action, colour, layout):
 
@@ -134,9 +135,8 @@ duplicate frames, flicker) as numbers.
 
 ### 6. Account and export
 
-`admin` with `admin_action:"account"` reads favorites/history/folders; writes
-(create folder, add, classify, delete) are CLI-only and need `--confirm`. Folders
-are capped at 20 characters and 100 videos per write.
+`admin` with `admin_action:"account"` reads favorites/history/folders; writes are
+CLI-only (`--confirm`); folders ≤20 chars, ≤100 videos per write.
 
 `admin` with `admin_action:"export"` writes a knowledge pack only when asked.
 
@@ -148,15 +148,15 @@ are capped at 20 characters and 100 videos per write.
 - **A time at or past the media end is `E_OUT_OF_RANGE`**, not an empty success;
   the error carries the media length. A bare number in `at`/`start` means
   **seconds**; write `1234ms` or `HH:MM:SS.mmm` for milliseconds.
-- **Failures are answers.** If the tool returns `{ok:false,error:{code,message,remedy}}`,
-  report the code and what to do; never invent content or retry silently.
+- **Failures are answers.** On `{ok:false,error:{code,message,remedy}}`, report the
+  code and remedy; never invent content or retry silently.
 - **Text first, images second.** `transcript`/`search` answer most questions;
   every image costs tokens. Default `images:2`, use 0 or 1 when text suffices.
 - **A picture and its text come from the same frame** — trust `ocr_frame_ms`.
 - **Don't dump.** `read` is capped (default 6000 chars); `outline` is compact;
   use ranges and `next_start_ms`.
-- **Do not call a tool for every video.** If the question is about content, the
-  transcript is enough; `perceive` is for temporal/UI questions.
+- **Do not call a tool for every video**: the transcript answers content;
+  `perceive` is for temporal/UI questions.
 
 ## References
 

@@ -165,7 +165,7 @@ sequenceDiagram
 
 ## 状态
 
-- **0.1.0 已发布（2026-11-15）。** CLI、Skill 和 DSH 插件均可用，从 PyPI 或 npm 安装。
+- **0.1.1 已发布（2026-11-15）。** CLI、Skill 和 DSH 插件均可用，从 PyPI 或 npm 安装；0.1.1 修了「读到结尾被报错」「毫秒参数被当成秒」「中文被识别成日语」「进度环标错行」和「单次等待过长被杀」。`
 - 默认在本地跑，不需要 GPU；云端可选。
 - 已发布到 PyPI 和 npm：`pip install video2agent`、`npm i dsh-video2agent`；插件市场条目已按 awesome 列表格式准备好。
 - 已知限制：单字中文搜索、小字/低对比度文字的 OCR、跨镜头计数。

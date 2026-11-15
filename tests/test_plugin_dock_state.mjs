@@ -188,6 +188,14 @@ function findByAttr(node, attr) {
   if (typeof node.type === 'function') return findByAttr(node.type(node.props), attr)
   return null
 }
+function collectByAttr(node, attr) {
+  if (!node) return []
+  if (Array.isArray(node)) return node.flatMap((child) => collectByAttr(child, attr))
+  if (typeof node !== 'object') return []
+  if (typeof node.type === 'function') return collectByAttr(node.type(node.props), attr)
+  const self = node.props && node.props[attr] !== undefined ? [node] : []
+  return self.concat(collectByAttr(node.children || [], attr))
+}
 function findByChildText(node, needle) {
   if (!node) return null
   if (Array.isArray(node)) {
@@ -363,6 +371,42 @@ async function runBatch(sessionId, jobId, terminalState) {
   debug.__video2agentClearQueue(sid)
 }
 
+// The progress ring must mark the row that is actually processing. It used to
+// be the first non-terminal row, so a queued row above the running one took the
+// ring while the table still said 正在处理 on another row (reported 2026-11-15).
+{
+  const sid = 'ring-on-running'
+  debug.__video2agentSetQueue(sid, {
+    createdAt: Date.now(),
+    collapsed: false,
+    jobs: [
+      { job_id: 'job_ring_done', video_id: 'BV1ring01', title: '已完成视频', cover_url: 'https://i0.hdslb.com/bfs/archive/a.jpg', state: 'ready' },
+      { job_id: 'job_ring_queued', video_id: 'BV1ring02', title: '排队视频', cover_url: 'https://i0.hdslb.com/bfs/archive/b.jpg', state: 'queued' },
+      { job_id: 'job_ring_run', video_id: 'BV1ring03', title: '正在跑的视频', cover_url: 'https://i0.hdslb.com/bfs/archive/c.jpg', state: 'running' },
+    ],
+    evidence: null,
+  })
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/job?')) {
+      const id = new URL(String(url), 'http://localhost').searchParams.get('id')
+      return jobPayload(id, id === 'job_ring_run' ? 'running' : 'queued')
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(table, { session: { id: sid, running: true } })
+  await flush()
+  const rows = collectByAttr(inst.tree, 'data-vp-queue-row')
+  expect(rows.length === 3, 'expected three rows, got ' + rows.length)
+  const rowFor = (needle) => rows.find((row) => textOf(row).includes(needle))
+  const runningRow = rowFor('正在跑的视频')
+  const queuedRow = rowFor('排队视频')
+  expect(runningRow, 'the running row did not render')
+  expect(queuedRow, 'the queued row did not render')
+  expect(findByAttr(runningRow, 'data-vp-queue-ring-wrap'), 'the ring is not on the running row')
+  expect(!findByAttr(queuedRow, 'data-vp-queue-ring-wrap'), 'the ring sits on the queued row')
+  unmount(inst)
+  debug.__video2agentClearQueue(sid)
+}
 // A collapsed pill must show the row that is still working, not the primary:
 // after a dedupe the primary is already finished while the last row runs.
 {

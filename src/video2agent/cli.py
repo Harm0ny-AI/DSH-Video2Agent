@@ -45,6 +45,7 @@ try:
     from .db import Database
     from .export import export_html, export_json, export_knowledge, export_markdown
     from .pipeline import (
+        _fit_request_times,
         _require_in_range,
         _stored_caption_mismatch,
         analyze,
@@ -74,6 +75,7 @@ except Exception as _exc:  # pragma: no cover - exercised by the missing-dep tes
     compare_videos = None  # type: ignore[assignment]
     Database = None  # type: ignore[assignment]
     export_html = export_json = export_knowledge = export_markdown = None  # type: ignore[assignment]
+    _fit_request_times = None  # type: ignore[assignment]
     _require_in_range = None  # type: ignore[assignment]
     analyze = evidence = frames = list_videos = overview = None  # type: ignore[assignment]
     candidates = None  # type: ignore[assignment]
@@ -1637,9 +1639,27 @@ def main(argv: list[str] | None = None) -> int:
                         "这条视频的字幕内容与标题不匹配，整条转写不可信。",
                         f"运行 video2agent ingest \"{source}\" --force 重新分析；会丢弃错字幕并回退 ASR。",
                     )
+                fitted = _fit_request_times(video, start_ms=start, end_ms=end)
+                start, end = fitted["start_ms"], fitted["end_ms"]
                 _require_in_range(video, start_ms=start, end_ms=end)
                 segs = db.get_segments(args.video_id, start, end, limit=10000)
             warnings = []
+            if fitted["unit_fixed"]:
+                warnings.append({
+                    "code": "TIME_UNIT_FIXED",
+                    "message": f"参数看起来是按毫秒传的，已按 {fitted['clamped_ms']} ms 读取",
+                    "severity": "info",
+                    "remedy": "纯数字按秒解析；毫秒写 1234ms 或 00:01:23.456。",
+                })
+            if fitted["clamped_end"]:
+                media_end = int(video.get("duration_ms") or 0)
+                warnings.append({
+                    "code": "RANGE_CLAMPED",
+                    "message": f"请求的结尾超出媒体 0.1–2 秒，已截到 {format_timecode(media_end)}",
+                    "severity": "info",
+                    "remedy": None,
+                })
+
             if start is not None and not segs:
                 media_end = int(video.get("duration_ms") or 0)
                 warnings.append({

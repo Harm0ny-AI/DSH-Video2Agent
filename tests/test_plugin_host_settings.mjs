@@ -441,6 +441,35 @@ assert.equal(flagValue(denseArgv, '--end'), '00:03')
 assert.equal(flagValue(denseArgv, '--fps'), '5')
 assert.equal(flagValue(denseArgv, '--max'), '10')
 assert.equal(flagValue(denseArgv, '--mode'), 'change')
+// A wait must fit inside the harness's per-program budget: a 200s wait made the
+// whole program die with the wait half done (real turn 2026-11-15). The argv clamp
+// is 90s, and a timed-out wait reports the worker mirror instead of a fake
+// 'running' — a queued job used to look like it was making progress.
+assert.equal(flagValue(commandArgs({ command: 'ingest', job_id: 'job_w', wait_ms: 200000 }), '--wait-timeout'), '90')
+assert.equal(flagValue(commandArgs({ command: 'ingest', job_id: 'job_w', wait_ms: 5000 }), '--wait-timeout'), '5')
+assert.equal(commandArgs({ command: 'ingest', job_id: 'job_w' }).includes('--wait'), false)
+fs.mkdirSync(path.join(home, 'jobs'), { recursive: true })
+fs.writeFileSync(path.join(home, 'jobs', 'job_queued.json'), JSON.stringify({
+  ok: true, job: { id: 'job_queued', state: 'queued', stage: 'queued', progress: 0, message: '排队中：已有一个入库任务在运行' },
+}))
+const queuedWait = __test.timeoutPayload('job_queued', 45000)
+assert.equal(queuedWait.state, 'queued', 'a queued wait must not report running')
+assert.equal(queuedWait.stage, 'queued')
+assert.match(queuedWait.note, /排队中/, 'the queued note must say the job has not started')
+assert.equal(queuedWait.waited_ms, 45000)
+fs.writeFileSync(path.join(home, 'jobs', 'job_running.json'), JSON.stringify({
+  ok: true, job: { id: 'job_running', state: 'running', stage: 'ocr', progress: 0.4 },
+}))
+const runningWait = __test.timeoutPayload('job_running', 30000)
+assert.equal(runningWait.state, 'running')
+assert.equal(runningWait.stage, 'ocr')
+assert.equal(runningWait.progress, 0.4)
+assert.match(runningWait.note, /仍在处理/)
+assert.equal(__test.timeoutPayload('job_missing', 30000).state, 'running', 'a missing mirror keeps the old default')
+// An explicit ASR language is the only repair for a mis-detected transcript.
+const langArgv = commandArgs({ command: 'ingest', source: 'https://www.bilibili.com/video/BV1xx411c7mD', language: 'zh' })
+assert.equal(flagValue(langArgv, '--language'), 'zh')
+assert.equal(commandArgs({ command: 'ingest', source: 'https://www.bilibili.com/video/BV1xx411c7mD' }).includes('--language'), false)
 // Candidates: timecodes by default, one montage only when asked, and the id
 // stays positional (splice would have made --images the video id).
 const candidatesArgv = commandArgs({ command: 'candidates', video_id: 'v', query: 'fish', limit: 999 })
@@ -529,7 +558,9 @@ assert.equal(commandArgs({ command: 'ingest' }), null, 'an ingest without a sour
 assert.equal(commandArgs({ command: 'overview' }), null, 'an overview without a video id must be an argument error')
 const waited = commandArgs({ command: 'jobs', job_id: 'j1', wait_ms: 300000 })
 assert.ok(Array.isArray(waited) && waited.includes('--wait'), 'jobs --wait_ms must build an argv (it used to throw ReferenceError)')
-assert.equal(flagValue(waited, '--wait-timeout'), '300')
+// 90s, not 300s: a single wait must fit inside the harness's per-program budget
+// (~120s). A 300s wait died with the program and the wait was lost (2026-11-15).
+assert.equal(flagValue(waited, '--wait-timeout'), '90')
 // The model must not be able to certify a user's shortlist choice: confirmation is
 // the card route's job. A `confirm` argument here would be a one-flag bypass.
 assert.equal(commandArgs({ command: 'ingest', source: 'x', confirm: true }).includes('--confirm'), false,

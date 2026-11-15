@@ -44,6 +44,14 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
+_KANA = re.compile(r"[\u3040-\u30ff]")
+
+
+def has_kana(text: str) -> bool:
+    """True when the text carries Japanese kana (hiragana/katakana)."""
+    return bool(text and _KANA.search(text))
+
+
 def language_hint(text: str) -> str:
     if not text:
         return "unknown"

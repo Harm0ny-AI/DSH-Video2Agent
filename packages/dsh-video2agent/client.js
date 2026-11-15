@@ -3567,7 +3567,13 @@ window.__ModuleLoader__.load({
       // this file exists to avoid.
       const headTitle = allTerminal ? (failed ? '未完成' : canceled ? '已取消' : '已完成') : ''
       const headSub = ''
-      const activeJob = rows.find((job) => !terminal(job.state))
+      // The progress ring belongs to the row that is actually processing. Picking
+      // the first non-terminal row put it on a queued row whenever the running
+      // video was not first (campaign waves, a retried row, a queued row without a
+      // job id): the table said "正在处理" on row 3 while the ring sat on row 2.
+      const isRunning = (job) => job && job.state === 'running' && !!job.job_id
+      const runningJob = rows.find((job) => isRunning(job) && job.primary) || rows.find(isRunning)
+      const activeJob = runningJob || rows.find((job) => !terminal(job.state))
       const rawProgress = activeJob ? Number(activeJob.progress) : 0
       const activeProgress = Number.isFinite(rawProgress)
         ? Math.max(0.08, Math.min(1, rawProgress > 1 ? rawProgress / 100 : rawProgress))

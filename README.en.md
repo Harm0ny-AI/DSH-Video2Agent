@@ -182,7 +182,7 @@ The dark social card and marketplace card live in [`docs/assets/`](docs/assets).
 
 ## Status
 
-- **0.1.0 released (2026-11-15).** CLI, Skill and the DSH plugin are available; install from PyPI or npm.
+- **0.1.1 released (2026-11-15).** CLI, Skill and the DSH plugin are available; install from PyPI or npm. 0.1.1 fixes reading to the end (no more E_OUT_OF_RANGE), bare millisecond values, Chinese audio mis-detected as Japanese, a misplaced batch progress ring, and an over-long single wait.
 - Local-first by default; no GPU required. Cloud is optional.
 - Published on PyPI and npm (`pip install video2agent`, `npm i dsh-video2agent`); the marketplace entry is prepared in the awesome-list format.
 - Known limits: single-character CJK search, OCR on tiny/low-contrast text, counting across shots.
