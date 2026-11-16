@@ -183,7 +183,7 @@ The dark social card and marketplace card live in [`docs/assets/`](docs/assets).
 
 ## Status
 
-- **0.1.4 released (2026-11-16).** CLI, Skill and the DSH plugin are available; install from PyPI or npm. 0.1.3 compacts the settings-page environment check into one status row (install buttons only for what is missing), makes `perceive` and `video2agent doctor` honour `FFMPEG_BIN`/`FFPROBE_BIN` like the media paths, and ships the real install steps on the plugin page. 0.1.2 added the environment check with one-click installs; 0.1.1 fixed reading to the end (no more E_OUT_OF_RANGE), bare millisecond values, Chinese audio mis-detected as Japanese, a misplaced batch progress ring, and an over-long single wait.
+- **0.1.5 released (2026-11-16).** CLI, Skill and the DSH plugin are available; install from PyPI or npm. 0.1.3 compacts the settings-page environment check into one status row (install buttons only for what is missing), makes `perceive` and `video2agent doctor` honour `FFMPEG_BIN`/`FFPROBE_BIN` like the media paths, and ships the real install steps on the plugin page. 0.1.2 added the environment check with one-click installs; 0.1.1 fixed reading to the end (no more E_OUT_OF_RANGE), bare millisecond values, Chinese audio mis-detected as Japanese, a misplaced batch progress ring, and an over-long single wait.
 - Local-first by default; no GPU required. Cloud is optional.
 - Published on PyPI and npm (`pip install video2agent`, `npm i dsh-video2agent`); the marketplace entry is prepared in the awesome-list format.
 - Known limits: single-character CJK search, OCR on tiny/low-contrast text, counting across shots.

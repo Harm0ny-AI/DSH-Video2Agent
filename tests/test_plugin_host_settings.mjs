@@ -107,7 +107,15 @@ assert.equal(setupData.ok, true)
 for (const key of ['python', 'cli', 'ffmpeg']) {
   assert.equal(typeof (setupData[key] || {}).ok, 'boolean', key + ' must be measured, not assumed')
 }
-assert.equal(setupData.cli.ok, false, 'the missing CLI must show as missing')
+// VIDEO2AGENT_BIN points at a missing binary, but this machine may still have a
+// working python -m video2agent (the setup card's fallback). Both are truthful:
+// assert the shape, and the only usable-CLI path is that fallback.
+if (setupData.cli.ok) {
+  assert.equal(setupData.cli.via, 'python', 'only the python-module fallback may make the CLI usable here')
+}
+// detectCli records that interpreter; the later routes still go through the
+// explicit missing VIDEO2AGENT_BIN, but do not leave a record behind.
+fs.rmSync(__test.managedToolsPath(), { force: true })
 assert.equal(typeof setupData.hints.cli, 'string', 'the CLI hint must be copy-pasteable')
 const badSetupAction = await call('POST', JSON.stringify({ action: 'not-a-real-action' }), { path: '/api/video2agent/setup' })
 assert.equal(badSetupAction.status, 400, 'unknown setup actions must be refused')

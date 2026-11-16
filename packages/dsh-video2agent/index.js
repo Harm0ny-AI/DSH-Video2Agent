@@ -1110,11 +1110,10 @@ export function apply(ctx, config) {
   }
 
   function pythonCandidates() {
-    const list = []
-    if (process.env.VIDEO2AGENT_PYTHON) list.push(String(process.env.VIDEO2AGENT_PYTHON))
-    if (process.platform === 'win32') list.push('py', 'python')
-    else list.push('python3', 'python')
-    return list
+    // An explicit VIDEO2AGENT_PYTHON is a pin: never fall through to a different
+    // interpreter, so "which python does the card use" is deterministic.
+    if (process.env.VIDEO2AGENT_PYTHON) return [String(process.env.VIDEO2AGENT_PYTHON)]
+    return process.platform === 'win32' ? ['py', 'python'] : ['python3', 'python']
   }
 
   async function detectPython() {
