@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.2 (2026-11-16)
+
+- **Environment check with one-click installs.** The plugin settings page now
+  shows Python 3.11+, the `video2agent` CLI and FFmpeg/ffprobe with their real
+  versions; missing pieces can be installed from the page (CLI via
+  `pip install video2agent`, FFmpeg via `winget`/`brew`). An FFmpeg that is
+  installed but missing from the app's PATH is adopted instead of installed again,
+  and every CLI spawn gets `FFMPEG_BIN`/`FFPROBE_BIN`, so it works without an app
+  restart. Installs are triggered only by the page (loopback JSON POST).
+- **Errors name the real install command.** A missing FFmpeg is now `E_FFMPEG`
+  with `winget install Gyan.FFmpeg` / `brew install ffmpeg` /
+  `sudo apt install ffmpeg` and the `FFMPEG_BIN` hint; the missing-CLI remedy is
+  the PyPI `pip install video2agent`. README and the marketplace entry state the
+  prerequisites.
+
 ## 0.1.1 (2026-11-15)
 
 - **Reading to the end works.** A `read`/`evidence` end time within 2% (or 2s) of
