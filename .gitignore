@@ -88,4 +88,4 @@ docs/report-shot.png
 /scripts/render-demo.py
 /scripts/demo.ps1
 /scripts/bench-cli.mjs
-*.tgz
+*.tgz/docs/RELEASE-NOTES-0.1.2.md

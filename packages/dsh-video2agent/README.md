@@ -12,17 +12,22 @@ Local-first; cloud ASR/OCR is optional.
 
 ```bash
 # 1. The Python CLI (the plugin calls this executable)
-pip install "git+https://github.com/Harm0ny-AI/DSH-Video2Agent.git"
-video2agent setup            # install the Skill into ~/.dsh/skills
-video2agent doctor
+pip install video2agent          # PyPI; pipx install video2agent also works
+video2agent setup                # install the Skill into ~/.dsh/skills
+video2agent doctor               # checks Python, FFmpeg and the Python packages
 
-# 2. This plugin, from the repository or a Release tarball
-dsh plugin --profile web add ./packages/dsh-video2agent
-# or: dsh plugin --profile web add ./dsh-video2agent-0.1.0.tgz
+# 2. This plugin
+dsh plugin --profile web add dsh-video2agent   # npm
 ```
 
-Requires Python 3.11+, FFmpeg on `PATH`, and DSH. The plugin is a release candidate;
-the PyPI/npm packages are not published yet.
+Requires Python 3.11+ and FFmpeg (or let the plugin install them: after installing,
+open the plugin settings page — **环境检查** checks Python/CLI/FFmpeg and installs
+what is missing with one click). Any DSH 0.2.1 / 0.2.2 profile works; the host command
+is optional, so headless/TUI profiles still get the tool and `/video`.
+
+- PyPI: <https://pypi.org/project/video2agent/>
+- npm: <https://www.npmjs.com/package/dsh-video2agent>
+- Releases: <https://github.com/Harm0ny-AI/DSH-Video2Agent/releases>
 
 ## What it adds
 

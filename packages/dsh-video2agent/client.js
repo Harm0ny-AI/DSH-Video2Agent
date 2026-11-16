@@ -213,13 +213,9 @@ window.__ModuleLoader__.load({
       '[data-vp-settings-save]:hover{filter:brightness(.94);}',
       '[data-vp-settings-save]:active{transform:scale(.98);}',
       '[data-vp-settings-summary]{font-size:12px;line-height:1.5;color:var(--vp-muted,#63605a);}',
-      '[data-vp-env]{margin-top:14px;padding-top:12px;border-top:1px solid rgba(120,120,120,.12);}',
-      '[data-vp-env-head]{display:flex;align-items:center;justify-content:space-between;gap:12px;}',
-      '[data-vp-env-title]{font-size:13px;font-weight:650;}',
-      '[data-vp-env-state]{font-size:11.5px;color:var(--vp-muted,#63605a);}',
-      '[data-vp-env-check]{display:flex;gap:7px;align-items:baseline;font-size:11.5px;line-height:1.5;color:var(--vp-muted,#63605a);margin-top:5px;}',
-      '[data-vp-env-check] b{font-weight:600;color:var(--dsw-alias-label-primary,#1f1f1c);}',
-      '[data-vp-env-check][data-bad="true"]{color:#b42318;}',
+      // The environment card reuses the blue settings card shell ([data-vp-cloud]);
+      // no separate border/padding rule: a leftover rule here overrode its border.
+      '[data-vp-env-row]{min-width:0;}',
       // One glass material for the composer surfaces, so the link preview, the
       // processing card and the batch table read as the same object. The live
       // card keeps a stronger shadow (it is the active one).
@@ -2029,7 +2025,7 @@ window.__ModuleLoader__.load({
           h('span', { style: { opacity: '.72', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, hint || value.detail || ''),
         )
       }
-      return h('div', { 'data-vp-env': '', style: { borderTop: '1px solid rgba(128,128,128,.16)', paddingTop: '12px', marginTop: '2px' } },
+      return h('div', { 'data-vp-env': '', 'data-vp-cloud': '', style: { margin: '0 0 12px' } },
         h('div', { 'data-vp-bili-head': '' }, h('span', { 'data-vp-bili-title': '' }, '环境检查')),
         h('div', { 'data-vp-bili-hint': '', style: { marginTop: '2px' } }, '处理视频需要 Python 3.11+、video2agent CLI 和 FFmpeg；缺什么可以在这里直接装。'),
         setup.state === 'error'
@@ -2492,7 +2488,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { 'data-vp-settings': '', 'data-loading': (cloud.state === 'loading' || models.state === 'loading') ? '1' : undefined },
         h('h1', { 'data-vp-settings-title': '' }, 'Video2Agent'),
-        h('p', { 'data-vp-settings-note': '' }, '云模型、B 站、本机模型和界面设置。'),
+        h('p', { 'data-vp-settings-note': '' }, '环境检查、云模型、B 站、本机模型和界面设置。'),
 
         EnvironmentCard(),
 
