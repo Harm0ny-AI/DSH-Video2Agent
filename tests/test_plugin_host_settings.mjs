@@ -22,6 +22,8 @@ const { apply, __test } = await import(pluginUrl)
 const routes = new Map()
 const sections = []
 let registeredTool = null
+let connectionRejection = undefined
+const admittedRequests = []
 const ctx = {
   logger: { info() {} },
   commands: { register() {} },
@@ -29,6 +31,9 @@ const ctx = {
   get(name) {
     if (name === 'webServer') return { register(route) { routes.set(route.path, route.handler) }, getOrigin: () => 'https://qa.example' }
     if (name === 'tools') return { register(tool) { registeredTool = tool } }
+    if (name === 'connection') {
+      return { requestRejection(req) { admittedRequests.push(req.url || ''); return connectionRejection } }
+    }
     return undefined
   },
 }
@@ -123,6 +128,23 @@ const noJsonSetup = await call('POST', JSON.stringify({ action: 'refresh' }), { 
 assert.equal(noJsonSetup.status, 415, 'setup installs must require a JSON body')
 assert.equal(__test.readManagedTools().ffmpeg, undefined, 'no managed ffmpeg is recorded in a fresh home')
 assert.equal(__test.managedToolEnv({ PATH: process.env.PATH }).FFMPEG_BIN, undefined, 'no FFMPEG_BIN without a managed install')
+// DSH Connection admission: a webServer route is otherwise callable by a page in
+// the user's browser. A non-undefined rejection must be answered with that status.
+connectionRejection = 403
+const admittedRejected = await call('GET', undefined, { path: '/api/video2agent/setup' })
+assert.equal(admittedRejected.status, 403, 'a Connection requestRejection must be answered, not ignored')
+connectionRejection = undefined
+// The evidence image is the one cross-site GET the desktop shell needs (opaque id
+// + image destination); it must stay on guardRead and skip the Connection fence.
+const admittedBefore = admittedRequests.length
+const imageRead = await call('GET', undefined, {
+  path: '/api/video2agent/frame',
+  url: '/api/video2agent/frame?id=vid_missing/frame.jpg',
+  headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': 'image' },
+})
+assert.equal(admittedRequests.length, admittedBefore, 'the frame image read must not hit the Connection fence')
+assert.notEqual(imageRead.status, 403, 'the frame image read must not be refused as cross-site')
+assert.ok(admittedRequests.every((url) => !String(url).startsWith('/api/video2agent/frame?id=')), 'image routes never reach the fence')
 
 const doctor = await call('GET', undefined, { path: '/api/video2agent/doctor' })
 assert.equal(doctor.status, 502, 'doctor route must not fake success when the CLI is missing')

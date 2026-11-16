@@ -99,7 +99,9 @@ function fakeCtx({ withWebServer = false, provideWebServer = null } = {}) {
   mod.apply(ctx)
   assert.equal(seen.tools.length, 1, 'tool registers before webServer exists')
   assert.ok(seen.injected.length >= 1, 'routes must defer on webServer')
-  assert.deepEqual([...new Set(seen.injected)], ['webServer'], 'only webServer is deferred')
+  // connection is also deferred (optional admission fence for the HTTP routes);
+  // neither may become a hard dependency of the plugin.
+  assert.deepEqual([...new Set(seen.injected)].sort(), ['connection', 'webServer'], 'only webServer/connection are deferred')
   assert.equal(seen.routes.length, 0, 'no routes until the service appears')
 }
 

@@ -893,6 +893,37 @@ function sendJson(res, code, obj) {
   res.end(JSON.stringify(obj))
 }
 
+// DSH's own Host/Origin fence + authenticated Peer check. webServer.register
+// routes do not get it automatically, so a page open in the user's browser could
+// otherwise reach them (the plugin's own guardRead/guardWrite still apply too).
+let ACTIVE_CONNECTION = null
+function admitConnection(ctx, req, res) {
+  try {
+    let connection = ACTIVE_CONNECTION
+    if (!connection) {
+      try { connection = ctx?.get?.('connection') || ctx?.connection } catch { connection = null }
+    }
+    if (!connection || typeof connection.requestRejection !== 'function') return true
+    const rejection = connection.requestRejection(req)
+    if (rejection === undefined || rejection === null) return true
+    sendJson(res, Number(rejection) || 403, { error: 'rejected', code: 'E_UNAUTHORIZED' })
+    return false
+  } catch {
+    return true
+  }
+}
+
+// The one cross-site read the desktop shell needs: evidence images with an opaque
+// id and an image destination (the model's markdown uses absolute URLs).
+function isFrameImageRead(req) {
+  const pathOnly = String(req.url || '').split('?')[0]
+  const query = String(req.url || '').split('?')[1] || ''
+  return req.method === 'GET'
+    && pathOnly === '/api/video2agent/frame'
+    && /(^|&)id=/.test(query)
+    && String((req.headers && req.headers['sec-fetch-dest']) || '').toLowerCase() === 'image'
+}
+
 function guardRead(req, res) {
   // GETs here can spawn the CLI, hit the network, or write campaign/queue files.
   // A browser marks a page-initiated cross-site request explicitly; refuse it
@@ -937,6 +968,16 @@ function guardRead(req, res) {
   return true
 }
 
+function captureConnection(ctx) {
+  try {
+    ctx.inject(['connection'], (inner) => {
+      try { ACTIVE_CONNECTION = inner.get?.('connection') || inner.connection || null } catch { ACTIVE_CONNECTION = null }
+    })
+  } catch {
+    ACTIVE_CONNECTION = null
+  }
+}
+
 function whenWebServer(ctx, label, register) {
   const run = (webServer) => {
     try {
@@ -953,6 +994,9 @@ function whenWebServer(ctx, label, register) {
             // Limiting this to GET let a cross-site POST reach /resolve, /job or
             // /frame and spawn the CLI.
             if (!guardRead(req, res)) return
+            // DSH's Connection fence first; the evidence-image read is the one
+            // cross-site GET the desktop shell needs, so it stays on guardRead.
+            if (!isFrameImageRead(req) && !admitConnection(ctx, req, res)) return
             return handler(req, res)
           },
         })
@@ -1016,6 +1060,9 @@ export function apply(ctx, config) {
   // the settings file, so a value chosen in the settings form is never reset by
   // a Config edit, while a fresh install still gets sane defaults.
   ROW_CONFIG = sanitizeUiSettings(config || {})
+  // Routes served through webServer.register must apply DSH's own admission
+  // fence themselves (captured here while services are being composed).
+  captureConnection(ctx)
   try { runCacheCleanupSoon() } catch {}
   try {
     ctx.commands.register({

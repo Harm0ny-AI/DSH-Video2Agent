@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.7 (2026-11-17)
+
+- **Every plugin HTTP route now goes through DSH's Connection admission.** Routes
+  registered with webServer.register first call
+  ctx.connection.requestRejection(req) (the service is optional; the plugin's own
+  Host/Origin guards stay). A page in the user's browser can no longer reach them
+  even when it finds the loopback port. The one cross-site read kept is the
+  evidence-image GET (opaque id + image destination) that the desktop shell needs.
+  Verified in a real DSH instance: an unauthenticated request now gets 401 while
+  the settings page keeps working.
+- The marketplace entry drops the "HTTP routes have no DSH access check" caveat the
+  maintainer added when merging the listing (entry-update PR).
+
 ## 0.1.6 (2026-11-16)
 
 - **New storefront.** The marketplace/social card now uses the hero art and the
