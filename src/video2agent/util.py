@@ -295,17 +295,19 @@ def run(cmd: Sequence[str], *, timeout: float | None = 120, cwd: str | Path | No
     try:
         proc = subprocess.run(args, timeout=timeout, **_subprocess_kwargs(cwd))
     except FileNotFoundError as e:
-        # Path(...).stem keeps "ffmpeg.exe" in the FFmpeg family: the docs tell
-        # Windows users to point FFMPEG_BIN at the .exe, so a missing .exe must
-        # still be reported as E_FFMPEG with the install command, not as a
-        # generic missing command.
-        tool = Path(args[0]).stem.lower()
+        # The stem keeps "ffmpeg.exe" in the FFmpeg family: the docs tell Windows
+        # users to point FFMPEG_BIN at the .exe, so a missing .exe must still be
+        # E_FFMPEG with the install command. Normalize both separators so the same
+        # error is produced on POSIX when a Windows-style path is passed in.
+        raw = str(args[0])
+        basename = raw.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        tool = basename[:-4] if basename.endswith(".exe") else basename
         if tool in FFMPEG_TOOLS:
             env_key = "FFMPEG_BIN" if tool == "ffmpeg" else "FFPROBE_BIN"
             override = os.environ.get(env_key)
             if override and not Path(override).is_file():
                 message = f"{env_key} 指向不存在的文件：{override}"
-            elif os.sep in args[0] or "/" in args[0]:
+            elif "\\" in raw or "/" in raw:
                 message = f"{tool} 路径不存在：{args[0]}（检查 {env_key}）"
             else:
                 message = f"{tool} 未安装或不在 PATH 上（视频探测/抽帧需要它）。"
