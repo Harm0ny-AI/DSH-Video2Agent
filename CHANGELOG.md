@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.6 (2026-11-16)
+
+- **New storefront.** The marketplace/social card now uses the hero art and the
+  "你的 Agent 浏览了无数网页 —— 现在该让它看视频了" copy; the README screenshots were
+  re-captured on the current build (composer preview, batch table, and the settings
+  page with the 环境检查 card). README images now use absolute raw URLs so the
+  marketplace detail page can render them.
+- **Marketplace entry copy** is the same hook plus what the plugin actually does:
+  cross-video search with video + timecode, exact-frame evidence, 1–10 video batch
+  analysis, local-first with optional cloud ASR/OCR and Bilibili login, and the
+  Python 3.11+/FFmpeg prereqs the settings page can install.
+- Package README restructured: what you can ask, install (PyPI + npm), screenshots,
+  manifest.
+
 ## 0.1.5 (2026-11-16)
 
 - **An explicit `VIDEO2AGENT_PYTHON` is now a pin.** When set, the setup card uses

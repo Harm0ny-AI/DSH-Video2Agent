@@ -1,6 +1,6 @@
 {
   "name": "dsh-video2agent",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": false,
   "description": "DSH-Video2Agent for DeepSeek Harness: index a video locally, search what was said and shown, cite exact frames, and optionally manage a logged-in Bilibili library.",
   "type": "module",
