@@ -13,7 +13,6 @@ import ctypes
 import json
 import os
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -22,7 +21,7 @@ from urllib.parse import urlparse
 import requests
 
 from .config import Config
-from .util import Video2AgentError, no_window_kwargs
+from .util import Video2AgentError, run
 
 PROVIDER = "siliconflow"
 BASE_URL = "https://api.siliconflow.cn/v1"
@@ -396,9 +395,11 @@ def _ffprobe() -> str:
 
 
 def _duration(path: Path) -> float:
-    out = subprocess.run(
+    # util.run maps a missing ffprobe (PATH or FFPROBE_BIN) to E_FFMPEG with the
+    # install hint instead of letting a bare FileNotFoundError escape.
+    out = run(
         [_ffprobe(), "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
-        capture_output=True, text=True, timeout=30, **no_window_kwargs(),
+        timeout=30,
     )
     try:
         return max(0.0, float(out.stdout.strip()))
@@ -417,10 +418,10 @@ def _chunks(audio_path: Path, seconds: int = 1800) -> list[tuple[Path, float]]:
     try:
         while start < total:
             target = tmpdir / f"chunk-{index}.mp3"
-            subprocess.run(
+            run(
                 [_ffmpeg(), "-y", "-loglevel", "error", "-ss", str(start), "-t", str(seconds),
                  "-i", str(audio_path), "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", str(target)],
-                capture_output=True, timeout=180, **no_window_kwargs(),
+                timeout=180,
             )
             if target.is_file() and target.stat().st_size > 0:
                 chunks.append((target, start))

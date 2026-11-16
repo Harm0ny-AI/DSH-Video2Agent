@@ -8,10 +8,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const oldHome = process.env.VIDEO2AGENT_HOME
 const oldBin = process.env.VIDEO2AGENT_BIN
+const oldPython = process.env.VIDEO2AGENT_PYTHON
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-host-settings-'))
 process.env.VIDEO2AGENT_HOME = home
 process.env.VIDEO2AGENT_SHORTLIST_WAIT_MS = '50'
 process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
+// The setup card falls back to `python -m video2agent`; point that at a missing
+// interpreter too so the missing-CLI assertions still test the failure path.
+process.env.VIDEO2AGENT_PYTHON = path.join(home, 'missing-python')
 const here = path.dirname(fileURLToPath(import.meta.url))
 const pluginUrl = pathToFileURL(path.join(here, '..', 'packages', 'dsh-video2agent', 'index.js')).href
 const { apply, __test } = await import(pluginUrl)
@@ -420,6 +424,11 @@ const crossResolve = await call('POST', JSON.stringify({ url: 'https://www.bilib
   headers: { 'sec-fetch-site': 'cross-site' },
 })
 assert.equal(crossResolve.status, 403, 'a cross-site POST to a read route must be refused')
+// /setup is a write route (installs); it must be exempt from the cross-site read
+// refusal for the same reason as /settings, or a legit desktop write gets 403.
+const crossSetup = await call('POST', JSON.stringify({ action: 'refresh' }), { path: '/api/video2agent/setup', headers: { 'sec-fetch-site': 'cross-site' } })
+assert.notEqual(crossSetup.status, 403, 'a cross-site POST to /setup must reach guardWrite, not guardRead')
+assert.notEqual(crossSetup.status, 500, 'a cross-site POST to /setup must not crash')
 // Body limit: answer 413 instead of destroying the socket (ECONNRESET).
 const tooLarge = await call('POST', 'x'.repeat(20000))
 assert.equal(tooLarge.status, 413, 'an oversized body must answer 413')
@@ -437,6 +446,17 @@ assert.notEqual(stillIntact.accentColor, '#ff0000', 'rejected writes must not ch
 // must clamp them, because the model can pass anything. Check the value next to
 // the flag, not `.includes('0')` (which `--at 0` would satisfy by accident).
 const { commandArgs, readMergedSettings } = pluginModule.__test
+// A CLI installed by the setup card may live behind "python -m video2agent" (pip's
+// Scripts dir is not on the app's PATH). The managed record must build that argv.
+const managedTools = __test.managedToolsPath()
+fs.mkdirSync(path.dirname(managedTools), { recursive: true })
+fs.writeFileSync(managedTools, JSON.stringify({ cli: { python: process.execPath, prefix: [], at: new Date().toISOString() } }), 'utf8')
+delete process.env.VIDEO2AGENT_BIN
+const managedInvocation = __test.cliCommand()
+assert.equal(managedInvocation.command, process.execPath)
+assert.deepEqual(managedInvocation.prefix, ['-m', 'video2agent'])
+process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
+fs.rmSync(managedTools, { force: true })
 const flagValue = (argv, flag) => argv[argv.indexOf(flag) + 1]
 assert.equal(flagValue(commandArgs({ command: 'evidence', video_id: 'v', at: '00:10', images: 500 }), '--images'), '6')
 assert.equal(flagValue(commandArgs({ command: 'evidence', video_id: 'v', at: '00:10', images: -3 }), '--images'), '0')
@@ -1181,3 +1201,5 @@ if (oldHome === undefined) delete process.env.VIDEO2AGENT_HOME
 else process.env.VIDEO2AGENT_HOME = oldHome
 if (oldBin === undefined) delete process.env.VIDEO2AGENT_BIN
 else process.env.VIDEO2AGENT_BIN = oldBin
+if (oldPython === undefined) delete process.env.VIDEO2AGENT_PYTHON
+else process.env.VIDEO2AGENT_PYTHON = oldPython

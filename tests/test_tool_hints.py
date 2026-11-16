@@ -1,8 +1,10 @@
 import os
+import shutil
+import tempfile
 import unittest
 from unittest.mock import patch
 
-from video2agent import media
+from video2agent import media, perception
 from video2agent.util import Video2AgentError, install_hint, require_tool, run
 
 
@@ -66,6 +68,102 @@ class FfmpegPathTests(unittest.TestCase):
             os.environ.pop("FFMPEG_BIN", None)
             with patch("video2agent.media.which", return_value="/usr/bin/ffmpeg"):
                 self.assertEqual(media._ffmpeg(), "/usr/bin/ffmpeg")
+
+
+class MissingFfmpegPathTests(unittest.TestCase):
+    """A missing Windows .exe must still be reported as an FFmpeg problem.
+
+    The docs tell users to point FFMPEG_BIN at ffmpeg.exe; Path(...).name keeps
+    ".exe" and fell out of the FFmpeg family, so the error became a generic
+    "Command not found" with no install command.
+    """
+
+    def test_exe_path_is_still_ffmpeg(self):
+        with patch("video2agent.util.subprocess.run", side_effect=FileNotFoundError("ffmpeg.exe")):
+            with self.assertRaises(Video2AgentError) as ctx:
+                run([r"C:\nope\ffmpeg.exe", "-version"])
+        self.assertEqual(ctx.exception.code, "E_FFMPEG")
+        self.assertIn("FFMPEG_BIN", ctx.exception.remedy or "")
+
+    def test_bad_override_is_named(self):
+        bad = r"C:\nope\ffmpeg.exe"
+        with patch.dict(os.environ, {"FFMPEG_BIN": bad}):
+            with patch("video2agent.util.subprocess.run", side_effect=FileNotFoundError(bad)):
+                with self.assertRaises(Video2AgentError) as ctx:
+                    run([bad, "-version"])
+        self.assertEqual(ctx.exception.code, "E_FFMPEG")
+        self.assertIn("不存在", ctx.exception.message)
+
+    def test_require_tool_uses_the_override(self):
+        handle, path = tempfile.mkstemp(suffix=".exe")
+        os.close(handle)
+        try:
+            with patch.dict(os.environ, {"FFMPEG_BIN": path}):
+                self.assertEqual(require_tool("ffmpeg"), path)
+        finally:
+            os.unlink(path)
+
+    def test_require_tool_rejects_a_missing_override(self):
+        bad = r"C:\nope\ffprobe.exe"
+        with patch.dict(os.environ, {"FFPROBE_BIN": bad}):
+            with self.assertRaises(Video2AgentError) as ctx:
+                require_tool("ffprobe")
+        self.assertEqual(ctx.exception.code, "E_FFMPEG")
+        self.assertIn("不存在", ctx.exception.message)
+
+    def test_perception_uses_the_override_and_rejects_a_bad_one(self):
+        handle, path = tempfile.mkstemp(suffix=".exe")
+        os.close(handle)
+        try:
+            with patch.dict(os.environ, {"FFMPEG_BIN": path}):
+                self.assertEqual(perception._require_tool("ffmpeg"), path)
+        finally:
+            os.unlink(path)
+        with patch.dict(os.environ, {"FFMPEG_BIN": r"C:\nope\ffmpeg.exe"}):
+            with self.assertRaises(Video2AgentError) as ctx:
+                perception._require_tool("ffmpeg")
+        self.assertEqual(ctx.exception.code, "E_FFMPEG")
+        self.assertIn("不存在", ctx.exception.message)
+
+    def test_doctor_reports_the_override(self):
+        from video2agent import config
+        handle, path = tempfile.mkstemp(suffix=".exe")
+        os.close(handle)
+        home = tempfile.mkdtemp(prefix="vp-doctor-")
+        try:
+            with patch.dict(os.environ, {"VIDEO2AGENT_HOME": home, "FFMPEG_BIN": path, "FFPROBE_BIN": path}):
+                checks = {check["name"]: check for check in config.doctor()["checks"]}
+            self.assertTrue(checks["ffmpeg"]["ok"])
+            self.assertEqual(checks["ffmpeg"]["detail"], path)
+            self.assertTrue(checks["ffprobe"]["ok"])
+        finally:
+            os.unlink(path)
+            shutil.rmtree(home, ignore_errors=True)
+
+    def test_doctor_names_a_bad_override(self):
+        from video2agent import config
+        home = tempfile.mkdtemp(prefix="vp-doctor-")
+        bad = r"C:\nope\ffmpeg.exe"
+        try:
+            with patch.dict(os.environ, {"VIDEO2AGENT_HOME": home, "FFMPEG_BIN": bad}):
+                checks = {check["name"]: check for check in config.doctor()["checks"]}
+            self.assertFalse(checks["ffmpeg"]["ok"])
+            self.assertIn("不存在", checks["ffmpeg"]["detail"])
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+    def test_cloud_duration_maps_a_missing_ffprobe(self):
+        from video2agent import cloud
+        empty = tempfile.mkdtemp(prefix="vp-empty-path-")
+        try:
+            with patch.dict(os.environ, {"PATH": empty}, clear=False):
+                with patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("FFPROBE_BIN", None)
+                    with self.assertRaises(Video2AgentError) as ctx:
+                        cloud._duration(__import__("pathlib").Path("whatever.mp3"))
+            self.assertEqual(ctx.exception.code, "E_FFMPEG")
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
 
 
 if __name__ == "__main__":

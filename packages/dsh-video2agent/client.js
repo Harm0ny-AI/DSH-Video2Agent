@@ -1983,13 +1983,18 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('')
       const [log, setLog] = React.useState('')
       const load = async () => {
+        if (busy) return
+        setBusy('refresh')
         try {
           const response = await fetch('/api/video2agent/setup')
           const data = await response.json().catch(() => null)
           if (!response.ok || !data || data.ok === false) throw new Error('read failed')
           setSetup({ state: 'ready', data })
+          setLog('')
         } catch {
           setSetup((current) => ({ ...current, state: 'error' }))
+        } finally {
+          setBusy('')
         }
       }
       React.useEffect(() => { load() }, [])
@@ -2004,10 +2009,12 @@ window.__ModuleLoader__.load({
           })
           const data = await response.json().catch(() => null)
           if (data && data.status) setSetup({ state: 'ready', data: data.status })
-          if (data && data.ok === false) {
-            const error = (data.error && [data.error.message, data.error.remedy].filter(Boolean).join('：')) || '安装失败'
-            setLog(error + (data.output ? '\n' + data.output : ''))
-          } else if (data && data.output) {
+          if (!response.ok || !data || data.ok !== true) {
+            const error = (data && data.error && [data.error.message, data.error.remedy].filter(Boolean).join('：'))
+              || (data && (data.error || data.detail))
+              || ('安装失败（HTTP ' + response.status + '）')
+            setLog(String(error) + (data && data.output ? '\n' + data.output : ''))
+          } else if (data.output) {
             setLog(data.output)
           }
         } catch (e) {
@@ -2017,39 +2024,59 @@ window.__ModuleLoader__.load({
         }
       }
       const data = setup.data
-      const row = (label, item, hint) => {
-        const value = item && typeof item === 'object' ? item : { ok: false, detail: '未知' }
-        return h('div', { 'data-vp-env-row': '', style: { display: 'flex', gap: '10px', alignItems: 'baseline', padding: '3px 0' } },
-          h('span', { style: { minWidth: '132px', fontWeight: '600' } }, label),
-          h('span', { 'data-vp-env-state': value.ok ? 'ok' : 'missing', style: { minWidth: '44px', color: value.ok ? 'var(--vp-ok,#2ea043)' : 'var(--vp-bad,#d9534f)' } }, value.ok ? '正常' : '缺失'),
-          h('span', { style: { opacity: '.72', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, hint || value.detail || ''),
+      // Compact: one status line with three chips, install buttons only for what is
+      // missing. The full version/path text stays in the chip's tooltip.
+      const items = data ? [
+        { key: 'python', label: 'Python', item: data.python, text: data.python && data.python.ok ? String(data.python.detail || '').replace(/^Python\s*/, '') : '缺失' },
+        { key: 'cli', label: 'CLI', item: data.cli, text: data.cli && data.cli.ok ? String(data.cli.detail || '').replace(/^video2agent\s*/, '') : '缺失' },
+        { key: 'ffmpeg', label: 'FFmpeg', item: data.ffmpeg, text: (() => {
+          if (!data.ffmpeg || !data.ffmpeg.ok) return '缺失'
+          const match = String(data.ffmpeg.detail || '').match(/ffmpeg version (\d+(?:\.\d+)*)/i)
+          return match ? match[1] : '正常'
+        })() },
+      ] : []
+      const missing = items.filter((entry) => !(entry.item && entry.item.ok))
+      const chip = (entry) => {
+        const ok = !!(entry.item && entry.item.ok)
+        return h('span', { key: entry.key, 'data-vp-env-state': ok ? 'ok' : 'missing', 'data-vp-env-item': entry.key,
+          title: entry.item && entry.item.detail ? entry.item.detail : '',
+          style: { display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '1px 7px', borderRadius: '999px',
+            background: ok ? 'rgba(46,160,67,.10)' : 'rgba(217,83,79,.10)', color: ok ? '#1a7f37' : '#b42318',
+            fontSize: '11px', lineHeight: '18px', whiteSpace: 'nowrap' } },
+          h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: ok ? '#2ea043' : '#d9534f', flex: 'none' } }),
+          entry.label + ' ' + entry.text,
         )
       }
-      return h('div', { 'data-vp-env': '', 'data-vp-cloud': '', style: { margin: '0 0 12px' } },
-        h('div', { 'data-vp-bili-head': '' }, h('span', { 'data-vp-bili-title': '' }, '环境检查')),
-        h('div', { 'data-vp-bili-hint': '', style: { marginTop: '2px' } }, '处理视频需要 Python 3.11+、video2agent CLI 和 FFmpeg；缺什么可以在这里直接装。'),
-        setup.state === 'error'
-          ? h('div', { 'data-vp-bili-err': '' }, '读取失败，点“重新检测”重试。')
-          : setup.state === 'loading' || !data
-            ? h('div', { 'data-vp-bili-hint': '', style: { marginTop: '6px' } }, '检测中…')
-            : h('div', { style: { marginTop: '4px' } },
-              row('Python 3.11+', data.python),
-              row('video2agent CLI', data.cli),
-              row('FFmpeg / ffprobe', data.ffmpeg),
-              h('div', { 'data-vp-bili-actions': '', style: { marginTop: '8px', flexWrap: 'wrap' } },
-                h('button', { 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => load() }, busy ? '请稍候…' : '重新检测'),
-                data.canInstall && data.canInstall.cli
-                  ? h('button', { 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => install('install-cli') }, busy === 'install-cli' ? '安装中…' : '一键安装 CLI')
-                  : null,
-                data.canInstall && data.canInstall.ffmpeg
-                  ? h('button', { 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => install('install-ffmpeg') }, busy === 'install-ffmpeg' ? '安装中…' : '一键安装 FFmpeg')
-                  : null,
-              ),
-              data.python && !data.python.ok
-                ? h('div', { 'data-vp-bili-hint': '', style: { marginTop: '6px' } }, data.hints && data.hints.python ? data.hints.python : '先安装 Python 3.11+。')
-                : null,
-              log ? h('pre', { 'data-vp-env-log': '', style: { marginTop: '8px', maxHeight: '160px', overflow: 'auto', fontSize: '11px', whiteSpace: 'pre-wrap' } }, log) : null,
-            ),
+      return h('div', { 'data-vp-env': '', 'data-vp-cloud': '', style: { margin: '0 0 12px', padding: '9px 12px' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', minWidth: 0 } },
+            h('span', { style: { fontSize: '12.5px', fontWeight: 650, marginRight: '2px' } }, '环境检查'),
+            setup.state === 'loading' || (!data && setup.state !== 'error')
+              ? h('span', { style: { fontSize: '11.5px', opacity: '.65' } }, '检测中…')
+              : setup.state === 'error'
+                ? h('span', { style: { fontSize: '11.5px', color: '#b42318' } }, '读取失败')
+                : items.map(chip),
+          ),
+          h('button', { 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => load(),
+            style: { flex: 'none', padding: '2px 8px', fontSize: '11px', lineHeight: '18px' } }, busy ? '…' : '重新检测'),
+        ),
+        missing.length
+          ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
+              h('span', { style: { fontSize: '11px', color: 'var(--vp-muted,#63605a)' } }, '缺少依赖：'),
+              missing.map((entry) => {
+                const action = entry.key === 'cli' ? 'install-cli' : entry.key === 'ffmpeg' ? 'install-ffmpeg' : ''
+                return action && data.canInstall && data.canInstall[entry.key]
+                  ? h('button', { key: entry.key, 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => install(action),
+                      style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' } },
+                      busy === action ? '安装中…' : ('安装 ' + entry.label))
+                  : h('span', { key: entry.key, style: { fontSize: '11px', color: '#b42318' } }, entry.label + ' 需要手动安装')
+              }),
+            )
+          : null,
+        missing.some((entry) => entry.key === 'python')
+          ? h('div', { style: { fontSize: '11px', color: 'var(--vp-muted,#63605a)', marginTop: '6px' } }, (data && data.hints && data.hints.python) || '先安装 Python 3.11+。')
+          : null,
+        log ? h('pre', { 'data-vp-env-log': '', style: { marginTop: '6px', maxHeight: '120px', overflow: 'auto', fontSize: '10.5px', whiteSpace: 'pre-wrap' } }, log) : null,
       )
     }
 

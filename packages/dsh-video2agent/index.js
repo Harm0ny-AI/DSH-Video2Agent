@@ -48,8 +48,23 @@ export const Config = Schema
 
 // Resolve the CLI per call, not at import time: a long-lived Host process must
 // pick up a changed VIDEO2AGENT_BIN (and tests can point it at a missing binary).
+// A CLI installed by the setup card may not be on this process's PATH (pip's
+// Scripts dir is often missing). The card records the interpreter that can run
+// "python -m video2agent", and every spawn builds the argv from it.
+function cliCommand() {
+  if (process.env.VIDEO2AGENT_BIN) return { command: process.env.VIDEO2AGENT_BIN, prefix: [] }
+  try {
+    const cli = readManagedTools().cli
+    if (cli && cli.python && fs.existsSync(cli.python)) {
+      return { command: cli.python, prefix: [...(cli.prefix || []), '-m', 'video2agent'] }
+    }
+  } catch {}
+  return { command: 'video2agent', prefix: [] }
+}
+
 function binPath() {
-  return process.env.VIDEO2AGENT_BIN || 'video2agent'
+  const invocation = cliCommand()
+  return invocation.prefix.length ? invocation.command + ' ' + invocation.prefix.join(' ') : invocation.command
 }
 // Tools the plugin can provide to the Python CLI. FFmpeg may be installed after
 // the app started (PATH is a snapshot), so the setup card records where winget/brew
@@ -77,6 +92,20 @@ function managedToolEnv(baseEnv = process.env) {
   if (tools.ffmpeg && fs.existsSync(tools.ffmpeg)) env.FFMPEG_BIN = tools.ffmpeg
   if (tools.ffprobe && fs.existsSync(tools.ffprobe)) env.FFPROBE_BIN = tools.ffprobe
   return env
+}
+
+// pip can install the console script into a Scripts dir this app does not have on
+// PATH. Record the interpreter that runs "python -m video2agent" (a .cmd wrapper
+// cannot be spawned without a shell, and shell quoting breaks Chinese paths).
+function saveManagedCli(pythonCommand, pythonPrefix) {
+  try {
+    fs.mkdirSync(path.dirname(managedToolsPath()), { recursive: true })
+    const tools = { ...readManagedTools(), cli: { python: pythonCommand, prefix: pythonPrefix || [], at: new Date().toISOString() } }
+    fs.writeFileSync(managedToolsPath(), JSON.stringify(tools, null, 2), 'utf8')
+    return true
+  } catch {
+    return false
+  }
 }
 
 // Spawn any helper command (python, pip, winget, ffmpeg) with the same capture and
@@ -172,8 +201,9 @@ function runCli(args, timeoutMs = 600000, input = null) {
       resolve(value)
     }
     let child
+    const invocation = cliCommand()
     try {
-      child = spawn(binPath(), args, { windowsHide: true, env: managedToolEnv() })
+      child = spawn(invocation.command, [...invocation.prefix, ...args], { windowsHide: true, env: managedToolEnv() })
     } catch (e) {
       finish({ code: -1, out: '', err: 'Cannot start video2agent: ' + (e?.message || e) })
       return
@@ -243,7 +273,8 @@ function _workerIdle(worker) {
 }
 
 function _workerStart() {
-  const child = spawn(binPath(), ['__worker'], { windowsHide: true, env: managedToolEnv() })
+  const workerInvocation = cliCommand()
+  const child = spawn(workerInvocation.command, [...workerInvocation.prefix, '__worker'], { windowsHide: true, env: managedToolEnv() })
   const worker = { child, pending: null, buffer: '', stderr: '', idle: null }
   WORKER = worker
   // The worker is an optimization, not a reason for the Host to stay alive.
@@ -873,7 +904,7 @@ function guardRead(req, res) {
   // cross-site refusal.
   const pathOnly = String(req.url || '').split('?')[0]
   const isWriteRoute = req.method === 'POST'
-    && /^\/api\/video2agent\/(settings|cloud|models|bili-login\/|jobs\/cancel|retry|discovery\/clear|campaign)/.test(pathOnly)
+    && /^\/api\/video2agent\/(settings|cloud|models|bili-login\/|jobs\/cancel|retry|discovery\/clear|campaign|setup)/.test(pathOnly)
   // A frame <img> is a cross-site no-cors image read when the page is the
   // desktop shell (dsh-app://app): the model's markdown needs an absolute URL,
   // and an absolute URL is cross-site from there. Serve only image destinations
@@ -1061,6 +1092,22 @@ export function apply(ctx, config) {
   // what is missing. Only the page can start an install (loopback JSON POST,
   // guardWrite); the model-facing tool has no command that reaches it.
   const SETUP_INSTALL_TIMEOUT = 15 * 60 * 1000
+  // Two settings tabs must not run pip/winget at the same time (site-packages or
+  // the installer can break mid-write); a second click gets E_BUSY instead.
+  const SETUP_INFLIGHT = new Map()
+
+  async function withInstallLock(action, runner) {
+    if (SETUP_INFLIGHT.has(action)) {
+      return { ok: false, error: { code: 'E_BUSY', message: '安装已在进行中，请等它结束再试。' }, status: await setupStatus() }
+    }
+    const task = (async () => runner())()
+    SETUP_INFLIGHT.set(action, task)
+    try {
+      return await task
+    } finally {
+      SETUP_INFLIGHT.delete(action)
+    }
+  }
 
   function pythonCandidates() {
     const list = []
@@ -1091,19 +1138,44 @@ export function apply(ctx, config) {
     if (ffmpeg.code !== 0) return { ok: false, detail: '未安装', managed: false }
     const ffprobe = await runCommand(managedProbe || 'ffprobe', ['-version'], 20000)
     const first = String(ffmpeg.out || '').split('\n')[0] || ''
+    const ffprobeOk = ffprobe.code === 0
     return {
-      ok: ffprobe.code === 0,
-      detail: (managedFfmpeg ? '插件安装 · ' : '') + first.slice(0, 120),
+      ok: ffprobeOk,
+      // Say which one is missing: "ffmpeg found, ffprobe missing" is a different
+      // fix (same package) from "nothing installed".
+      detail: ffprobeOk
+        ? (managedFfmpeg ? '插件安装 · ' : '') + first.slice(0, 120)
+        : 'ffmpeg 已找到，但 ffprobe 缺失',
       managed: !!managedFfmpeg,
       path: managedFfmpeg,
     }
   }
 
+  function versionLine(result) {
+    return String((result && (result.out || result.err)) || '').trim().split('\n').pop()
+  }
+
+  // A pip install can put the console script in a Scripts dir the app's PATH does
+  // not contain. Fall back to "python -m video2agent" and remember the interpreter
+  // so the CLI is usable (and the card stops saying 缺失 after a successful install).
+  async function detectCli() {
+    const direct = await runCli(['--version'], 30000)
+    if (direct.code === 0) return { ok: true, detail: versionLine(direct), via: 'path' }
+    const python = await detectPython()
+    if (python.ok) {
+      const moduleRun = await runCommand(python.command, [...python.prefix, '-m', 'video2agent', '--version'], 30000)
+      if (moduleRun.code === 0) {
+        saveManagedCli(python.command, python.prefix)
+        return { ok: true, detail: versionLine(moduleRun), via: 'python' }
+      }
+    }
+    return { ok: false, detail: '未安装', via: '' }
+  }
+
   async function setupStatus() {
     const python = await detectPython()
-    const cliRun = await runCli(['--version'], 30000)
-    const cliOk = cliRun.code === 0
-    const cliVersion = cliOk ? String(cliRun.out || cliRun.err || '').trim().split('\n').pop() : ''
+    const cli = await detectCli()
+    const cliOk = cli.ok
     const ffmpeg = await detectFfmpeg()
     const ffmpegHint = process.platform === 'win32'
       ? 'winget install Gyan.FFmpeg'
@@ -1113,14 +1185,16 @@ export function apply(ctx, config) {
       platform: process.platform,
       home: v2aHomePath(),
       python: { ok: python.ok, detail: python.version ? 'Python ' + python.version : '未找到', tooOld: !!python.tooOld },
-      cli: { ok: cliOk, detail: cliOk ? (cliVersion || '已安装') : '未安装', bin: binPath() },
+      cli: { ok: cliOk, detail: cliOk ? (cli.detail || '已安装') : '未安装', bin: binPath(), via: cli.via },
       ffmpeg: { ok: ffmpeg.ok, detail: ffmpeg.detail, managed: ffmpeg.managed, path: ffmpeg.path || '' },
       hints: {
         python: '安装 Python 3.11+：https://www.python.org/downloads/（Windows 可 winget install Python.Python.3.12）',
         cli: 'pip install video2agent',
         ffmpeg: ffmpegHint,
       },
-      canInstall: { cli: python.ok && !cliOk, ffmpeg: !ffmpeg.ok },
+      // Linux installs FFmpeg with sudo, which the plugin cannot run; offer the
+      // command instead of a button that always fails.
+      canInstall: { cli: python.ok && !cliOk, ffmpeg: process.platform !== 'linux' && !ffmpeg.ok },
     }
   }
 
@@ -1141,19 +1215,37 @@ export function apply(ctx, config) {
     }
     const r = await runCommand(python.command, [...python.prefix, '-m', 'pip', 'install', '--upgrade', 'video2agent'], SETUP_INSTALL_TIMEOUT)
     const output = ((String(r.out || '') + '\n' + String(r.err || '')).trim()).slice(-6000)
+    const pythonLabel = [python.command, ...python.prefix].join(' ')
     if (r.code !== 0) {
       return {
         ok: false,
         error: {
           code: 'E_PIP',
           message: 'pip install video2agent 失败',
-          remedy: '检查网络和 pip 后可手动运行：' + python.command + ' ' + python.prefix.join(' ') + ' -m pip install --upgrade video2agent',
+          remedy: '检查网络和 pip 后可手动运行：' + pythonLabel + ' -m pip install --upgrade video2agent。'
+            + '如果 Python 是系统托管环境（PEP 668），改用 pipx/venv 安装，或给 pip 加 --user。',
         },
         output,
         status: await setupStatus(),
       }
     }
-    return { ok: true, output, status: await setupStatus() }
+    const after = await setupStatus()
+    if (!after.cli.ok) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_CLI_NOT_ON_PATH',
+          message: 'pip 装完了，但 video2agent 仍无法启动',
+          remedy: '检查 ' + pythonLabel + ' -m video2agent --version；修好后重开 DSH 再试。',
+        },
+        output,
+        status: after,
+      }
+    }
+    // A warm worker keeps the environment it started with; restart it so the new
+    // CLI/env is what the next tool call uses.
+    stopWorker()
+    return { ok: true, output, status: after }
   }
 
   function findExecutable(root, name, depth = 0) {
@@ -1178,7 +1270,8 @@ export function apply(ctx, config) {
   function saveManagedFfmpeg(ffmpeg, ffprobe, source) {
     try {
       fs.mkdirSync(path.dirname(managedToolsPath()), { recursive: true })
-      fs.writeFileSync(managedToolsPath(), JSON.stringify({ ffmpeg, ffprobe: ffprobe || '', source, at: new Date().toISOString() }, null, 2), 'utf8')
+      const tools = { ...readManagedTools(), ffmpeg, ffprobe: ffprobe || '', source, at: new Date().toISOString() }
+      fs.writeFileSync(managedToolsPath(), JSON.stringify(tools, null, 2), 'utf8')
       return true
     } catch {
       return false
@@ -1200,13 +1293,24 @@ export function apply(ctx, config) {
       // user did not ask for.
       const installedRoot = winGetPackageRoot()
       if (fs.existsSync(installedRoot)) {
-        const packageDir = fs.readdirSync(installedRoot).find((name) => name.toLowerCase().includes('ffmpeg')) || ''
-        const base = packageDir ? path.join(installedRoot, packageDir) : installedRoot
-        const existing = findExecutable(base, 'ffmpeg.exe')
-        if (existing) {
-          saveManagedFfmpeg(existing, findExecutable(base, 'ffprobe.exe') || '', 'found')
+        // Prefer the package the install button itself uses, then anything else;
+        // require ffprobe and a working binary before recording anything.
+        const candidates = fs.readdirSync(installedRoot)
+          .filter((name) => /ffmpeg/i.test(name))
+          .sort((a, b) => (/gyan/i.test(b) ? 1 : 0) - (/gyan/i.test(a) ? 1 : 0))
+        for (const candidate of candidates) {
+          const base = path.join(installedRoot, candidate)
+          const existing = findExecutable(base, 'ffmpeg.exe')
+          const probe = findExecutable(base, 'ffprobe.exe')
+          if (!existing || !probe) continue
+          const check = await runCommand(existing, ['-version'], 20000)
+          if (check.code !== 0) continue
+          saveManagedFfmpeg(existing, probe, 'found')
           const adopted = await setupStatus()
-          if (adopted.ffmpeg.ok) return { ok: true, already: true, adopted: true, output: '', status: adopted }
+          if (adopted.ffmpeg.ok) {
+            stopWorker()
+            return { ok: true, already: true, adopted: true, output: '', status: adopted }
+          }
         }
       }
       const where = await runCommand('where', ['winget'], 20000)
@@ -1232,6 +1336,13 @@ export function apply(ctx, config) {
       }
     } else if (process.platform === 'darwin') {
       r = await runCommand('brew', ['install', 'ffmpeg'], SETUP_INSTALL_TIMEOUT)
+      if (r.code === -1) {
+        return {
+          ok: false,
+          error: { code: 'E_BREW', message: '这台机器没有 brew', remedy: '先安装 Homebrew，或手动安装 FFmpeg 后把 FFMPEG_BIN 指向它' },
+          status: before,
+        }
+      }
       const which = await runCommand('which', ['ffmpeg'], 20000)
       if (which.code === 0) {
         const ffmpeg = String(which.out || '').trim()
@@ -1259,11 +1370,14 @@ export function apply(ctx, config) {
         status: after,
       }
     }
+    stopWorker()
     return { ok: true, output, status: after }
   }
 
-  // Environment check + installs. GET is read-only; POST goes through the same
-  // loopback+JSON guard as settings writes.
+  // Environment check + installs. POST goes through the same loopback+JSON guard
+  // as settings writes. GET usually only probes, but it can record the interpreter
+  // for "python -m video2agent" once (a CLI that is installed but not on PATH), so
+  // it is not strictly read-only — no user data is changed, only the tools record.
   whenWebServer(ctx, 'setup route', (webServer) => {
     webServer.register({
       kind: 'exact',
@@ -1278,11 +1392,12 @@ export function apply(ctx, config) {
           if (!incoming || typeof incoming !== 'object') return sendJson(res, 400, { error: 'invalid request' })
           const action = String(incoming.action || '')
           if (action === 'refresh') return sendJson(res, 200, await setupStatus())
-          if (action === 'install-cli') return sendJson(res, 200, await installCli())
-          if (action === 'install-ffmpeg') return sendJson(res, 200, await installFfmpeg())
+          if (action === 'install-cli') return sendJson(res, 200, await withInstallLock('install-cli', installCli))
+          if (action === 'install-ffmpeg') return sendJson(res, 200, await withInstallLock('install-ffmpeg', installFfmpeg))
           return sendJson(res, 400, { error: 'unknown action' })
         } catch (e) {
-          return sendJson(res, 500, { error: 'internal error', code: 'E_ROUTE', detail: String((e && e.message) || e).slice(0, 300) })
+          // readBody reports an oversized body as e.status (413); keep it.
+          return sendJson(res, (e && e.status) || 500, { error: 'internal error', code: 'E_ROUTE', detail: String((e && e.message) || e).slice(0, 300) })
         }
       },
     })
@@ -2608,6 +2723,10 @@ function guardWrite(req, res) {
   __test.installFfmpeg = installFfmpeg
   __test.managedToolEnv = managedToolEnv
   __test.readManagedTools = readManagedTools
+  __test.detectCli = detectCli
+  __test.saveManagedCli = saveManagedCli
+  __test.cliCommand = cliCommand
+  __test.managedToolsPath = managedToolsPath
 
 
   // Register a plain registry-ready definition instead of importing

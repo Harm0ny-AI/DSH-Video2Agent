@@ -168,6 +168,13 @@ def doctor(cfg: Config | None = None) -> dict[str, Any]:
 
     add("python", sys.version_info >= (3, 11), sys.version.split()[0], "Install Python 3.11 or newer.")
     for tool in ("ffmpeg", "ffprobe"):
+        env_key = "FFMPEG_BIN" if tool == "ffmpeg" else "FFPROBE_BIN"
+        override = os.environ.get(env_key)
+        if override:
+            exists = Path(override).is_file()
+            add(tool, exists, override if exists else f"{env_key} 指向不存在的文件：{override}",
+                None if exists else install_hint(tool))
+            continue
         p = which(tool)
         add(tool, bool(p), p or "not found", install_hint(tool))
     ytdlp = which("yt-dlp")

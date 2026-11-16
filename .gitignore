@@ -89,3 +89,4 @@ docs/report-shot.png
 /scripts/demo.ps1
 /scripts/bench-cli.mjs
 *.tgz/docs/RELEASE-NOTES-0.1.2.md
+/docs/RELEASE-NOTES-0.1.3.md

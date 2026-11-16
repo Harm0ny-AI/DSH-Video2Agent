@@ -13,8 +13,10 @@ limits in coverage, because "static at 160x90 / 10 fps" is not "nothing moved".
 from __future__ import annotations
 
 import math
+import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any, Iterator
 
 import numpy as np
@@ -54,8 +56,26 @@ SHOT_MERGE_MIN_MS = 1
 LONG_FULL_MAX_MS = 10 * 60 * 1000   # beyond this a whole-video scan is slow and coarse
 
 
+def _tool_path(name: str) -> str | None:
+    """ffmpeg/ffprobe resolution that also accepts FFMPEG_BIN/FFPROBE_BIN.
+
+    The plugin can install FFmpeg and hand it to the CLI through those variables
+    (it may not be on the app's PATH), so a which()-only lookup made every media
+    path work while perception silently lost its capture-quality data.
+    """
+    env_key = "FFMPEG_BIN" if name == "ffmpeg" else "FFPROBE_BIN"
+    override = os.environ.get(env_key)
+    if override:
+        return override if Path(override).is_file() else None
+    return shutil.which(name)
+
+
 def _require_tool(name: str) -> str:
-    found = shutil.which(name)
+    env_key = "FFMPEG_BIN" if name == "ffmpeg" else "FFPROBE_BIN"
+    override = os.environ.get(env_key)
+    if override and not Path(override).is_file():
+        raise Video2AgentError("E_FFMPEG", f"{env_key} 指向不存在的文件：{override}", install_hint(name))
+    found = _tool_path(name)
     if not found:
         raise Video2AgentError(
             "E_FFMPEG",
@@ -281,7 +301,7 @@ def _duplicate_runs(g: np.ndarray) -> tuple[list[int], int]:
 
 
 def _media_duration(path: str) -> int:
-    ff = shutil.which("ffprobe")
+    ff = _tool_path("ffprobe")
     if not ff:
         return 0
     out = subprocess.run(
@@ -295,7 +315,7 @@ def _media_duration(path: str) -> int:
 
 
 def _pts_stats(path: str) -> dict[str, Any] | None:
-    ff = shutil.which("ffprobe")
+    ff = _tool_path("ffprobe")
     if not ff:
         return None
     # packet timestamps, not frame timestamps: ffprobe decodes every frame for
@@ -327,7 +347,7 @@ def _pts_stats(path: str) -> dict[str, Any] | None:
     }
 
 def _probe(path: str) -> dict[str, Any]:
-    ff = shutil.which("ffprobe")
+    ff = _tool_path("ffprobe")
     if not ff:
         return {}
     import json as _json

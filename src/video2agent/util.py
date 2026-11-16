@@ -295,13 +295,21 @@ def run(cmd: Sequence[str], *, timeout: float | None = 120, cwd: str | Path | No
     try:
         proc = subprocess.run(args, timeout=timeout, **_subprocess_kwargs(cwd))
     except FileNotFoundError as e:
-        tool = Path(args[0]).name.lower()
+        # Path(...).stem keeps "ffmpeg.exe" in the FFmpeg family: the docs tell
+        # Windows users to point FFMPEG_BIN at the .exe, so a missing .exe must
+        # still be reported as E_FFMPEG with the install command, not as a
+        # generic missing command.
+        tool = Path(args[0]).stem.lower()
         if tool in FFMPEG_TOOLS:
-            raise Video2AgentError(
-                "E_FFMPEG",
-                f"{tool} 未安装或不在 PATH 上（视频探测/抽帧需要它）。",
-                install_hint(tool),
-            ) from e
+            env_key = "FFMPEG_BIN" if tool == "ffmpeg" else "FFPROBE_BIN"
+            override = os.environ.get(env_key)
+            if override and not Path(override).is_file():
+                message = f"{env_key} 指向不存在的文件：{override}"
+            elif os.sep in args[0] or "/" in args[0]:
+                message = f"{tool} 路径不存在：{args[0]}（检查 {env_key}）"
+            else:
+                message = f"{tool} 未安装或不在 PATH 上（视频探测/抽帧需要它）。"
+            raise Video2AgentError("E_FFMPEG", message, install_hint(tool)) from e
         raise Video2AgentError("E_TOOL_MISSING", f"Command not found: {args[0]}", "Run: video2agent doctor") from e
     except subprocess.TimeoutExpired as e:
         raise Video2AgentError("E_TIMEOUT", f"Command timed out after {timeout}s: {args[0]}", "Try a shorter range or smaller profile.") from e
@@ -351,13 +359,27 @@ def iter_json_lines(text: str) -> Iterable[dict[str, Any]]:
 
 
 def require_tool(name: str, remedy: str | None = None) -> str:
-    path = which(name)
-    if not path:
-        if name.lower() in FFMPEG_TOOLS:
+    tool = str(name).lower()
+    if tool in FFMPEG_TOOLS:
+        env_key = "FFMPEG_BIN" if tool == "ffmpeg" else "FFPROBE_BIN"
+        override = os.environ.get(env_key)
+        if override:
+            if Path(override).is_file():
+                return override
             raise Video2AgentError(
                 "E_FFMPEG",
-                f"{name} 未安装或不在 PATH 上（视频探测/抽帧需要它）。",
-                remedy or install_hint(name),
+                f"{env_key} 指向不存在的文件：{override}",
+                remedy or install_hint(tool),
             )
+        path = which(name)
+        if path:
+            return path
+        raise Video2AgentError(
+            "E_FFMPEG",
+            f"{name} 未安装或不在 PATH 上（视频探测/抽帧需要它）。",
+            remedy or install_hint(name),
+        )
+    path = which(name)
+    if not path:
         raise Video2AgentError("E_TOOL_MISSING", f"Required tool not found: {name}", remedy or "Run: video2agent doctor")
     return path
