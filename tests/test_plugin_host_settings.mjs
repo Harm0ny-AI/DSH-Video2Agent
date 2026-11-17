@@ -295,26 +295,18 @@ assert.equal(cloudInitial.status, 200)
 assert.equal(JSON.parse(cloudInitial.body).configured, false)
 const fakeKey = 'sk-' + 'x'.repeat(30)
 const cloudSaved = await call('POST', JSON.stringify({ action: 'save', key: fakeKey }), { path: '/api/video2agent/cloud' })
-if (process.platform === 'win32') {
-  assert.equal(cloudSaved.status, 200)
-  assert.equal(JSON.parse(cloudSaved.body).configured, true)
-  assert.equal(cloudSaved.body.includes(fakeKey), false, 'the key must never come back from the route')
-  const cloudStatus = await call('GET', undefined, { path: '/api/video2agent/cloud' })
-  assert.equal(JSON.parse(cloudStatus.body).configured, true)
-  assert.equal(cloudStatus.body.includes(fakeKey), false, 'GET must expose only last4')
-  const cloudCleared = await call('POST', JSON.stringify({ action: 'clear' }), { path: '/api/video2agent/cloud' })
-  assert.equal(cloudCleared.status, 200)
-  assert.equal(JSON.parse(cloudCleared.body).configured, false)
-} else {
-  // The key is DPAPI-encrypted; off Windows the CLI must refuse, not store it in
-  // plaintext. The route passes that failure through as a structured 502.
-  assert.equal(cloudSaved.status, 502, 'DPAPI is Windows-only; save must fail explicitly')
-  const savedBody = JSON.parse(cloudSaved.body)
-  assert.equal(savedBody.ok, false)
-  assert.match(JSON.stringify(savedBody), /E_[A-Z_]+/, 'the failure must name a code')
-  const cloudStatus = await call('GET', undefined, { path: '/api/video2agent/cloud' })
-  assert.equal(JSON.parse(cloudStatus.body).configured, false, 'a refused save must not look configured')
-}
+// The key store is per platform now (DPAPI / macOS Keychain / 0600 file on Linux),
+// so saving must succeed on every OS the CI matrix runs on — never fall back to an
+// unencrypted write or a blanket refusal.
+assert.equal(cloudSaved.status, 200, 'saving a key must work on this platform: ' + cloudSaved.body.slice(0, 200))
+assert.equal(JSON.parse(cloudSaved.body).configured, true)
+assert.equal(cloudSaved.body.includes(fakeKey), false, 'the key must never come back from the route')
+const cloudStatus = await call('GET', undefined, { path: '/api/video2agent/cloud' })
+assert.equal(JSON.parse(cloudStatus.body).configured, true)
+assert.equal(cloudStatus.body.includes(fakeKey), false, 'GET must expose only last4')
+const cloudCleared = await call('POST', JSON.stringify({ action: 'clear' }), { path: '/api/video2agent/cloud' })
+assert.equal(cloudCleared.status, 200)
+assert.equal(JSON.parse(cloudCleared.body).configured, false)
 
 // Flexible provider/model config: any OpenAI-compatible endpoint and model IDs.
 const cloudConfigured = await call('POST', JSON.stringify({
