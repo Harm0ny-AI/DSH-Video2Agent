@@ -1,9 +1,15 @@
 """SiliconFlow cloud ASR/OCR and the local secret store.
 
 The key is never written to `ui-settings.json`, never put in argv, never returned
-by a route, and never logged. On Windows it is protected with DPAPI (encryption
-bound to the current Windows user). Other platforms can use the
-`SILICONFLOW_API_KEY` environment variable; Settings key saving is Windows-only.
+by a route, and never logged. Storage is per platform:
+
+- Windows: DPAPI (encryption bound to the current Windows user);
+- macOS: the login Keychain (`security find/add/delete-generic-password`);
+- Linux/other: a 0600 file under `$VIDEO2AGENT_HOME/secrets/cloud.key`.
+
+`SILICONFLOW_API_KEY` / `VIDEO2AGENT_CLOUD_API_KEY` still work everywhere and win
+over a stored key. Saving in Settings used to be Windows-only; that made the
+cloud ASR/OCR path unusable on macOS (DPAPI error), which is fixed here.
 """
 
 from __future__ import annotations
@@ -13,6 +19,8 @@ import ctypes
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -60,10 +68,12 @@ class _Blob(ctypes.Structure):
 
 def _dpapi(data: bytes, protect: bool) -> bytes:
     if os.name != "nt" or not hasattr(ctypes, "windll"):
+        # Unreachable through load_key/save_key on macOS/Linux (they use the
+        # Keychain or a 0600 file); kept as a guard for direct callers.
         raise Video2AgentError(
             "E_CLOUD_SECRET_STORE",
             "当前系统没有可用的 Windows DPAPI 密钥存储。",
-            "在 Windows 上使用设置页保存 Key，或设置 SILICONFLOW_API_KEY 环境变量。",
+            "改用 SILICONFLOW_API_KEY 环境变量。",
         )
     fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
     buffer = ctypes.create_string_buffer(data, len(data))
@@ -85,6 +95,128 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
 
 def _secret_path(cfg: Config) -> Path:
     return cfg.home / "secrets" / "cloud.bin"
+
+
+def _secret_backend() -> str:
+    """Which OS store protects the saved key."""
+    if os.name == "nt":
+        return "dpapi"
+    if sys.platform == "darwin":
+        return "keychain"
+    return "file"
+
+
+_KEYCHAIN_SERVICE = "video2agent.cloud"
+_KEYCHAIN_ACCOUNT = "video2agent"
+
+
+def _keychain(*args: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["security", *args],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Video2AgentError(
+            "E_CLOUD_SECRET_STORE",
+            "无法调用 macOS 钥匙串（security 命令）。",
+            "重新打开设置页保存 Key；或改用 SILICONFLOW_API_KEY 环境变量。",
+        ) from exc
+
+
+def _keychain_missing(proc: subprocess.CompletedProcess) -> bool:
+    text = ((proc.stderr or "") + (proc.stdout or "")).lower()
+    return proc.returncode == 44 or "could not be found" in text or "找不到" in text
+
+
+def _keychain_read() -> str | None:
+    proc = _keychain(
+        "find-generic-password", "-a", _KEYCHAIN_ACCOUNT, "-s", _KEYCHAIN_SERVICE, "-w"
+    )
+    if proc.returncode == 0:
+        return (proc.stdout or "").strip() or None
+    if _keychain_missing(proc):
+        return None
+    raise Video2AgentError(
+        "E_CLOUD_SECRET_STORE",
+        "无法从 macOS 钥匙串读取云端 Key。",
+        "打开“钥匙串访问”检查 video2agent.cloud 条目，或重新保存 Key。",
+    )
+
+
+def _keychain_write(key: str) -> None:
+    proc = _keychain(
+        "add-generic-password", "-U",
+        "-a", _KEYCHAIN_ACCOUNT, "-s", _KEYCHAIN_SERVICE, "-w", key,
+    )
+    if proc.returncode != 0:
+        raise Video2AgentError(
+            "E_CLOUD_SECRET_STORE",
+            "无法把云端 Key 保存到 macOS 钥匙串。",
+            "重试一次；仍失败时用 SILICONFLOW_API_KEY 环境变量。",
+        )
+
+
+def _keychain_clear() -> None:
+    proc = _keychain(
+        "delete-generic-password", "-a", _KEYCHAIN_ACCOUNT, "-s", _KEYCHAIN_SERVICE
+    )
+    if proc.returncode != 0 and not _keychain_missing(proc):
+        raise Video2AgentError(
+            "E_CLOUD_CLEAR",
+            "无法从 macOS 钥匙串删除云端 Key。",
+            "打开“钥匙串访问”手动删除 video2agent.cloud 条目。",
+        )
+
+
+def _file_secret_path(cfg: Config) -> Path:
+    return cfg.home / "secrets" / "cloud.key"
+
+
+def _file_read(cfg: Config) -> str | None:
+    path = _file_secret_path(cfg)
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError as exc:
+        raise Video2AgentError(
+            "E_CLOUD_SECRET_STORE",
+            "云端 Key 文件无法读取。",
+            "重新保存 Key，或删除 secrets/cloud.key 后重试。",
+        ) from exc
+
+
+def _file_write(cfg: Config, key: str) -> None:
+    path = _file_secret_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".key.tmp-" + str(os.getpid()))
+    tmp.write_text(key, encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
+def _file_clear(cfg: Config) -> None:
+    _file_secret_path(cfg).unlink(missing_ok=True)
+    _file_secret_path(cfg).with_suffix(".key.tmp").unlink(missing_ok=True)
+
+
+def _has_stored_key(cfg: Config) -> bool:
+    backend = _secret_backend()
+    if backend == "dpapi":
+        return _secret_path(cfg).is_file()
+    if backend == "keychain":
+        try:
+            return _keychain_read() is not None
+        except Video2AgentError:
+            return False
+    return _file_secret_path(cfg).is_file()
 
 
 def _config_path(cfg: Config) -> Path:
@@ -225,49 +357,76 @@ def _key_last4(key: str) -> str:
 
 
 def load_key(cfg: Config) -> str | None:
-    path = _secret_path(cfg)
-    if not path.is_file():
-        return os.environ.get("VIDEO2AGENT_CLOUD_API_KEY") or os.environ.get("SILICONFLOW_API_KEY") or None
+    backend = _secret_backend()
+    stored: str | None = None
     try:
-        raw = path.read_bytes()
-        value = _dpapi(raw, protect=False)
-        key = value.decode("utf-8").strip()
-        return key or None
+        if backend == "dpapi":
+            path = _secret_path(cfg)
+            if path.is_file():
+                stored = _dpapi(path.read_bytes(), protect=False).decode("utf-8").strip() or None
+        elif backend == "keychain":
+            stored = _keychain_read()
+        else:
+            stored = _file_read(cfg)
+    except Video2AgentError:
+        raise
     except Exception as exc:
         raise Video2AgentError(
             "E_CLOUD_SECRET_STORE",
-            "云端 Key 无法解密。",
-            "重新在设置页保存 Key；如果换了 Windows 用户，需要重新保存。",
+            "云端 Key 无法读取。",
+            "重新在设置页保存 Key。" if backend != "dpapi" else "重新在设置页保存 Key；如果换了 Windows 用户，需要重新保存。",
         ) from exc
+    if stored:
+        return stored
+    return os.environ.get("VIDEO2AGENT_CLOUD_API_KEY") or os.environ.get("SILICONFLOW_API_KEY") or None
 
 
 def save_key(cfg: Config, key: str) -> dict[str, Any]:
     key = (key or "").strip()
     if len(key) < 8 or len(key) > 500 or any(c.isspace() for c in key):
         raise Video2AgentError("E_CLOUD_KEY", "API Key 格式不正确。", "粘贴服务商控制台生成的完整 Key。")
-    path = _secret_path(cfg)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    encrypted = _dpapi(key.encode("utf-8"), protect=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(encrypted)
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    tmp.replace(path)
-    return {"ok": True, "configured": True, "last4": _key_last4(key)}
+    backend = _secret_backend()
+    if backend == "dpapi":
+        path = _secret_path(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        encrypted = _dpapi(key.encode("utf-8"), protect=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(encrypted)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        tmp.replace(path)
+    elif backend == "keychain":
+        _keychain_write(key)
+    else:
+        _file_write(cfg, key)
+    return {"ok": True, "configured": True, "last4": _key_last4(key), "backend": backend}
 
 
 def clear_key(cfg: Config) -> dict[str, Any]:
-    path = _secret_path(cfg)
+    backend = _secret_backend()
     try:
-        path.unlink(missing_ok=True)
-        path.with_suffix(".tmp").unlink(missing_ok=True)
+        if backend == "dpapi":
+            path = _secret_path(cfg)
+            path.unlink(missing_ok=True)
+            path.with_suffix(".tmp").unlink(missing_ok=True)
+        elif backend == "keychain":
+            _keychain_clear()
+        else:
+            _file_clear(cfg)
+        # Never leave a secret in another backend's legacy file behind.
+        if backend != "dpapi":
+            _secret_path(cfg).unlink(missing_ok=True)
+        if backend != "file":
+            _file_secret_path(cfg).unlink(missing_ok=True)
+    except Video2AgentError:
+        raise
     except OSError as exc:
         raise Video2AgentError(
             "E_CLOUD_CLEAR",
             "无法删除已保存的 API Key。",
-            "关闭占用该文件的程序后重试，或手动删除 secrets/cloud.bin。",
+            "关闭占用该文件的程序后重试，或手动删除 secrets/ 下的密钥文件。",
         ) from exc
     return {"ok": True, "configured": False}
 
@@ -320,7 +479,11 @@ def status(cfg: Config) -> dict[str, Any]:
         "ocr_enabled": bool(data["ocr_enabled"]),
         "asr_enabled": bool(data.get("asr_enabled", True)),
         "configured": bool(key) and not data.get("corrupt"),
-        "source": ("env" if key and not _secret_path(cfg).is_file() else ("file" if key else None)),
+        "backend": _secret_backend(),
+        "source": (
+            "env" if key and not _has_stored_key(cfg)
+            else (_secret_backend() if key else None)
+        ),
         "last4": _key_last4(key) if key else "",
         "invite_url": INVITE_URL,
         "international_url": INTERNATIONAL_URL,

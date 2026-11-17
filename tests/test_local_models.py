@@ -26,6 +26,17 @@ class LocalModelTest(unittest.TestCase):
         self.assertIn("Ryzen", " ".join(p["cpu"] for p in status["tiers"]))
         self.assertIn("Intel", " ".join(p["cpu"] for p in status["tiers"]))
 
+    def test_ocr_status_explains_extra_availability(self):
+        # The settings page must be able to say why local OCR is missing: the
+        # extra has no wheel on Python 3.13, so a dead "内置" dropdown would lie.
+        import sys
+        status = local_models.status(self.cfg)
+        ocr = status["ocr"]
+        self.assertIn("python", ocr)
+        self.assertEqual(ocr["python"], "%d.%d" % sys.version_info[:2])
+        self.assertEqual(ocr["extra_available"], sys.version_info[:2] < (3, 13))
+        self.assertIsInstance(ocr["extra_available"], bool)
+
     def test_custom_local_ct2_path_is_recognized_and_selected(self):
         model = Path(self.tmp.name) / "my-ct2"
         model.mkdir()

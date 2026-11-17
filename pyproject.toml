@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "video2agent"
-version = "0.1.8"
+version = "0.1.9"
 description = "Video search and understanding for AI agents: transcript, scenes, on-screen text, frames."
 readme = "README.md"
 requires-python = ">=3.11"

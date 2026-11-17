@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.9 (2026-11-17)
+
+- **macOS/Linux can save the cloud API key now.** The settings page used to
+  write the key through Windows DPAPI only, so on macOS saving failed with
+  "当前系统没有可用的 Windows DPAPI 密钥存储" and cloud ASR/OCR was unusable.
+  macOS now uses the login Keychain (security CLI), Linux/other use a 0600 file
+  under secrets/, Windows keeps DPAPI; SILICONFLOW_API_KEY still wins everywhere.
+  Status reports the backend (source: dpapi/keychain/file/env).
+- **Local OCR is honest on Python 3.13.** When the optional OCR extra is missing
+  the settings page says 本地 OCR 未安装, explains it needs Python 3.11/3.12 (no
+  rapidocr wheel on 3.13) or cloud OCR, and disables the dead 内置 model dropdown
+  instead of showing a built-in model that cannot run.
+- **Bilibili QR image failures are visible.** A QR data URL that fails to decode
+  now shows a retry hint instead of a blank white box.
+- README: per-platform key storage documented.
+
 ## 0.1.8 (2026-11-17)
 
 - **A marketplace install on a fresh Python 3.13 machine now works.** Root cause

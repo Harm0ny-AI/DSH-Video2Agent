@@ -2093,6 +2093,10 @@ window.__ModuleLoader__.load({
       // Bilibili login state: the QR flow is what makes "use the subtitles"
       // possible without a user ever touching a cookie file.
       const [bili, setBili] = React.useState(() => BILI_CACHE || { loggedIn: false, uid: '', qr: '', key: '', state: 'loading', busy: false })
+      // A data: URL can still fail to decode (WebKit/Chromium differences, a
+      // truncated response); show a retry hint instead of a blank white box.
+      const [qrFailed, setQrFailed] = React.useState(false)
+      React.useEffect(() => { setQrFailed(false) }, [bili.qr])
       const [cloud, setCloud] = React.useState(() => CLOUD_CACHE || { state: 'loading', configured: false, last4: '', ocrEnabled: false, error: '' })
       const [cloudDraft, setCloudDraft] = React.useState(() => CLOUD_DRAFT_CACHE || { provider: 'siliconflow', base_url: 'https://api.siliconflow.cn/v1', asr_model: '', ocr_model: '', asr_enabled: true })
       const [cloudKey, setCloudKey] = React.useState('')
@@ -2517,6 +2521,12 @@ window.__ModuleLoader__.load({
       const ocrCloud = !cloudUnknown && !!cloud.configured && cloud.ocr_enabled
       const asrSource = cloudUnknown ? '未知' : (asrCloud ? '云端' : '本地')
       const ocrSource = cloudUnknown ? '未知' : (ocrCloud ? '云端' : '本地')
+      // Local OCR is a separate Python extra; on a machine that cannot install it
+      // (e.g. Python 3.13 has no rapidocr wheel) the page must say so instead of
+      // offering a dead "内置" dropdown that looks installed.
+      const ocrLocal = models.ocr || {}
+      const ocrLocalAvailable = models.state === 'ready' && !!ocrLocal.available
+      const ocrExtraAvailable = !!ocrLocal.extra_available
 
       return h('div', { 'data-vp-settings': '', 'data-loading': (cloud.state === 'loading' || models.state === 'loading') ? '1' : undefined },
         h('h1', { 'data-vp-settings-title': '' }, 'Video2Agent'),
@@ -2720,9 +2730,15 @@ window.__ModuleLoader__.load({
                 })
               )
             : h('div', null,
+                !ocrLocalAvailable && models.state === 'ready'
+                  ? h('div', { 'data-vp-warn': 'err', 'data-vp-ocr-missing': '', style: { marginTop: '6px' } },
+                      '本地 OCR 未安装。' + (ocrExtraAvailable
+                        ? '可在上方「环境检查」里点「安装 OCR」（可选）。'
+                        : '当前 Python ' + (ocrLocal.python || '') + ' 没有本地 OCR 依赖，需要 Python 3.11/3.12；也可以改用云端 OCR（先粘贴 API Key）。'))
+                  : null,
                 h('select', {
                   value: ocrCustomMode ? 'custom' : 'builtin',
-                  disabled: models.state !== 'ready' || modelBusy,
+                  disabled: models.state !== 'ready' || modelBusy || !ocrLocalAvailable,
                   style: { width: '100%', marginTop: '6px', padding: '7px 9px', borderRadius: '9px' },
                   onChange: (e) => {
                     const custom = e.target.value === 'custom'
@@ -2730,7 +2746,7 @@ window.__ModuleLoader__.load({
                     if (!custom) selectOcrModel('')
                   },
                 },
-                  h('option', { value: 'builtin' }, 'RapidOCR · PP-OCRv4（内置）'),
+                  h('option', { value: 'builtin' }, 'RapidOCR · PP-OCRv4（' + (ocrLocalAvailable ? '内置' : '需要先安装本地 OCR') + '）'),
                   h('option', { value: 'custom' }, '高级：自定义模型 ID / 本地路径')
                 ),
                 ocrCustomMode ? h('div', null,
@@ -2775,7 +2791,15 @@ window.__ModuleLoader__.load({
           h('div', { 'data-vp-bili-hint': '' },
             '扫码登录，优先使用 B 站字幕。'),
           bili.qr ? h('div', { 'data-vp-bili-qrbox': '' },
-            h('img', { 'data-vp-bili-qr': '', src: bili.qr, alt: 'B 站登录二维码' }),
+            qrFailed
+              ? h('div', { 'data-vp-warn': 'err', role: 'alert' }, '二维码图片加载失败，请点「重新生成二维码」重试。')
+              : h('img', {
+                  'data-vp-bili-qr': '',
+                  src: bili.qr,
+                  alt: 'B 站登录二维码',
+                  onError: () => setQrFailed(true),
+                  onLoad: (e) => { if (!e.target || !e.target.naturalWidth) setQrFailed(true) },
+                }),
             h('div', { 'data-vp-bili-tip': '' }, bili.state === 'scanned' ? '已扫码，请在手机上点确认' : '用 B 站手机 App 扫码登录')
           ) : null,
           bili.state === 'expired' ? h('div', { 'data-vp-warn': '', style: { marginTop: '8px' } }, '二维码已超时，请重新生成') : null,

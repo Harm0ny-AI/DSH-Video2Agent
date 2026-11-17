@@ -88,6 +88,8 @@
 视频没有字幕时，才需要语音模型（`small` 约 464 MB，**不会自动下载**，用 `video2agent models download` 显式安装）。
 本地画面文字 OCR 是可选额外包：`pip install "video2agent[ocr]"`（需要 Python 3.11/3.12；核心检索/转写/取帧不需要它，云端 OCR 也不需要）。
 
+各平台密钥存储：Windows 用 DPAPI，macOS 用登录钥匙串（Keychain），Linux 用 `$VIDEO2AGENT_HOME/secrets/cloud.key`（0600）；任何平台都可以改用 `SILICONFLOW_API_KEY` 环境变量。
+
 已发布到 PyPI 和 npm，可以直接安装：
 
 ```bash
@@ -167,7 +169,7 @@ sequenceDiagram
 
 ## 状态
 
-- **0.1.8 已发布（2026-11-17）。** CLI、Skill 和 DSH 插件均可用，从 PyPI 或 npm 安装；0.1.3 把设置页「环境检查」收成一行状态胶囊（缺依赖时才展开安装按钮），修复 `perceive`/`video2agent doctor` 不认 `FFMPEG_BIN`/`FFPROBE_BIN` 的问题，并更新插件页安装说明；0.1.2 加入了「环境检查 + 一键安装」，0.1.1 修了「读到结尾被报错」「毫秒参数被当成秒」「中文被识别成日语」「进度环标错行」和「单次等待过长被杀」。`
+- **0.1.9 已发布（2026-11-17）。** CLI、Skill 和 DSH 插件均可用，从 PyPI 或 npm 安装；0.1.3 把设置页「环境检查」收成一行状态胶囊（缺依赖时才展开安装按钮），修复 `perceive`/`video2agent doctor` 不认 `FFMPEG_BIN`/`FFPROBE_BIN` 的问题，并更新插件页安装说明；0.1.2 加入了「环境检查 + 一键安装」，0.1.1 修了「读到结尾被报错」「毫秒参数被当成秒」「中文被识别成日语」「进度环标错行」和「单次等待过长被杀」。`
 - 默认在本地跑，不需要 GPU；云端可选。
 - 已发布到 PyPI 和 npm：`pip install video2agent`、`npm i dsh-video2agent`；插件市场条目已按 awesome 列表格式准备好。
 - 已知限制：单字中文搜索、小字/低对比度文字的 OCR、跨镜头计数。

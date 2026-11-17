@@ -38,7 +38,11 @@ Requires Python 3.11+ and FFmpeg. The plugin settings page has a one-click
 
 Local on-screen-text OCR is an optional extra: `pip install "video2agent[ocr]"`
 (Python 3.11/3.12 — `rapidocr-onnxruntime` has no 3.13 wheel yet). Core search,
-transcription and evidence work without it; cloud OCR does not need it. Any DSH 0.2.1 / 0.2.2 profile works; the host
+transcription and evidence work without it; cloud OCR does not need it.
+
+The cloud API key is stored per platform: DPAPI on Windows, the login Keychain
+on macOS, and a 0600 file under `$VIDEO2AGENT_HOME/secrets/` on Linux. A
+`SILICONFLOW_API_KEY` environment variable works everywhere. Any DSH 0.2.1 / 0.2.2 profile works; the host
 command is optional, so headless/TUI profiles still get the tool and `/video`.
 
 - PyPI: <https://pypi.org/project/video2agent/>

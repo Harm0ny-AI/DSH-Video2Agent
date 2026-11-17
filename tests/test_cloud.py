@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -125,6 +126,97 @@ class CloudTest(unittest.TestCase):
         with patch("video2agent.cloud.requests.post", return_value=response):
             result = cloud.ocr(self.cfg, image)
         self.assertIn("slide", result["text"])
+
+
+class SecretBackendTest(unittest.TestCase):
+    """The key store must work on macOS/Linux, not only Windows DPAPI.
+
+    macOS uses the login Keychain through the security CLI; other platforms use a
+    0600 file. Both paths run against a fake security/FS so every CI runner covers
+    them (the Windows DPAPI path has its own tests above).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="vp-secret-")
+        self.cfg = load_config(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _fake_security():
+        state = {"key": None}
+        calls = []
+
+        class Proc:
+            def __init__(self, code=0, out="", err=""):
+                self.returncode = code
+                self.stdout = out
+                self.stderr = err
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            assert argv[0] == "security", argv
+            cmd = argv[1]
+            if cmd == "find-generic-password":
+                if state["key"] is None:
+                    return Proc(44, "", "The specified item could not be found in the keychain.")
+                return Proc(0, state["key"] + "\n", "")
+            if cmd == "add-generic-password":
+                state["key"] = argv[argv.index("-w") + 1]
+                return Proc()
+            if cmd == "delete-generic-password":
+                if state["key"] is None:
+                    return Proc(44, "", "The specified item could not be found in the keychain.")
+                state["key"] = None
+                return Proc()
+            raise AssertionError(argv)
+
+        return fake_run, calls, state
+
+    def test_macos_keychain_roundtrip_and_clear(self):
+        fake_run, calls, state = self._fake_security()
+        key = "sk-keychain-test-123456"
+        with patch("video2agent.cloud._secret_backend", return_value="keychain"), patch(
+            "video2agent.cloud.subprocess.run", side_effect=fake_run
+        ):
+            self.assertIsNone(cloud.load_key(self.cfg))
+            result = cloud.save_key(self.cfg, key)
+            self.assertEqual(result["backend"], "keychain")
+            self.assertEqual(cloud.load_key(self.cfg), key)
+            status = cloud.status(self.cfg)
+            self.assertTrue(status["configured"])
+            self.assertEqual(status["source"], "keychain")
+            self.assertEqual(status["backend"], "keychain")
+            cloud.clear_key(self.cfg)
+            self.assertIsNone(cloud.load_key(self.cfg))
+            self.assertFalse(cloud.status(self.cfg)["configured"])
+            self.assertFalse((Path(self.tmp.name) / "secrets" / "cloud.bin").exists())
+            self.assertFalse((Path(self.tmp.name) / "secrets" / "cloud.key").exists())
+        self.assertIn("add-generic-password", [argv[1] for argv in calls])
+        self.assertNotIn(key, json.dumps(cloud.status(self.cfg)))
+
+    def test_linux_file_backend_roundtrip_and_clear(self):
+        key = "sk-file-backend-123456"
+        with patch("video2agent.cloud._secret_backend", return_value="file"):
+            cloud.save_key(self.cfg, key)
+            path = Path(self.tmp.name) / "secrets" / "cloud.key"
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.read_text(encoding="utf-8"), key)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(cloud.load_key(self.cfg), key)
+            self.assertEqual(cloud.status(self.cfg)["source"], "file")
+            cloud.clear_key(self.cfg)
+            self.assertFalse(path.exists())
+            self.assertIsNone(cloud.load_key(self.cfg))
+
+    def test_env_key_is_used_when_nothing_is_stored(self):
+        with patch("video2agent.cloud._secret_backend", return_value="file"), patch.dict(
+            os.environ, {"VIDEO2AGENT_CLOUD_API_KEY": "sk-env-only-123456"}, clear=False
+        ):
+            self.assertEqual(cloud.load_key(self.cfg), "sk-env-only-123456")
+            self.assertEqual(cloud.status(self.cfg)["source"], "env")
 
 
 if __name__ == "__main__":

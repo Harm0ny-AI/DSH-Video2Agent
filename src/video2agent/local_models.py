@@ -8,6 +8,7 @@ Downloads are explicit user actions.
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,11 @@ def status(cfg: Config, model: str | None = None) -> dict[str, Any]:
             "builtin": not bool(str(cfg.get("ocr_local_config") or "")),
             "selected": "custom" if str(cfg.get("ocr_local_config") or "") else "builtin",
             "config_path": str(cfg.get("ocr_local_config") or ""),
+            # The settings page must not offer "内置" OCR on a machine that cannot
+            # install the extra (e.g. Python 3.13 has no rapidocr-onnxruntime
+            # wheel), and must explain why instead of showing a dead dropdown.
+            "python": "%d.%d" % sys.version_info[:2],
+            "extra_available": sys.version_info[:2] < (3, 13),
         },
     }
 
