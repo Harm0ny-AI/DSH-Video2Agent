@@ -43,6 +43,23 @@ def _is_ocr_noise(text: str) -> bool:
     return t in _OCR_NOISE
 
 
+def ocr_engine():
+    """Return (kind, RapidOCR class) for the installed OCR engine.
+
+    Two engines are supported: "rapidocr" (3.x, pure-Python wheel, so it installs
+    on Python 3.13 too) and the legacy "rapidocr-onnxruntime" (only <=3.12).
+    """
+    try:
+        from rapidocr import RapidOCR  # type: ignore  # noqa: F401
+        return "rapidocr", RapidOCR
+    except Exception:
+        try:
+            from rapidocr_onnxruntime import RapidOCR  # type: ignore  # noqa: F401
+            return "legacy", RapidOCR
+        except Exception:
+            return "", None
+
+
 def ocr_available() -> bool:
     global _OCR_TRIED, _OCR_AVAILABLE, _OCR_TRIED_AT
     now = time.monotonic()
@@ -54,11 +71,7 @@ def ocr_available() -> bool:
             return _OCR_AVAILABLE
         _OCR_TRIED = True
         _OCR_TRIED_AT = now
-        try:
-            from rapidocr_onnxruntime import RapidOCR  # type: ignore  # noqa: F401
-            _OCR_AVAILABLE = True
-        except Exception:
-            _OCR_AVAILABLE = False
+        _OCR_AVAILABLE = ocr_engine()[0] != ""
     return _OCR_AVAILABLE
 
 
@@ -84,13 +97,37 @@ def _engine_for_thread(config_path: str | None = None):
     if engines is None:
         engines = {}
         _OCR_LOCAL.engines = engines
-    key = _engine_key(config_path)
+    kind, cls = ocr_engine()
+    if cls is None:
+        raise OcrFailed("未安装本地 OCR")
+    key = f"{kind}::{_engine_key(config_path)}"
     engine = engines.get(key)
     if engine is None:
-        from rapidocr_onnxruntime import RapidOCR  # type: ignore
-        engine = RapidOCR(config_path=config_path) if config_path else RapidOCR()
+        try:
+            engine = cls(config_path=config_path) if config_path else cls()
+        except TypeError:
+            # rapidocr 3.x has no legacy config_path argument; a custom YAML model
+            # still requires rapidocr-onnxruntime (Python 3.11/3.12).
+            if config_path:
+                raise OcrFailed("自定义 OCR 模型配置需要 rapidocr-onnxruntime（Python 3.11/3.12）") from None
+            engine = cls()
         engines[key] = engine
     return engine
+
+
+def _ocr_items(raw, kind: str) -> list[Any]:
+    """Normalize both engines to [(box, text, score), ...]."""
+    if kind == "legacy":
+        return list(raw or [])
+    # rapidocr 3.x returns RapidOCROutput(txts=..., scores=..., boxes=...).
+    boxes = getattr(raw, "boxes", None)
+    txts = getattr(raw, "txts", None)
+    scores = getattr(raw, "scores", None)
+    if boxes is None or txts is None:
+        return list(raw) if isinstance(raw, (list, tuple)) else []
+    if scores is None:
+        scores = [1.0] * len(txts)
+    return list(zip(boxes, txts, scores))
 
 
 def _box_xywh(box: Any, w: int, h: int) -> list[float]:
@@ -112,15 +149,20 @@ def ocr_image(path: str | Path, config_path: str | None = None) -> list[dict[str
     that state instead of pretending the frame is empty.
     """
     if not ocr_available():
-        raise OcrFailed("未安装 OCR（rapidocr-onnxruntime）")
+        raise OcrFailed("未安装本地 OCR")
+    kind, _ = ("", None)
     try:
+        kind, _cls = ocr_engine()
         engine = _engine_for_thread(config_path)
         with Image.open(path) as im:
             im = im.convert("RGB")
             im.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
             w, h = im.size
             arr = np.asarray(im)
-        result, _ = engine(arr)
+        raw = engine(arr)
+        # rapidocr 3.x returns one output object; the legacy engine returns a
+        # (items, elapse) tuple. Normalize before filtering.
+        result = _ocr_items(raw[0] if kind == "legacy" and isinstance(raw, tuple) else raw, kind)
     except Exception as exc:  # noqa: BLE001 - the reason matters, not the type
         raise OcrFailed(f"{type(exc).__name__}: {exc}") from exc
     if not result:

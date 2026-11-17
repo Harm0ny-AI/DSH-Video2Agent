@@ -181,7 +181,7 @@ def doctor(cfg: Config | None = None) -> dict[str, Any]:
     add("yt-dlp", bool(ytdlp), ytdlp or "not found", "pip install yt-dlp", required=False)
     add("yt_dlp_python", package_available("yt_dlp"), "python package", "pip install yt-dlp", required=False)
     add("faster_whisper", package_available("faster_whisper"), "python package", "pip install faster-whisper", required=False)
-    add("rapidocr", package_available("rapidocr_onnxruntime"), "python package", "pip install \"video2agent[ocr]\"", required=False)
+    add("rapidocr", package_available("rapidocr") or package_available("rapidocr_onnxruntime"), "python package", "pip install \"video2agent[ocr]\"", required=False)
     add("opencv", package_available("cv2"), "python package", "pip install opencv-python-headless", required=False)
     add("numpy", package_available("numpy"), "python package", "pip install numpy", required=False)
     add("pillow", package_available("PIL"), "python package", "pip install Pillow", required=False)
@@ -263,11 +263,15 @@ def doctor(cfg: Config | None = None) -> dict[str, Any]:
                     full = db.get_video(video["id"])
                     metrics = (full.get("meta") or {}).get("analysis_metrics") or {} if full else {}
                     if metrics.get("transcript_source") == "caption":
-                        from .captions import caption_content_mismatch
-                        segs = db.get_segments(video["id"], limit=120)
-                        meta = (full or {}).get("meta") or {}
-                        if caption_content_mismatch(segs, (full or {}).get("title"), meta.get("description"), meta.get("tags")):
-                            bad.append(f"{video['id']} 字幕内容与标题不匹配")
+                        from .captions import caption_content_mismatch, caption_track_trusted
+                        # The same trust policy as the read gate: a WBI track is
+                        # authoritative for identity, so doctor must not tell the user
+                        # to re-ingest a track the pipeline would re-accept unchanged.
+                        if not caption_track_trusted(metrics.get("caption_track")):
+                            segs = db.get_segments(video["id"], limit=120)
+                            meta = (full or {}).get("meta") or {}
+                            if caption_content_mismatch(segs, (full or {}).get("title"), meta.get("description"), meta.get("tags")):
+                                bad.append(f"{video['id']} 字幕内容与标题不匹配")
             add(
                 "transcript_alignment",
                 not bad,

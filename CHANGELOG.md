@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0 (2026-11-17)
+
+- **Local OCR now installs on Python 3.13 with one click.** The OCR extra installs
+  rapidocr 3.x (pure-Python wheel, bundled PP-OCRv6 models) instead of
+  rapidocr-onnxruntime, which has no 3.13 wheel. Both engines are supported at
+  runtime (3.x preferred, legacy fallback), so existing installs keep working and
+  the environment card's 安装 OCR button works on Python 3.11-3.13.
+- **An outdated CLI can be updated from the card.** When the installed Python CLI
+  is older than the npm build, the card shows CLI 可更新 (e.g. 0.1.8 -> 0.2.0) with
+  a one-click 更新 CLI button. Without it a 0.1.8 CLI could not save the API key
+  on macOS while the page looked healthy and offered no fix.
+- Settings page: the local-OCR option names the actual model (PP-OCRv6 / PP-OCRv4),
+  and the same Key-store error is no longer rendered twice.
+- doctor reports rapidocr 3.x as the OCR package; CI still tests the legacy
+  rapidocr-onnxruntime engine on Python 3.11/3.12.
+
 ## 0.1.9 (2026-11-17)
 
 - **macOS/Linux can save the cloud API key now.** The settings page used to

@@ -2034,13 +2034,18 @@ window.__ModuleLoader__.load({
           const match = String(data.ffmpeg.detail || '').match(/ffmpeg version (\d+(?:\.\d+)*)/i)
           return match ? match[1] : '正常'
         })() },
-        // Optional: local on-screen-text OCR. Only meaningful once the CLI works,
-        // and not available on Python 3.13 (no wheel).
+        // Optional: local on-screen-text OCR. Only meaningful once the CLI works;
+        // both OCR engines (rapidocr 3.x, rapidocr-onnxruntime) are installable.
         ...(data.cli && data.cli.ok && data.ocr
           ? [{ key: 'ocr', label: 'OCR', item: data.ocr, text: data.ocr.ok ? '已装' : (data.ocr.supported ? '未装' : '不支持') }]
           : []),
       ] : []
       const missing = items.filter((entry) => !(entry.item && entry.item.ok))
+      // The Python CLI carries the platform fixes (macOS Keychain key storage,
+      // OCR engines). A CLI that is merely installed but older than this npm
+      // build must offer an update button — otherwise the page cannot fix the
+      // exact DPAPI error the user is looking at.
+      const updateCli = !!(data && data.canInstall && data.canInstall.updateCli)
       const chip = (entry) => {
         const ok = !!(entry.item && entry.item.ok)
         return h('span', { key: entry.key, 'data-vp-env-state': ok ? 'ok' : 'missing', 'data-vp-env-item': entry.key,
@@ -2065,6 +2070,18 @@ window.__ModuleLoader__.load({
           h('button', { 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => load(),
             style: { flex: 'none', padding: '2px 8px', fontSize: '11px', lineHeight: '18px' } }, busy ? '…' : '重新检测'),
         ),
+        updateCli
+          ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
+              h('span', { style: { fontSize: '11px', color: '#9a6700' } },
+                'CLI 可更新：' + (data.cli.version || '?') + ' → ' + (data.cli.latest || '?')),
+              h('button', {
+                'data-vp-bili-btn': '',
+                disabled: !!busy,
+                onClick: () => install('update-cli'),
+                style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' },
+              }, busy === 'update-cli' ? '更新中…' : '更新 CLI'),
+            )
+          : null,
         missing.length
           ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
               h('span', { style: { fontSize: '11px', color: 'var(--vp-muted,#63605a)' } }, '缺少依赖：'),
@@ -2521,12 +2538,14 @@ window.__ModuleLoader__.load({
       const ocrCloud = !cloudUnknown && !!cloud.configured && cloud.ocr_enabled
       const asrSource = cloudUnknown ? '未知' : (asrCloud ? '云端' : '本地')
       const ocrSource = cloudUnknown ? '未知' : (ocrCloud ? '云端' : '本地')
+      // The same Key-store error came from both the status read and a failed save;
+      // render it once instead of stacking two identical red lines.
+      const keyErrorMessage = cloud.key_error && cloud.key_error.message ? String(cloud.key_error.message) : ''
       // Local OCR is a separate Python extra; on a machine that cannot install it
       // (e.g. Python 3.13 has no rapidocr wheel) the page must say so instead of
       // offering a dead "内置" dropdown that looks installed.
       const ocrLocal = models.ocr || {}
       const ocrLocalAvailable = models.state === 'ready' && !!ocrLocal.available
-      const ocrExtraAvailable = !!ocrLocal.extra_available
 
       return h('div', { 'data-vp-settings': '', 'data-loading': (cloud.state === 'loading' || models.state === 'loading') ? '1' : undefined },
         h('h1', { 'data-vp-settings-title': '' }, 'Video2Agent'),
@@ -2732,9 +2751,7 @@ window.__ModuleLoader__.load({
             : h('div', null,
                 !ocrLocalAvailable && models.state === 'ready'
                   ? h('div', { 'data-vp-warn': 'err', 'data-vp-ocr-missing': '', style: { marginTop: '6px' } },
-                      '本地 OCR 未安装。' + (ocrExtraAvailable
-                        ? '可在上方「环境检查」里点「安装 OCR」（可选）。'
-                        : '当前 Python ' + (ocrLocal.python || '') + ' 没有本地 OCR 依赖，需要 Python 3.11/3.12；也可以改用云端 OCR（先粘贴 API Key）。'))
+                      '本地 OCR 未安装。可在上方「环境检查」里点「安装 OCR」（可选）；也可以改用云端 OCR（先保存 API Key）。')
                   : null,
                 h('select', {
                   value: ocrCustomMode ? 'custom' : 'builtin',
@@ -2746,7 +2763,7 @@ window.__ModuleLoader__.load({
                     if (!custom) selectOcrModel('')
                   },
                 },
-                  h('option', { value: 'builtin' }, 'RapidOCR · PP-OCRv4（' + (ocrLocalAvailable ? '内置' : '需要先安装本地 OCR') + '）'),
+                  h('option', { value: 'builtin' }, 'RapidOCR · ' + (ocrLocal.model || 'PP-OCR') + '（' + (ocrLocalAvailable ? '内置' : '需要先安装本地 OCR') + '）'),
                   h('option', { value: 'custom' }, '高级：自定义模型 ID / 本地路径')
                 ),
                 ocrCustomMode ? h('div', null,
@@ -2780,7 +2797,7 @@ window.__ModuleLoader__.load({
           ),
           // role=alert so screen readers announce a failed read/save instead of
           // leaving it as an unlabelled visual hint.
-          cloud.error ? h('div', { 'data-vp-warn': 'err', role: 'alert', style: { marginTop: '8px' } }, cloud.error) : null,
+          cloud.error && cloud.error !== keyErrorMessage ? h('div', { 'data-vp-warn': 'err', role: 'alert', style: { marginTop: '8px' } }, cloud.error) : null,
           models.error ? h('div', { 'data-vp-warn': 'err', role: 'alert', style: { marginTop: '8px' } }, models.error) : null
         ),
         h('div', { 'data-vp-bili': '' },

@@ -102,6 +102,26 @@ class TrackChoiceTests(unittest.TestCase):
         }
         self.assertTrue(_stored_caption_mismatch(FakeDB(), video))
 
+    def test_a_wbi_track_is_trusted_for_identity(self):
+        # A signed WBI track is authoritative even when its words share nothing with
+        # the title: clickbait titles and AI translation tracks (ai-en/ai-ja) never
+        # repeat the spoken text, and re-ingest returns the same track.
+        from video2agent.pipeline import _stored_caption_mismatch
+
+        class FakeDB:
+            def get_segments(self, video_id, limit=120):
+                return _text_segments(80, "手机镜头膜到底有没有必要贴")
+
+        video = {
+            "id": "vid_wbi",
+            "title": "直观解释注意力机制 Transformer 深度学习",
+            "meta": {"analysis_metrics": {
+                "transcript_source": "caption",
+                "caption_track": {"endpoint": "wbi", "lan": "ai-zh"},
+            }},
+        }
+        self.assertFalse(_stored_caption_mismatch(FakeDB(), video))
+
     def test_stored_asr_is_not_rechecked_as_caption(self):
         from video2agent.pipeline import _stored_caption_mismatch
 

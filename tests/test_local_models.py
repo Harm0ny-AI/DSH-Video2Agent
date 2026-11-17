@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import tempfile
 import unittest
@@ -34,8 +35,10 @@ class LocalModelTest(unittest.TestCase):
         ocr = status["ocr"]
         self.assertIn("python", ocr)
         self.assertEqual(ocr["python"], "%d.%d" % sys.version_info[:2])
-        self.assertEqual(ocr["extra_available"], sys.version_info[:2] < (3, 13))
-        self.assertIsInstance(ocr["extra_available"], bool)
+        # rapidocr 3.x ships a pure-Python wheel, so local OCR is installable on
+        # every Python this project supports (3.11-3.13).
+        self.assertTrue(ocr["extra_available"])
+        self.assertIn("engine_package", ocr)
 
     def test_custom_local_ct2_path_is_recognized_and_selected(self):
         model = Path(self.tmp.name) / "my-ct2"
@@ -94,6 +97,10 @@ class LocalModelTest(unittest.TestCase):
         self.assertEqual(selected["ocr"]["selected"], "custom")
         self.assertEqual(selected["ocr"]["config_path"], str(config.resolve()))
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("rapidocr_onnxruntime"),
+        "generating a legacy RapidOCR config needs rapidocr-onnxruntime",
+    )
     def test_huggingface_ocr_onnx_repo_generates_config(self):
         repo = Path(self.tmp.name) / "hf-onnx"
         for rel in ("PP-OCRv4/ch_PP-OCRv4_det_infer.onnx", "PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx", "PP-OCRv1/ch_ppocr_mobile_v2.0_cls_infer.onnx"):

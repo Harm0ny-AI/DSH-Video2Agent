@@ -13,7 +13,7 @@ class LazyImportTests(unittest.TestCase):
         env["PYTHONPATH"] = str(ROOT / "src")
         code = (
             "import sys; import video2agent.cli; "
-            "heavy=[n for n in ('numpy','PIL','requests','cv2','faster_whisper','rapidocr_onnxruntime') if n in sys.modules]; "
+            "heavy=[n for n in ('numpy','PIL','requests','cv2','faster_whisper','rapidocr','rapidocr_onnxruntime') if n in sys.modules]; "
             "print(','.join(heavy))"
         )
         out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)

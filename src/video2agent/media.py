@@ -454,7 +454,13 @@ def _line_score(gray: np.ndarray) -> float:
         return 0.0
     long = 0
     for line in lines[:200]:
-        x1, y1, x2, y2 = line[0]
+        # OpenCV 4.x returns (N, 1, 4) and 5.x returns (N, 4); flatten before
+        # unpacking so a fresh install (which gets opencv 5) does not crash the
+        # whole ingest on the first frame.
+        pts = np.asarray(line, dtype=np.float64).reshape(-1)
+        if pts.size < 4:
+            continue
+        x1, y1, x2, y2 = pts[:4]
         if abs(x2 - x1) > gray.shape[1] * 0.35 or abs(y2 - y1) > gray.shape[0] * 0.35:
             long += 1
     return min(1.0, long / 40.0)

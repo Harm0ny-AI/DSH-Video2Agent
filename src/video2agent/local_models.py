@@ -15,7 +15,7 @@ from typing import Any
 from .config import Config, save_config
 from .text import whisper_cache_dir, whisper_cache_state
 from .util import Video2AgentError
-from .visual import ocr_available
+from .visual import ocr_available, ocr_engine
 
 # Conservative, multilingual choices. Speed still depends on actual cores,
 # memory and GPU; the CPU names are examples, not hard requirements.
@@ -84,15 +84,15 @@ def status(cfg: Config, model: str | None = None) -> dict[str, Any]:
         "ocr": {
             "available": bool(ocr_available()),
             "engine": "RapidOCR",
-            "model": "PP-OCRv4",
+            # rapidocr 3.x ships a pure-Python wheel (works on 3.13); the legacy
+            # rapidocr-onnxruntime is kept as a fallback for existing installs.
+            "engine_package": ocr_engine()[0],
+            "model": "PP-OCRv6" if ocr_engine()[0] == "rapidocr" else "PP-OCRv4",
             "builtin": not bool(str(cfg.get("ocr_local_config") or "")),
             "selected": "custom" if str(cfg.get("ocr_local_config") or "") else "builtin",
             "config_path": str(cfg.get("ocr_local_config") or ""),
-            # The settings page must not offer "内置" OCR on a machine that cannot
-            # install the extra (e.g. Python 3.13 has no rapidocr-onnxruntime
-            # wheel), and must explain why instead of showing a dead dropdown.
             "python": "%d.%d" % sys.version_info[:2],
-            "extra_available": sys.version_info[:2] < (3, 13),
+            "extra_available": True,
         },
     }
 

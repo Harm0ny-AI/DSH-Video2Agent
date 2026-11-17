@@ -50,6 +50,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,ocr]"
+          # Keep the legacy OCR engine tested too: it still serves users on
+          # Python 3.11/3.12 (the extra itself now installs rapidocr 3.x).
+          python -m pip install rapidocr-onnxruntime
 
       - name: Ruff
         run: ruff check src tests --select E,F,I --ignore E501

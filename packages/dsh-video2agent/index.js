@@ -29,6 +29,29 @@ try {
 // one; without it the advertised-origin fallback used to be an undefined variable.
 let ACTIVE_WEB_SERVER = null
 
+// The npm package version. The environment card compares it with the installed
+// Python CLI: the CLI carries the platform fixes (macOS Keychain key storage,
+// OCR engine support), so an outdated CLI must be updatable from the page — a
+// "CLI installed" chip alone would hide a CLI that cannot save the API key.
+const PLUGIN_VERSION = (() => {
+  try {
+    return String(JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version || '')
+  } catch {
+    return ''
+  }
+})()
+
+function compareVersions(a, b) {
+  const pa = String(a || '').split('.').map((x) => Number(x) || 0)
+  const pb = String(b || '').split('.').map((x) => Number(x) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const da = pa[i] || 0
+    const db = pb[i] || 0
+    if (da !== db) return da < db ? -1 : 1
+  }
+  return 0
+}
+
 // The plugin row's Config, so DSH's own config editor validates and shows these
 // values alongside every other plugin instead of hiding them in a private file.
 // Runtime precedence: ui-settings.json (written by the settings form) over this
@@ -1219,18 +1242,35 @@ export function apply(ctx, config) {
   }
 
   async function detectOcr(python) {
-    const [major, minor] = String(python.version || '').split('.').map((part) => Number(part) || 0)
-    const supported = major < 3 || (major === 3 && minor < 13)
-    const detail = !python.ok ? '需要 Python' : supported ? '可选' : 'Python 3.13 不支持'
-    if (!python.ok || !supported) return { ok: false, supported, detail }
-    const probe = await runCommand(python.command, [...python.prefix, '-c', 'import rapidocr_onnxruntime'], 30000)
-    return { ok: probe.code === 0, supported, detail: probe.code === 0 ? '已安装' : '未安装' }
+    // Two engines are accepted: rapidocr 3.x (pure-Python wheel, works on Python
+    // 3.13) and the legacy rapidocr-onnxruntime (<=3.12). Either one makes local
+    // OCR usable; the card must offer a one-click install on every supported
+    // Python, not only where the legacy wheel exists.
+    const supported = !!python.ok
+    const detail = !python.ok ? '需要 Python' : '可选'
+    const engineOf = async () => {
+      const probe = await runCommand(python.command, [
+        ...python.prefix, '-c',
+        "import importlib.util as u; print('rapidocr' if u.find_spec('rapidocr') else ('legacy' if u.find_spec('rapidocr_onnxruntime') else ''))",
+      ], 30000)
+      return String(probe.out || '').trim().split('\n').pop() || ''
+    }
+    if (!python.ok) return { ok: false, supported, detail, engine: '' }
+    const engine = await engineOf()
+    return {
+      ok: engine !== '',
+      supported,
+      detail: engine === 'rapidocr' ? '已安装（rapidocr 3.x）' : engine === 'legacy' ? '已安装（rapidocr-onnxruntime）' : '未安装',
+      engine: engine === 'legacy' ? 'rapidocr-onnxruntime' : engine,
+    }
   }
 
   async function setupStatus() {
     const python = await detectPython()
     const cli = await detectCli()
     const cliOk = cli.ok
+    const cliVersion = (String(cli.detail || '').match(/(\d+\.\d+\.\d+)/) || [])[1] || ''
+    const cliOutdated = Boolean(cliOk && PLUGIN_VERSION && cliVersion && compareVersions(cliVersion, PLUGIN_VERSION) < 0)
     const ffmpeg = await detectFfmpeg()
     const ocr = await detectOcr(python)
     const ffmpegHint = process.platform === 'win32'
@@ -1241,27 +1281,36 @@ export function apply(ctx, config) {
       platform: process.platform,
       home: v2aHomePath(),
       python: { ok: python.ok, detail: python.version ? 'Python ' + python.version : '未找到', tooOld: !!python.tooOld },
-      cli: { ok: cliOk, detail: cliOk ? (cli.detail || '已安装') : '未安装', bin: binPath(), via: cli.via },
+      cli: {
+        ok: cliOk,
+        detail: cliOk ? (cli.detail || '已安装') : '未安装',
+        bin: binPath(),
+        via: cli.via,
+        version: cliVersion,
+        latest: PLUGIN_VERSION,
+        update_available: cliOutdated,
+      },
       ffmpeg: { ok: ffmpeg.ok, detail: ffmpeg.detail, managed: ffmpeg.managed, path: ffmpeg.path || '' },
       hints: {
         python: '安装 Python 3.11+：https://www.python.org/downloads/（Windows 可 winget install Python.Python.3.12）',
         cli: 'pip install video2agent',
         ffmpeg: ffmpegHint,
       },
-      ocr: { ok: ocr.ok, supported: ocr.supported, detail: ocr.detail },
+      ocr: { ok: ocr.ok, supported: ocr.supported, detail: ocr.detail, engine: ocr.engine },
       // Linux installs FFmpeg with sudo, which the plugin cannot run; offer the
       // command instead of a button that always fails.
       canInstall: {
         cli: python.ok && !cliOk,
+        updateCli: python.ok && cliOutdated,
         ffmpeg: process.platform !== 'linux' && !ffmpeg.ok,
         ocr: python.ok && ocr.supported && !ocr.ok,
       },
     }
   }
 
-  async function installCli() {
+  async function installCli(force = false) {
     const before = await setupStatus()
-    if (before.cli.ok) return { ok: true, already: true, output: '', status: before }
+    if (before.cli.ok && !force && !before.cli.update_available) return { ok: true, already: true, output: '', status: before }
     const python = await detectPython()
     if (!python.ok) {
       return {
@@ -1346,18 +1395,6 @@ export function apply(ctx, config) {
       return {
         ok: false,
         error: { code: 'E_PYTHON', message: '没有找到 Python', remedy: '安装 Python 3.11/3.12 后重试' },
-        status: before,
-      }
-    }
-    const [major, minor] = String(python.version || '').split('.').map((part) => Number(part) || 0)
-    if (!(major < 3 || (major === 3 && minor < 13))) {
-      return {
-        ok: false,
-        error: {
-          code: 'E_OCR_UNSUPPORTED',
-          message: 'Python ' + (python.version || '') + ' 没有本地 OCR 依赖',
-          remedy: '本地 OCR 需要 Python 3.11/3.12；也可以改用云端 OCR。',
-        },
         status: before,
       }
     }
@@ -1537,6 +1574,7 @@ export function apply(ctx, config) {
           if (action === 'install-cli') return sendJson(res, 200, await withInstallLock('install-cli', installCli))
           if (action === 'install-ffmpeg') return sendJson(res, 200, await withInstallLock('install-ffmpeg', installFfmpeg))
           if (action === 'install-ocr') return sendJson(res, 200, await withInstallLock('install-ocr', installOcr))
+          if (action === 'update-cli') return sendJson(res, 200, await withInstallLock('update-cli', () => installCli(true)))
           return sendJson(res, 400, { error: 'unknown action' })
         } catch (e) {
           // readBody reports an oversized body as e.status (413); keep it.

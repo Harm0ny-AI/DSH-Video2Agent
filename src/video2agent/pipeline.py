@@ -59,6 +59,7 @@ cloud = LazyModule("video2agent.cloud")
 verify_caption_audio = lazy_call("video2agent.caption_verify", "verify_caption_audio")
 bilibili_captions = lazy_call("video2agent.captions", "bilibili_captions")
 caption_content_mismatch = lazy_call("video2agent.captions", "caption_content_mismatch")
+caption_track_trusted = lazy_call("video2agent.captions", "caption_track_trusted")
 extract_audio = lazy_call("video2agent.media", "extract_audio")
 extract_frame = lazy_call("video2agent.media", "extract_frame")
 extract_frames_batch = lazy_call("video2agent.media", "extract_frames_batch")
@@ -316,7 +317,7 @@ def _stored_caption_mismatch(db: Database, video: dict[str, Any]) -> bool:
         return False
     # A WBI-sourced track is trusted for identity. The old trigram gate falsely
     # rejected the correct 46s DSH captions ("deep sick" vs the title's "dsh").
-    if (metrics.get("caption_track") or {}).get("endpoint") == "wbi":
+    if caption_track_trusted(metrics.get("caption_track")):
         return False
     segments = db.get_segments(str(video.get("id") or ""), limit=120)
     if not segments:
@@ -755,7 +756,7 @@ def analyze(
         # WBI track (it false-rejected the correct track because the spoken text
         # says "deep sick", not the title's "dsh"). Local sidecars and old cached
         # captions still go through the content gate.
-        trusted_wbi = (caption_track or {}).get("endpoint") == "wbi"
+        trusted_wbi = caption_track_trusted(caption_track)
         if not trusted_wbi and caption_content_mismatch(segments, resolved.get("title"), meta.get("description"), meta.get("tags")):
             if caption_ai_fallback and caption_ai_fallback.get("segments"):
                 segments = caption_ai_fallback["segments"]

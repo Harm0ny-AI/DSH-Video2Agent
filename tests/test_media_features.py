@@ -126,5 +126,30 @@ class FrameFeatureTests(unittest.TestCase):
         self.assertIn("phash", feats)
 
 
+class HoughLinesShapeTests(unittest.TestCase):
+    """opencv 5 changed HoughLinesP's result shape; both must work."""
+
+    def test_both_result_shapes_are_scored(self):
+        from unittest.mock import patch
+
+        import numpy as np
+
+        try:
+            from video2agent import media
+        except Exception:  # pragma: no cover - numpy always present here
+            self.skipTest("media stack unavailable")
+        if media.cv2 is None:  # pragma: no cover
+            self.skipTest("opencv unavailable")
+        gray = np.zeros((100, 200), dtype=np.uint8)
+        rows_v4 = np.array([[[0, 50, 180, 50]], [[10, 60, 190, 60]]], dtype=np.int32)
+        rows_v5 = rows_v4.reshape(-1, 4)
+        with patch.object(media.cv2, "HoughLinesP", return_value=rows_v4):
+            old = media._line_score(gray)
+        with patch.object(media.cv2, "HoughLinesP", return_value=rows_v5):
+            new = media._line_score(gray)
+        self.assertGreater(old, 0.0)
+        self.assertEqual(old, new)
+
+
 if __name__ == "__main__":
     unittest.main()

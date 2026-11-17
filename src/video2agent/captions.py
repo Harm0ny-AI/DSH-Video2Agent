@@ -293,6 +293,20 @@ def caption_track_mismatch(segments: list[dict[str, Any]], duration_ms: int | No
     return len(far) >= max(3, len(segments) // 10)
 
 
+def caption_track_trusted(track: dict[str, Any] | None) -> bool:
+    """A WBI-signed track list is authoritative for a track's identity.
+
+    The signed endpoint returned the correct 18-line track for a 46s video where
+    the legacy /player/v2 list pointed at another video's 160-line track. The
+    text gate stays for untrusted sources (local sidecars, old cached captions),
+    but applying it to a WBI track produced false alarms: speech rarely repeats a
+    clickbait title's words ("双十一半价老旗舰…" vs "今年想换个新机…"), and a
+    Bilibili AI translation (ai-en/ai-ja) shares no units with a Chinese title by
+    design. Re-ingesting cannot fix either case — the same WBI track comes back.
+    """
+    return bool(track) and (track.get("endpoint") == "wbi")
+
+
 def caption_content_mismatch(
     segments: list[dict[str, Any]],
     title: str | None,
@@ -389,7 +403,7 @@ def bilibili_captions(
                     # pipeline used to fall back to ASR only after accepting it.
                     saw_mismatch = True
                     continue
-                if candidate.get("endpoint") != "wbi" and caption_content_mismatch(segments, title, description, tags):
+                if not caption_track_trusted(candidate) and caption_content_mismatch(segments, title, description, tags):
                     saw_content_mismatch = True
                     continue
                 if candidate.get("ai"):

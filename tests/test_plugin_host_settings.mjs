@@ -112,6 +112,9 @@ assert.equal(setupData.ok, true)
 for (const key of ['python', 'cli', 'ffmpeg']) {
   assert.equal(typeof (setupData[key] || {}).ok, 'boolean', key + ' must be measured, not assumed')
 }
+assert.equal(typeof setupData.cli.version, 'string', 'the installed CLI version must be reported')
+assert.equal(typeof setupData.cli.update_available, 'boolean', 'an outdated CLI must be detectable from the card')
+assert.equal(typeof setupData.canInstall.updateCli, 'boolean', 'the card needs to know whether an update is offered')
 assert.equal(typeof setupData.ocr, 'object', 'the optional local-OCR status must be reported')
 assert.equal(typeof setupData.ocr.supported, 'boolean', 'OCR support depends on the Python version')
 assert.equal(typeof setupData.canInstall.ocr, 'boolean', 'the card needs to know whether an OCR install makes sense')

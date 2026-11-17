@@ -109,7 +109,8 @@ class _HomeCase(unittest.TestCase):
         self.cfg = load_config(self.home)
         self.addCleanup(self._tmp.cleanup)
 
-    def add_video(self, vid="vid_ocr", *, metrics=None, frames=(), tracks=(), segments=(), anchors=()):
+    def add_video(self, vid="vid_ocr", *, metrics=None, frames=(), tracks=(), segments=(), anchors=(),
+                  title="clip", duration_ms=10_000):
         db = Database(self.cfg.db_path)
         try:
             db.upsert_video({
@@ -117,8 +118,8 @@ class _HomeCase(unittest.TestCase):
                 "source_kind": "local",
                 "source_uri": "clip.mp4",
                 "source_path": "clip.mp4",
-                "title": "clip",
-                "duration_ms": 10_000,
+                "title": title,
+                "duration_ms": duration_ms,
                 "status": "ready",
                 "analysis_version": pipeline.ANALYSIS_VERSION,
                 "meta_json": json.dumps({"analysis_metrics": metrics or {}}),
@@ -299,10 +300,44 @@ class EvidenceListAlignmentTests(_HomeCase):
         self.assertIn("FRAME_MISSING", [w["code"] for w in data["warnings"]])
 
 
+class OcrResultShapeTests(unittest.TestCase):
+    """The adapter must accept both engines' result shapes."""
+
+    def test_legacy_items_pass_through(self):
+        from video2agent.visual import _ocr_items
+        items = [([[0, 0], [1, 0], [1, 1], [0, 1]], "hello", 0.9)]
+        self.assertEqual(_ocr_items(items, "legacy"), items)
+
+    def test_rapidocr_output_object_is_normalized(self):
+        from types import SimpleNamespace
+
+        from video2agent.visual import _ocr_items
+
+        raw = SimpleNamespace(
+            txts=("hello", "world"),
+            scores=(0.9, 0.8),
+            boxes=[[[0, 0], [1, 0], [1, 1], [0, 1]], [[2, 2], [3, 2], [3, 3], [2, 3]]],
+        )
+        items = _ocr_items(raw, "rapidocr")
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0][1], "hello")
+        self.assertAlmostEqual(items[1][2], 0.8)
+
+    def test_missing_fields_are_empty_not_crash(self):
+        from types import SimpleNamespace
+
+        from video2agent.visual import _ocr_items
+
+        self.assertEqual(_ocr_items(SimpleNamespace(txts=None, boxes=None, scores=None), "rapidocr"), [])
+
+
 class OcrRuntimeCacheTests(unittest.TestCase):
     """A fixed or moved OCR environment must not stay broken for the process."""
 
-    @unittest.skipUnless(importlib.util.find_spec("rapidocr_onnxruntime"), "rapidocr not installed")
+    @unittest.skipUnless(
+        importlib.util.find_spec("rapidocr") or importlib.util.find_spec("rapidocr_onnxruntime"),
+        "neither OCR engine is installed",
+    )
     def test_a_failed_availability_probe_is_retried(self):
         import video2agent.visual as visual
         with patch.object(visual, "_OCR_TRIED", True), \
@@ -329,7 +364,7 @@ class OcrRuntimeCacheTests(unittest.TestCase):
                     made.append(config_path)
 
             with patch.object(visual, "_OCR_LOCAL", threading.local()), \
-                    patch("rapidocr_onnxruntime.RapidOCR", FakeEngine):
+                    patch.object(visual, "ocr_engine", return_value=("legacy", FakeEngine)):
                 visual._engine_for_thread(str(config))
                 visual._engine_for_thread(str(config))
                 self.assertEqual(len(made), 1, "the same config must reuse its engine")
@@ -575,7 +610,6 @@ class DoctorHonestyTests(unittest.TestCase):
             check = next(c for c in result["checks"] if c["name"] == "asr_model_cached")
             self.assertFalse(check["ok"], "a configured but missing model is not ready")
             self.assertIn("video2agent models download", check["remedy"])
-
     def test_doctor_prints_a_next_step(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -587,6 +621,37 @@ class DoctorHonestyTests(unittest.TestCase):
             self.assertIn("next_step", data)
             if data.get("required_ok"):
                 self.assertIn("video2agent models download", data["next_step"])
+
+
+class DoctorAlignmentTests(_HomeCase):
+    def _alignment(self):
+        return next(c for c in doctor(self.cfg)["checks"] if c["name"] == "transcript_alignment")
+
+    def test_doctor_accepts_a_signed_wbi_caption_track(self):
+        # Real library: all 15 flagged records were WBI tracks, 13 of them perfectly
+        # valid Chinese transcripts whose clickbait titles simply never get spoken.
+        # Re-ingest cannot change them, so the doctor told users to chase a dead end.
+        self.add_video(
+            title="双十一半价老旗舰香爆了",
+            duration_ms=200_000,
+            metrics={"transcript_source": "caption", "caption_track": {"endpoint": "wbi", "lan": "ai-zh"}},
+            segments=[{"start_ms": i * 1000, "end_ms": i * 1000 + 900, "text": f"今年想换个新机真是太难了{i}"}
+                      for i in range(80)],
+        )
+        check = self._alignment()
+        self.assertTrue(check["ok"], check["detail"])
+
+    def test_doctor_still_flags_an_untrusted_mismatched_caption(self):
+        self.add_video(
+            title="直观解释注意力机制 Transformer 深度学习",
+            duration_ms=200_000,
+            metrics={"transcript_source": "caption", "caption_track": {"endpoint": "player-v2"}},
+            segments=[{"start_ms": i * 1000, "end_ms": i * 1000 + 900, "text": f"手机镜头膜到底有没有必要贴{i}"}
+                      for i in range(80)],
+        )
+        check = self._alignment()
+        self.assertFalse(check["ok"])
+        self.assertIn("不匹配", check["detail"])
 
 
 if __name__ == "__main__":
