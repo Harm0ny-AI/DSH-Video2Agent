@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.8 (2026-11-17)
+
+- **A marketplace install on a fresh Python 3.13 machine now works.** Root cause
+  of "一键安装 CLI 失败 / 之后几乎每个设置都读取失败": rapidocr-onnxruntime was a
+  required dependency and has no Python 3.13 wheel, so pip install video2agent
+  failed with No matching distribution found on 3.13. Local OCR is now an
+  optional extra (pip install "video2agent[ocr]", Python 3.11/3.12); the core
+  install works on Python 3.11-3.13 (faster-whisper/ctranslate2, opencv, numpy
+  and pillow all ship 3.13 wheels). The environment card shows an optional OCR
+  row with its own install button and skips it on 3.13.
+- **One-click install is resilient.** The CLI install is core-only (the slow OCR
+  resolver no longer makes the button look stuck), retries once through the
+  Tsinghua PyPI mirror when the default source fails, shows "正在安装…" while it
+  runs, and pip-failure remedies mention mirrors and the Python version. Verified
+  on a fresh CLI-free venv: install -> CLI usable -> Bilibili QR renders.
+- Doctor/OCR error remedies point at the optional extra now.
+
 ## 0.1.7 (2026-11-17)
 
 - **Every plugin HTTP route now goes through DSH's Connection admission.** Routes

@@ -2000,7 +2000,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => { load() }, [])
       const install = async (action) => {
         setBusy(action)
-        setLog('')
+        setLog('正在安装…首次约 1–3 分钟，请保持这个页面打开；失败时会显示原因。')
         try {
           const response = await fetch('/api/video2agent/setup', {
             method: 'POST',
@@ -2034,6 +2034,11 @@ window.__ModuleLoader__.load({
           const match = String(data.ffmpeg.detail || '').match(/ffmpeg version (\d+(?:\.\d+)*)/i)
           return match ? match[1] : '正常'
         })() },
+        // Optional: local on-screen-text OCR. Only meaningful once the CLI works,
+        // and not available on Python 3.13 (no wheel).
+        ...(data.cli && data.cli.ok && data.ocr
+          ? [{ key: 'ocr', label: 'OCR', item: data.ocr, text: data.ocr.ok ? '已装' : (data.ocr.supported ? '未装' : '不支持') }]
+          : []),
       ] : []
       const missing = items.filter((entry) => !(entry.item && entry.item.ok))
       const chip = (entry) => {
@@ -2064,7 +2069,7 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
               h('span', { style: { fontSize: '11px', color: 'var(--vp-muted,#63605a)' } }, '缺少依赖：'),
               missing.map((entry) => {
-                const action = entry.key === 'cli' ? 'install-cli' : entry.key === 'ffmpeg' ? 'install-ffmpeg' : ''
+                const action = entry.key === 'cli' ? 'install-cli' : entry.key === 'ffmpeg' ? 'install-ffmpeg' : entry.key === 'ocr' ? 'install-ocr' : ''
                 return action && data.canInstall && data.canInstall[entry.key]
                   ? h('button', { key: entry.key, 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => install(action),
                       style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' } },

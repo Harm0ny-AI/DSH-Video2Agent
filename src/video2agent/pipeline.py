@@ -1242,7 +1242,7 @@ def analyze(
             step("ocr", 0.60, f"沿用上次画面锚点 · {len(anchor_times)} 帧")
         attach_ocr(frames, max_frames=ocr_budget, progress=_ocr_progress, times=anchor_times or None, ocr_fn=_ocr_boxes, ocr_config_path=local_ocr_config)
         if not ocr_ok:
-            warnings.append(_warn("OCR_UNAVAILABLE", "未安装 OCR，画面文字不可用。", remedy="pip install rapidocr-onnxruntime"))
+            warnings.append(_warn("OCR_UNAVAILABLE", "未安装 OCR，画面文字不可用。", remedy="pip install \"video2agent[ocr]\""))
         ocr_tracks = build_ocr_tracks(frames)
         if not ocr_ok:
             ocr_tracks = []
@@ -1615,7 +1615,7 @@ def overview(cfg: Config, video_id: str) -> dict[str, Any]:
             "OCR_UNAVAILABLE",
             "未安装 OCR，画面文字读不出来（不是没有文字）。",
             severity="warning",
-            remedy="pip install rapidocr-onnxruntime 后重新 ingest。",
+            remedy="pip install \"video2agent[ocr]\" 后重新 ingest。",
         ))
     elif ocr_state_value == "on_demand" and counts["ocr_tracks"] == 0 and "OCR_ON_DEMAND_MODE" not in ocr_warning_codes:
         warnings.append(_warn(
@@ -2503,7 +2503,7 @@ def ocr_index(cfg: Config, video_id: str, *, dry_run: bool = False,
             raise Video2AgentError(
                 "E_OCR_UNAVAILABLE",
                 "未安装 OCR，无法建立画面索引。",
-                "pip install rapidocr-onnxruntime 后重试。",
+                "pip install \"video2agent[ocr]\" 后重试（本地 OCR 需要 Python 3.11/3.12）。",
             )
         probe = to_read[0]
         started = time.perf_counter()
@@ -2553,7 +2553,7 @@ def ocr_index(cfg: Config, video_id: str, *, dry_run: bool = False,
         raise Video2AgentError(
             "E_OCR_UNAVAILABLE",
             "未安装 OCR，无法建立画面索引。",
-            "pip install rapidocr-onnxruntime 后重试。",
+            "pip install \"video2agent[ocr]\" 后重试（本地 OCR 需要 Python 3.11/3.12）。",
         )
 
     local_config = str(cfg.get("ocr_local_config") or "") or None
@@ -3888,7 +3888,7 @@ def evidence(cfg: Config, *, video_id: str, at_ms: int | None = None, start_ms: 
                 "OCR_UNAVAILABLE",
                 "OCR 组件不可用，这一帧的文字无法读取",
                 severity="warning",
-                remedy="pip install rapidocr-onnxruntime 后重试。",
+                remedy="pip install \"video2agent[ocr]\" 后重试（本地 OCR 需要 Python 3.11/3.12）。",
             ))
         images = [f["path"] for f in present][:max(0, image_budget)]
         if images:

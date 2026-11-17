@@ -86,6 +86,7 @@
 **环境：** Python 3.11+、FFmpeg（在 `PATH` 中），以及 DSH（用插件界面时需要）。
 从插件市场安装的只是 DSH 集成层：实际处理视频还需要 CLI 和 FFmpeg。安装后打开插件设置页的「环境检查」，缺什么可以一键安装（CLI 走 pip，FFmpeg 走 winget/brew），也可以手动 `pip install video2agent`（FFmpeg 缺失时先 `winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg`，或设置 `FFMPEG_BIN`）。
 视频没有字幕时，才需要语音模型（`small` 约 464 MB，**不会自动下载**，用 `video2agent models download` 显式安装）。
+本地画面文字 OCR 是可选额外包：`pip install "video2agent[ocr]"`（需要 Python 3.11/3.12；核心检索/转写/取帧不需要它，云端 OCR 也不需要）。
 
 已发布到 PyPI 和 npm，可以直接安装：
 
@@ -166,7 +167,7 @@ sequenceDiagram
 
 ## 状态
 
-- **0.1.7 已发布（2026-11-17）。** CLI、Skill 和 DSH 插件均可用，从 PyPI 或 npm 安装；0.1.3 把设置页「环境检查」收成一行状态胶囊（缺依赖时才展开安装按钮），修复 `perceive`/`video2agent doctor` 不认 `FFMPEG_BIN`/`FFPROBE_BIN` 的问题，并更新插件页安装说明；0.1.2 加入了「环境检查 + 一键安装」，0.1.1 修了「读到结尾被报错」「毫秒参数被当成秒」「中文被识别成日语」「进度环标错行」和「单次等待过长被杀」。`
+- **0.1.8 已发布（2026-11-17）。** CLI、Skill 和 DSH 插件均可用，从 PyPI 或 npm 安装；0.1.3 把设置页「环境检查」收成一行状态胶囊（缺依赖时才展开安装按钮），修复 `perceive`/`video2agent doctor` 不认 `FFMPEG_BIN`/`FFPROBE_BIN` 的问题，并更新插件页安装说明；0.1.2 加入了「环境检查 + 一键安装」，0.1.1 修了「读到结尾被报错」「毫秒参数被当成秒」「中文被识别成日语」「进度环标错行」和「单次等待过长被杀」。`
 - 默认在本地跑，不需要 GPU；云端可选。
 - 已发布到 PyPI 和 npm：`pip install video2agent`、`npm i dsh-video2agent`；插件市场条目已按 awesome 列表格式准备好。
 - 已知限制：单字中文搜索、小字/低对比度文字的 OCR、跨镜头计数。

@@ -1409,7 +1409,7 @@ def main(argv: list[str] | None = None) -> int:
                     "或在设置里连接云端 ASR。"
                 )
             elif rapid is not None and not rapid.get("ok"):
-                next_step = "能转写，但读不了画面文字：pip install rapidocr-onnxruntime 后重试。"
+                next_step = "能转写，但读不了画面文字：pip install \"video2agent[ocr]\" 后重试（本地 OCR 需要 Python 3.11/3.12）。"
             else:
                 next_step = "可以开始：video2agent ingest <本地文件或链接>。"
             result["next_step"] = next_step

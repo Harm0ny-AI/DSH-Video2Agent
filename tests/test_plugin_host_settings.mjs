@@ -112,6 +112,9 @@ assert.equal(setupData.ok, true)
 for (const key of ['python', 'cli', 'ffmpeg']) {
   assert.equal(typeof (setupData[key] || {}).ok, 'boolean', key + ' must be measured, not assumed')
 }
+assert.equal(typeof setupData.ocr, 'object', 'the optional local-OCR status must be reported')
+assert.equal(typeof setupData.ocr.supported, 'boolean', 'OCR support depends on the Python version')
+assert.equal(typeof setupData.canInstall.ocr, 'boolean', 'the card needs to know whether an OCR install makes sense')
 // VIDEO2AGENT_BIN points at a missing binary, but this machine may still have a
 // working python -m video2agent (the setup card's fallback). Both are truthful:
 // assert the shape, and the only usable-CLI path is that fallback.

@@ -1218,11 +1218,21 @@ export function apply(ctx, config) {
     return { ok: false, detail: '未安装', via: '' }
   }
 
+  async function detectOcr(python) {
+    const [major, minor] = String(python.version || '').split('.').map((part) => Number(part) || 0)
+    const supported = major < 3 || (major === 3 && minor < 13)
+    const detail = !python.ok ? '需要 Python' : supported ? '可选' : 'Python 3.13 不支持'
+    if (!python.ok || !supported) return { ok: false, supported, detail }
+    const probe = await runCommand(python.command, [...python.prefix, '-c', 'import rapidocr_onnxruntime'], 30000)
+    return { ok: probe.code === 0, supported, detail: probe.code === 0 ? '已安装' : '未安装' }
+  }
+
   async function setupStatus() {
     const python = await detectPython()
     const cli = await detectCli()
     const cliOk = cli.ok
     const ffmpeg = await detectFfmpeg()
+    const ocr = await detectOcr(python)
     const ffmpegHint = process.platform === 'win32'
       ? 'winget install Gyan.FFmpeg'
       : process.platform === 'darwin' ? 'brew install ffmpeg' : 'sudo apt install ffmpeg'
@@ -1238,9 +1248,14 @@ export function apply(ctx, config) {
         cli: 'pip install video2agent',
         ffmpeg: ffmpegHint,
       },
+      ocr: { ok: ocr.ok, supported: ocr.supported, detail: ocr.detail },
       // Linux installs FFmpeg with sudo, which the plugin cannot run; offer the
       // command instead of a button that always fails.
-      canInstall: { cli: python.ok && !cliOk, ffmpeg: process.platform !== 'linux' && !ffmpeg.ok },
+      canInstall: {
+        cli: python.ok && !cliOk,
+        ffmpeg: process.platform !== 'linux' && !ffmpeg.ok,
+        ocr: python.ok && ocr.supported && !ocr.ok,
+      },
     }
   }
 
@@ -1259,22 +1274,49 @@ export function apply(ctx, config) {
         status: before,
       }
     }
-    const r = await runCommand(python.command, [...python.prefix, '-m', 'pip', 'install', '--upgrade', 'video2agent'], SETUP_INSTALL_TIMEOUT)
-    const output = ((String(r.out || '') + '\n' + String(r.err || '')).trim()).slice(-6000)
+    // PyPI can be slow/unreachable on some networks; a failed default-source
+    // install is retried once through the Tsinghua mirror instead of dead-ending
+    // the user on a machine that otherwise has a working Python.
+    const pipInstall = (packages, extraArgs = []) => runCommand(
+      python.command,
+      [...python.prefix, '-m', 'pip', 'install', '--upgrade', ...extraArgs, ...packages],
+      SETUP_INSTALL_TIMEOUT,
+    )
+    let r = await pipInstall(['video2agent'])
+    let mirrorNote = ''
+    if (r.code !== 0) {
+      mirrorNote = '\n默认 PyPI 源安装失败，改用清华镜像重试…\n'
+      r = await pipInstall(['video2agent'], ['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple', '--trusted-host', 'pypi.tuna.tsinghua.edu.cn'])
+    }
+    const coreOutput = (mirrorNote + ((String(r.out || '') + '\n' + String(r.err || '')).trim())).slice(-6000)
     const pythonLabel = [python.command, ...python.prefix].join(' ')
     if (r.code !== 0) {
+      const failedText = String(r.out || '') + String(r.err || '')
+      const versionHint = /No matching distribution/i.test(failedText)
+        ? '（当前 Python 可能没有对应依赖的 wheel：核心安装支持 Python 3.11–3.13，本地 OCR 额外包要求 3.11/3.12）'
+        : ''
       return {
         ok: false,
         error: {
           code: 'E_PIP',
           message: 'pip install video2agent 失败',
-          remedy: '检查网络和 pip 后可手动运行：' + pythonLabel + ' -m pip install --upgrade video2agent。'
+          remedy: '检查网络和 pip 后可手动运行：' + pythonLabel + ' -m pip install --upgrade video2agent' + versionHint
+            + '。国内网络可加镜像 -i https://pypi.tuna.tsinghua.edu.cn/simple；'
             + '如果 Python 是系统托管环境（PEP 668），改用 pipx/venv 安装，或给 pip 加 --user。',
         },
-        output,
+        output: coreOutput,
         status: await setupStatus(),
       }
     }
+    // Local OCR is an optional extra with its own button (and no rapidocr wheel
+    // on Python 3.13); installing it here made the one-click CLI install slow and
+    // look stuck, so keep the core install fast and report the extra separately.
+    const [pMajor, pMinor] = String(python.version || '').split('.').map((part) => Number(part) || 0)
+    const ocrSupported = pMajor < 3 || (pMajor === 3 && pMinor < 13)
+    const extraOutput = ocrSupported
+      ? '\n本地 OCR（可选，读画面上的字）可在环境检查里单独安装：pip install "video2agent[ocr]"'
+      : '\nPython ' + (python.version || '') + ' 没有本地 OCR 的 wheel；核心转写/检索可用，本地 OCR 需要 Python 3.11/3.12。'
+    const output = (coreOutput + '\n' + extraOutput).trim().slice(-8000)
     const after = await setupStatus()
     if (!after.cli.ok) {
       return {
@@ -1292,6 +1334,60 @@ export function apply(ctx, config) {
     // CLI/env is what the next tool call uses.
     stopWorker()
     return { ok: true, output, status: after }
+  }
+
+  // Optional local OCR (rapidocr-onnxruntime). Separate from installCli: the
+  // resolver for that package can be slow, and it has no Python 3.13 wheel.
+  async function installOcr() {
+    const before = await setupStatus()
+    if (before.ocr && before.ocr.ok) return { ok: true, already: true, output: '', status: before }
+    const python = await detectPython()
+    if (!python.ok) {
+      return {
+        ok: false,
+        error: { code: 'E_PYTHON', message: '没有找到 Python', remedy: '安装 Python 3.11/3.12 后重试' },
+        status: before,
+      }
+    }
+    const [major, minor] = String(python.version || '').split('.').map((part) => Number(part) || 0)
+    if (!(major < 3 || (major === 3 && minor < 13))) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_OCR_UNSUPPORTED',
+          message: 'Python ' + (python.version || '') + ' 没有本地 OCR 依赖',
+          remedy: '本地 OCR 需要 Python 3.11/3.12；也可以改用云端 OCR。',
+        },
+        status: before,
+      }
+    }
+    const pipOcr = (extraArgs = []) => runCommand(
+      python.command,
+      [...python.prefix, '-m', 'pip', 'install', '--upgrade', ...extraArgs, 'video2agent[ocr]'],
+      SETUP_INSTALL_TIMEOUT,
+    )
+    let r = await pipOcr()
+    let note = ''
+    if (r.code !== 0) {
+      note = '默认 PyPI 源安装失败，改用清华镜像重试…\n'
+      r = await pipOcr(['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple', '--trusted-host', 'pypi.tuna.tsinghua.edu.cn'])
+    }
+    const output = (note + ((String(r.out || '') + '\n' + String(r.err || '')).trim())).slice(-6000)
+    const status = await setupStatus()
+    if (r.code !== 0 || !status.ocr || !status.ocr.ok) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_PIP',
+          message: '本地 OCR 安装失败',
+          remedy: '检查网络后重试；也可改用云端 OCR，或手动运行 pip install "video2agent[ocr]"。',
+        },
+        output,
+        status,
+      }
+    }
+    stopWorker()
+    return { ok: true, output, status }
   }
 
   function findExecutable(root, name, depth = 0) {
@@ -1440,6 +1536,7 @@ export function apply(ctx, config) {
           if (action === 'refresh') return sendJson(res, 200, await setupStatus())
           if (action === 'install-cli') return sendJson(res, 200, await withInstallLock('install-cli', installCli))
           if (action === 'install-ffmpeg') return sendJson(res, 200, await withInstallLock('install-ffmpeg', installFfmpeg))
+          if (action === 'install-ocr') return sendJson(res, 200, await withInstallLock('install-ocr', installOcr))
           return sendJson(res, 400, { error: 'unknown action' })
         } catch (e) {
           // readBody reports an oversized body as e.status (413); keep it.

@@ -97,6 +97,7 @@ and batch classification stay in the CLI behind `--confirm`, and cookies stay lo
 **Requirements:** Python 3.11+, FFmpeg on `PATH`, and DSH for the plugin surface.
 The marketplace install is only the DSH integration layer; video work needs the CLI and FFmpeg. After installing, the plugin settings page has an environment check with one-click installs (CLI via pip, FFmpeg via winget/brew); or do it manually: `pip install video2agent`. Missing FFmpeg? `winget install Gyan.FFmpeg` (Windows), `brew install ffmpeg` (macOS), `apt install ffmpeg` (Linux), or point `FFMPEG_BIN` at an existing binary.
 A speech model is only needed when a video has no captions (about 464 MB for `small`).
+Local on-screen-text OCR is an optional extra: `pip install "video2agent[ocr]"` (Python 3.11/3.12). Core search/transcription/evidence and cloud OCR work without it.
 
 Published on PyPI and npm — install directly:
 
@@ -183,7 +184,7 @@ The dark social card and marketplace card live in [`docs/assets/`](docs/assets).
 
 ## Status
 
-- **0.1.7 released (2026-11-17).** CLI, Skill and the DSH plugin are available; install from PyPI or npm. 0.1.3 compacts the settings-page environment check into one status row (install buttons only for what is missing), makes `perceive` and `video2agent doctor` honour `FFMPEG_BIN`/`FFPROBE_BIN` like the media paths, and ships the real install steps on the plugin page. 0.1.2 added the environment check with one-click installs; 0.1.1 fixed reading to the end (no more E_OUT_OF_RANGE), bare millisecond values, Chinese audio mis-detected as Japanese, a misplaced batch progress ring, and an over-long single wait.
+- **0.1.8 released (2026-11-17).** CLI, Skill and the DSH plugin are available; install from PyPI or npm. 0.1.3 compacts the settings-page environment check into one status row (install buttons only for what is missing), makes `perceive` and `video2agent doctor` honour `FFMPEG_BIN`/`FFPROBE_BIN` like the media paths, and ships the real install steps on the plugin page. 0.1.2 added the environment check with one-click installs; 0.1.1 fixed reading to the end (no more E_OUT_OF_RANGE), bare millisecond values, Chinese audio mis-detected as Japanese, a misplaced batch progress ring, and an over-long single wait.
 - Local-first by default; no GPU required. Cloud is optional.
 - Published on PyPI and npm (`pip install video2agent`, `npm i dsh-video2agent`); the marketplace entry is prepared in the awesome-list format.
 - Known limits: single-character CJK search, OCR on tiny/low-contrast text, counting across shots.
