@@ -376,7 +376,8 @@ def extract_embedded_subtitle(video_path: str | Path, out_path: str | Path, stre
     return None
 
 
-def download_cover(url: str, out_path: str | Path, *, referer: str = "https://www.bilibili.com/") -> Path | None:
+def download_cover(url: str, out_path: str | Path, *, referer: str = "https://www.bilibili.com/",
+                   allow_private: bool = False) -> Path | None:
     """Fetch a cover image from a public http(s) URL.
 
     The URL comes from search results, so it is untrusted: `file://` would read a local
@@ -388,12 +389,12 @@ def download_cover(url: str, out_path: str | Path, *, referer: str = "https://ww
     out = Path(out_path)
     ensure_dir(out.parent)
     try:
-        assert_public_url(url)
+        assert_public_url(url, allow_private=allow_private)
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
             "Referer": referer,
         })
-        with safe_urlopen(req, timeout=20) as resp:
+        with safe_urlopen(req, timeout=20, allow_private=allow_private) as resp:
             data = resp.read(8 * 1024 * 1024)
         out.write_bytes(data)
         with Image.open(out) as im:

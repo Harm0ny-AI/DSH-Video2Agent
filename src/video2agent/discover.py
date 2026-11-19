@@ -179,7 +179,7 @@ def _finalize(query: str, candidates: list[dict[str, Any]], cfg: Config, covers:
     for c in candidates:
         if covers and c.get("cover_url"):
             cp = cfg.covers_dir / f"bili_{c['video_id']}.jpg"
-            got = download_cover(c["cover_url"], cp)
+            got = download_cover(c["cover_url"], cp, allow_private=bool(cfg.get("allow_private_urls")))
             if got:
                 c["cover_path"] = str(got)
                 if not c.get("cover_ocr"):

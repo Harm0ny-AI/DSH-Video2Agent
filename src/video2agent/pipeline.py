@@ -549,7 +549,9 @@ def analyze(
             if (ref or {}).get("kind") == "shortlink" and not (ref or {}).get("bvid"):
                 try:
                     from .links import _resolve_shortlink
-                    ref = extract_ref(_resolve_shortlink(str(source))) or ref
+                    ref = extract_ref(_resolve_shortlink(
+                        str(source), allow_private=bool(cfg.get("allow_private_urls")),
+                    )) or ref
                 except Exception:
                     pass
             lookup = str((ref or {}).get("url") or source).strip()
@@ -1700,13 +1702,44 @@ def overview(cfg: Config, video_id: str) -> dict[str, Any]:
 
 
 def resolve_info(cfg: Config, url: str) -> dict[str, Any]:
-    ref = normalize_video_ref(url, timeout=8.0)
+    ref = normalize_video_ref(url, timeout=8.0, allow_private=bool(cfg.get("allow_private_urls")))
     if ref is None:
+        if re.search(r"(?:^|//)(?:[\w.-]+\.)?douyin\.com/|v\.douyin\.com/", str(url)):
+            raise Video2AgentError(
+                "E_DOUYIN_ID",
+                "抖音链接里没有可识别的视频 id",
+                "使用 douyin.com/video/<数字id>、douyin.com/discover?modal_id=<id> 或 v.douyin.com 短链；用户主页请用 video2agent douyin profile。",
+            )
         raise Video2AgentError(
             "E_URL",
             "resolve expects a video URL, a BV id, or an av id",
-            "Paste a Bilibili URL, 'BV1xx411c7mD', an av link, or a b23.tv short link.",
+            "Paste a Bilibili URL, 'BV1xx411c7mD', an av link, a b23.tv short link, or a Douyin video URL.",
         )
+    if ref.get("platform") == "douyin":
+        from .douyin import get_item
+
+        item = get_item(
+            str(ref["aweme_id"]),
+            cache_dir=cfg.home / "cache" / "douyin",
+        )
+        duration_ms = item.get("duration_ms")
+        author = item.get("author") or {}
+        return {
+            "ok": True,
+            "kind": "video-link",
+            "url": ref["url"],
+            "platform": "douyin",
+            "title": item.get("title"),
+            "uploader": author.get("nickname") or author.get("unique_id"),
+            "duration_ms": duration_ms,
+            "duration": format_duration(duration_ms),
+            "cover_url": item.get("cover_url"),
+            "description": (item.get("description") or "")[:500],
+            "bvid": None,
+            "av_id": None,
+            "douyin_id": ref["aweme_id"],
+            "input_kind": ref.get("input_kind"),
+        }
     target = ref["url"]
     assert_public_url(target, allow_private=bool(cfg.get("allow_private_urls")))
     meta = bilibili_view_metadata(ref, cfg) or fetch_metadata(target, cfg)

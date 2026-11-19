@@ -12,7 +12,23 @@ name: ci
 
 on:
   push:
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "packages/dsh-video2agent/README.md"
+      - "packages/dsh-video2agent/assets/**"
+      - "packages/dsh-video2agent/screenshots.json"
   pull_request:
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "packages/dsh-video2agent/README.md"
+      - "packages/dsh-video2agent/assets/**"
+      - "packages/dsh-video2agent/screenshots.json"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:

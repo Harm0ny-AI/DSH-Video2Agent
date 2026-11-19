@@ -1,5 +1,76 @@
 # Changelog
 
+## 0.3.0 (2026-11-18)
+
+- **TUN + fake-ip proxies no longer break remote ingest.** Clash Verge/mihomo TUN
+  mode resolves every domain into 198.18.0.0/15 (RFC 2544, is_global=False), and
+  the URL guard read that as a private-network target: every remote ingest failed
+  with E_PRIVATE_URL even though the proxy resolves the name remotely and the real
+  stream is pulled by yt-dlp. 198.18.0.0/15 is now treated as a proxy marker for
+  any host; a literal private address still resolves to itself and is rejected.
+- **allow_private_urls now survives redirects.** safe_urlopen's redirect handler
+  dropped the flag (Bilibili answers with many 302s), so the documented escape
+  hatch never worked there. It is propagated now; cover downloads and b23.tv
+  short-link resolution pass it through too.
+- **allow_private only skips the public-address requirement.** Cloud metadata
+  endpoints (169.254.169.254, 100.100.100.200, fd00:ec2::254, metadata host
+  names) and link-local addresses stay blocked in every mode.
+
+- **Douyin (抖音) video source (experimental).** URL recognition covers
+  douyin.com/video/<id>, iesdouyin share pages, discover?modal_id and
+  v.douyin.com short links (the whole share text works too); the short link is
+  resolved with one 302 request. Metadata comes from the iesdouyin SSR share page
+  (_ROUTER_DATA) with 4 backoff retries and explicit state classification (full
+  SSR / JS shell / captcha middle page / hard block); a blocked read reports
+  E_DOUYIN_RISK instead of pretending the video is empty. Download uses the
+  play_addr.uri to build the no-watermark mp4 URLs (1080p/720p/fallback domain,
+  watermarked last resort) and reuses the whole ingest pipeline (ASR, OCR,
+  scenes, frames, retrieval). The plugin composer recognizes Douyin links and
+  the cover proxy serves Douyin CDN images. Metadata reads use browser-like sessions (homepage warm-up, anonymous
+  ttwid, rotating UA) plus a 6h metadata cache, so a resolve followed by an ingest
+  survives Douyin's intermittent captcha. Douyin search is not supported (`find`
+  stays Bilibili-only).
+- **Optional Douyin account reads (experimental).** With
+  `pip install "video2agent[browser]"`, `video2agent douyin profile` / `me` read a
+  profile through the installed Chrome or Edge via Playwright, and
+  `video2agent douyin login` saves a QR screenshot, waits for the scan and stores
+  a cookie jar. Douyin's JSON APIs need the a_bogus/secsdk/uifid signature stack,
+  so plain requests cannot read them; the browser extra is optional and no
+  browser is bundled.
+- **Douyin account reads are honest about failures.** `video2agent douyin videos`
+  lists works/liked videos; a risk-gated list reports unavailable (with a reason)
+  instead of pretending it is empty. Invalid targets, a logged-out `me`/`videos`,
+  Douyin user-page ingestion and invalid ids return clear E_DOUYIN_USER /
+  E_DOUYIN_LOGIN / E_SOURCE / E_DOUYIN_ID errors instead of empty success; the
+  composer preview labels Douyin links 抖音视频, and the host retry route accepts
+  platform URLs so a failed Douyin start can be retried.
+- **Douyin liked and saved videos are read from their real tabs.** The old flow
+  clicked the tab pane (user-like-tab), not the clickable "喜欢" header; the click
+  timed out, the error was swallowed, and the empty works pane came back as ok:true
+  / 0 videos. It now clicks the real role=tab, verifies that it became active, reads
+  the matching pane (user-like-list / user-favorite-list), and reports unavailable
+  (with a reason) when the switch fails. New tab: `douyin videos --tab favorites`
+  (收藏). Verified live: 5 liked videos in 15.9s and 5 favorites in 16.3s from the
+  logged-in account. Profile counters also survive the live badge now sitting
+  between them (关注 174 / 粉丝 127 / 获赞 0) instead of returning null.
+- **Any DSH session can read a logged-in Douyin account.** The tool's admin
+  action `douyin` maps to `me` / `profile` / `videos` / `status` (works,
+  favorites, likes), so a session that is not the CLI can answer "read my Douyin
+  account" instead of falling back to the Bilibili-only `admin account`. Read-only;
+  login stays in the settings card / CLI. Verified: `admin douyin status` through
+  the host harness.
+- **The environment card asks the CLI for the OCR state.** It used its own
+  `py -3` probe, which on Windows can resolve a different Python than the CLI runs
+  (measured: the card said "OCR 未安装" while the CLI had rapidocr installed). It
+  now reads `video2agent models status` first and only falls back to a Python
+  import probe, so the chip reflects the interpreter that actually runs OCR.
+- **Douyin QR login is in the settings page.** The 0.3.0 environment card gained a 抖音登录 block next to the Bilibili one: the Host tracks one `douyin login` child, serves its QR screenshot, and polls until the scan lands, then stores the cookie jar and account cache. CLI-only before this; the QR/clear flow was end-to-end tested through the Host routes.
+- **Fix: the Douyin login card stopped polling after its first tick.** The effect was keyed on `[state, qr]`, so a first poll without a QR left both values unchanged and never polled again — the backend had the QR image ~11s after the click while the card sat on "等待扫码" forever. It now polls on a fixed interval and shows a "generating QR" hint; verified in the real settings UI (QR image rendered at t=12s).
+- **Fix: the Douyin login view no longer shows the slider verification as if it were the QR.** `douyin login` now opens a visible Chrome/Edge window (complete the slider there), screenshots only a real QR element (login-modal QR) and reports `E_DOUYIN_VERIFY`/`stage=verifying` in headless mode instead of saving the captcha page as the QR; the settings card explains the verification step and updates to the QR once it is passed.
+- **The Douyin login card only shows a real QR.** Page screenshots (captcha or video frames) are no longer written into the QR slot, so the card cannot show a stretched, constantly-changing screenshot: before the QR exists it shows a text hint, then the login-modal QR element, then `已登录` after the scan; the image keeps its aspect ratio instead of being forced into a 180x180 box.
+- **The login card captures the real QR once.** The previous flow screenshotted a wide login banner (measured 813x261) every 1.5s into the QR slot, so it looked stretched and made the visible Chrome window flash. Login now scans every img/canvas inside the login modal, accepts only a 90-600px square candidate (the real desktop QR is 179x179), screenshots it exactly once, and stops capturing while waiting for the scan; page screenshots are never written to the QR slot.
+- **The login QR is generated in the background.** `douyin login` is headless by default (normal Chrome UA + no automation flag), so the settings page gets the QR without a browser window popping up; a captcha falls back to an off-screen window, and only a real slider opens a visible window (`--headed` forces it). Verification detection now matches the strong slider phrases only ("验证码登录" is an SMS-login tab, not a captcha). Verified: QR captured at ~16s with no visible window.
+
 ## 0.2.0 (2026-11-17)
 
 - **Local OCR now installs on Python 3.13 with one click.** The OCR extra installs

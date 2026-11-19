@@ -43,6 +43,9 @@ assert.ok(routes.has('/api/video2agent/doctor'), 'doctor route missing')
 assert.ok(routes.has('/api/video2agent/retry'), 'retry route missing')
 assert.ok(routes.has('/api/video2agent/jobs/cancel'), 'cancel route missing')
 assert.ok(routes.has('/api/video2agent/setup'), 'env-check/setup route missing')
+assert.ok(routes.has('/api/video2agent/douyin-login/status'), 'Douyin login status route missing')
+assert.ok(routes.has('/api/video2agent/douyin-login/start'), 'Douyin login start route missing')
+assert.ok(routes.has('/api/video2agent/douyin-login/clear'), 'Douyin login clear route missing')
 
 function call(method, body, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -92,6 +95,15 @@ assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'ocr-index'
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'export' }), false)
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'account' }), false)
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'list' }), true)
+assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'douyin' }), false, 'Douyin account reads must not run in the read-only worker')
+assert.deepEqual(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'me' }),
+  ['douyin', 'me', '--json'], 'douyin me must map to the CLI')
+assert.deepEqual(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'videos', douyin_tab: 'favorites', limit: 5 }),
+  ['douyin', 'videos', '--tab', 'favorites', '--limit', '5', '--json'], 'douyin favorites must map to --tab favorites')
+assert.deepEqual(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'profile', douyin_url: 'https://www.douyin.com/user/self' }),
+  ['douyin', 'profile', '--url', 'https://www.douyin.com/user/self', '--json'], 'douyin profile must pass the URL')
+assert.equal(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'profile' }), null, 'profile without a URL is an argument error')
+assert.equal(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'videos', douyin_tab: 'nope' }), null, 'invalid Douyin tab must be rejected')
 assert.equal(__test.workerEligible({ command: 'find' }), true)
 // Candidate offers and shortlist idempotency are per session.
 assert.notEqual(__test.discoveryLastPath('session-a'), __test.discoveryLastPath('session-b'), 'discovery candidates must be per session')
@@ -286,6 +298,9 @@ assert.equal(typeof failureEnvelope.text, 'string')
 process.env.VIDEO2AGENT_BIN = 'video2agent'
 const okCall = await registeredTool.execute({ command: 'jobs' })
 assert.equal(okCall.ok, true, 'jobs should succeed: ' + JSON.stringify(okCall).slice(0, 300))
+const dyStatus = await registeredTool.execute({ command: 'admin', admin_action: 'douyin', douyin_action: 'status' })
+assert.equal(dyStatus.ok, true, 'Douyin status must reach the CLI: ' + JSON.stringify(dyStatus).slice(0, 300))
+assert.equal(JSON.parse(dyStatus.text).platform, 'douyin')
 assert.equal(okCall.error, undefined)
 const renderedOk = registeredTool.output.render({ command: 'jobs' }, okCall)
 assert.equal(renderedOk[0].text, okCall.text, 'success render must not wrap the payload')
@@ -1133,6 +1148,20 @@ assert.equal(routes.has('/api/video2agent/discovery/status'), true, 'the status 
 // neither a valid job id nor a Bilibili BV id before spawning.
 const badRetry = await call('POST', JSON.stringify({ video_id: 'not-a-bv' }), { path: '/api/video2agent/retry' })
 assert.equal(badRetry.status, 400)
+// Douyin login status reads the local cookie jar without spawning the CLI, and
+// clear is a guarded write. Start is not invoked here (it launches a browser).
+const douyinStatus = await call('GET', undefined, { path: '/api/video2agent/douyin-login/status' })
+assert.equal(douyinStatus.status, 200, 'Douyin status must answer without the CLI')
+const douyinStatusJson = JSON.parse(douyinStatus.body)
+assert.equal(douyinStatusJson.ok, true)
+assert.ok(['idle', 'waiting', 'ready', 'failed'].includes(douyinStatusJson.state), 'unexpected Douyin login state')
+const douyinClear = await call('POST', JSON.stringify({}), { path: '/api/video2agent/douyin-login/clear' })
+assert.equal(douyinClear.status, 200, 'Douyin clear must be a guarded write')
+assert.equal(JSON.parse(douyinClear.body).logged_in, false)
+// A Douyin start failure has no BV id: its row carries a platform URL, which the
+// CLI can ingest again. It must not be rejected as an invalid source.
+const douyinRetry = await call('POST', JSON.stringify({ source: 'https://www.douyin.com/video/7665930064613199114' }), { path: '/api/video2agent/retry' })
+assert.notEqual(douyinRetry.status, 400, 'a Douyin source URL must be retryable')
 
 // Validation still happens before any spawn.
 const defaultOutside = await registeredTool.execute({ command: 'shortlist', video_ids: ['BV1aaaaaaaa1'], default_selected: ['BV1bbbbbbbb1'], primary: 'BV1aaaaaaaa1' })

@@ -1,6 +1,6 @@
-"""Bilibili link/ID normalization.
+"""Bilibili and Douyin link/ID normalization.
 
-Accepted inputs:
+Bilibili accepted inputs:
 
 * ``BV1xx411c7mD`` (pasted bare)
 * ``av170001`` (bare numeric id)
@@ -8,9 +8,16 @@ Accepted inputs:
 * ``https://www.bilibili.com/video/av170001``
 * ``https://b23.tv/AbCdEf`` (short link; resolved over the network)
 
-Everything is reduced to ``{"kind", "bvid", "url", ...}`` where ``url`` is the
-canonical ``https://www.bilibili.com/video/<BV>/`` URL. Pure string handling is
-separate from the one network call so the normalization is testable offline.
+Douyin accepted inputs:
+
+* ``https://www.douyin.com/video/<aweme_id>``
+* ``https://www.iesdouyin.com/share/video/<aweme_id>/``
+* ``https://www.douyin.com/discover?modal_id=<aweme_id>``
+* ``https://v.douyin.com/<code>/`` (short link; one redirect, no cookies)
+* the whole "复制打开抖音…" share text containing one of those URLs
+
+Everything is reduced to ``{"kind", "platform", "url", ...}`` with a canonical URL.
+Pure string handling is separate from the network calls so it is testable offline.
 """
 
 from __future__ import annotations
@@ -28,6 +35,21 @@ _SHORT_HOSTS = {"b23.tv", "www.b23.tv"}
 _BILI_HOSTS = {
     "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv", "www.b23.tv",
 }
+_DOUYIN_HOSTS = {
+    "douyin.com", "www.douyin.com", "m.douyin.com", "v.douyin.com",
+    "iesdouyin.com", "www.iesdouyin.com",
+}
+_DOUYIN_SHORT_HOSTS = {"v.douyin.com"}
+_DOUYIN_PATH_ID = re.compile(r"(?:/video/|/share/video/)(\d{15,20})(?:/|$)")
+_DOUYIN_QUERY_ID = re.compile(r"(?:modal_id|aweme_id|item_ids)=(\d{15,20})")
+_DOUYIN_URL_IN_TEXT = re.compile(
+    r"https?://(?:v\.douyin\.com/[A-Za-z0-9_-]+|"
+    r"(?:www\.)?(?:ies)?douyin\.com/(?:share/)?video/\d{15,20})[^\s，。！？、]*"
+)
+_DOUYIN_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1"
+)
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131 Safari/537.36"
@@ -79,6 +101,31 @@ def extract_bvid(text: str) -> str | None:
     return m.group(0) if m else None
 
 
+def canonical_douyin_url(aweme_id: str) -> str:
+    return f"https://www.douyin.com/video/{aweme_id}"
+
+
+def _douyin_ref(raw: str, parsed) -> dict | None:
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or ""
+    if host in _DOUYIN_SHORT_HOSTS:
+        token = path.strip("/").split("/")[0]
+        if re.fullmatch(r"[A-Za-z0-9_-]{4,}", token):
+            return {
+                "kind": "douyin_shortlink", "platform": "douyin", "aweme_id": None,
+                "url": f"https://v.douyin.com/{token}/", "input_kind": "shortlink", "token": token,
+            }
+        return None
+    match = _DOUYIN_PATH_ID.search(path) or _DOUYIN_QUERY_ID.search(parsed.query or "")
+    if match:
+        aweme_id = match.group(1)
+        return {
+            "kind": "douyin", "platform": "douyin", "aweme_id": aweme_id,
+            "url": canonical_douyin_url(aweme_id), "input_kind": "url",
+        }
+    return None
+
+
 def canonical_video_url(bvid: str, *, page: int | None = None) -> str:
     url = f"https://www.bilibili.com/video/{bvid}/"
     if page and page > 1:
@@ -115,9 +162,16 @@ def extract_ref(text: str) -> dict | None:
         return {"kind": "bv", "bvid": bvid, "av_id": aid,
                 "url": canonical_video_url(bvid), "input_kind": "av"}
     if not re.match(r"https?://", raw, re.I):
+        # "7.85 复制打开抖音… https://v.douyin.com/xxx/" — pull the URL out of the
+        # share text instead of demanding the user trim it.
+        share = _DOUYIN_URL_IN_TEXT.search(raw)
+        if share:
+            return extract_ref(share.group(0))
         return None
     parsed = urlparse(raw)
     host = (parsed.hostname or "").lower()
+    if host in _DOUYIN_HOSTS:
+        return _douyin_ref(raw, parsed)
     if host not in _BILI_HOSTS:
         return None
     page = _page_of(parsed)
@@ -153,7 +207,7 @@ def extract_ref(text: str) -> dict | None:
     return None
 
 
-def _resolve_shortlink(url: str, *, timeout: float = 8.0) -> str:
+def _resolve_shortlink(url: str, *, timeout: float = 8.0, allow_private: bool = False) -> str:
     """Follow a b23.tv redirect and return the final URL."""
     try:
         import requests
@@ -164,7 +218,7 @@ def _resolve_shortlink(url: str, *, timeout: float = 8.0) -> str:
 
     # The first hop is checked too: a caller passing a private URL must not make
     # this helper issue the request at all.
-    assert_public_url(url)
+    assert_public_url(url, allow_private=allow_private)
 
     # Follow redirects by hand so every hop is checked: allow_redirects=True
     # fetched an internal 302 target before the final-host check ran.
@@ -177,7 +231,7 @@ def _resolve_shortlink(url: str, *, timeout: float = 8.0) -> str:
             if location:
                 resp.close()
                 nxt = urljoin(final, location)
-                assert_public_url(nxt)
+                assert_public_url(nxt, allow_private=allow_private)
                 final = nxt
                 continue
             resp.close()
@@ -203,7 +257,56 @@ def _resolve_shortlink(url: str, *, timeout: float = 8.0) -> str:
     return final
 
 
-def normalize_video_ref(text: str, *, timeout: float = 8.0) -> dict | None:
+def resolve_douyin_shortlink(token: str, *, timeout: float = 8.0) -> str:
+    """Resolve v.douyin.com/<token> to an aweme id (one 302, no cookies).
+
+    Verified 2026-11: the short host answers 302 with an iesdouyin share URL that
+    contains '/share/video/<aweme_id>/'. Invalid codes redirect to the Douyin
+    homepage, so the Location is validated rather than trusted.
+    """
+    try:
+        import requests
+    except Exception as e:  # pragma: no cover - requests is a hard dependency
+        raise Video2AgentError("E_DOUYIN_SHORTLINK", f"Cannot resolve Douyin short link: {token}",
+                               "Install requests, or paste the full douyin.com video URL.") from e
+    from .net import assert_public_url
+
+    url = f"https://v.douyin.com/{token}/"
+    assert_public_url(url)
+    try:
+        resp = requests.get(url, timeout=timeout, allow_redirects=False,
+                            headers={"User-Agent": _DOUYIN_UA})
+        location = resp.headers.get("Location") or ""
+        status = resp.status_code
+        text = ""
+        if status == 200:
+            text = resp.text[:200_000]
+        resp.close()
+    except Video2AgentError:
+        raise
+    except Exception as e:
+        raise Video2AgentError(
+            "E_DOUYIN_SHORTLINK",
+            f"Douyin short link could not be resolved: {token}",
+            "Open the link in a browser and paste the douyin.com/video/<id> URL.",
+        ) from e
+    match = re.search(r"/share/video/(\d{15,20})", location) or re.search(
+        r"https?://(?:www\.)?douyin\.com/video/(\d{15,20})", location
+    )
+    if match:
+        return match.group(1)
+    if text:
+        match = re.search(r"(?:/share/video/|/video/)(\d{15,20})", text)
+        if match:
+            return match.group(1)
+    raise Video2AgentError(
+        "E_DOUYIN_SHORTLINK",
+        f"Douyin short link did not point at a video: {token}",
+        "Open the link in a browser and paste the douyin.com/video/<id> URL.",
+    )
+
+
+def normalize_video_ref(text: str, *, timeout: float = 8.0, allow_private: bool = False) -> dict | None:
     """Normalize any accepted reference to a canonical BV URL ref.
 
     Raises ``Video2AgentError("E_SHORTLINK", ...)`` when a b23.tv short link cannot
@@ -213,9 +316,18 @@ def normalize_video_ref(text: str, *, timeout: float = 8.0) -> dict | None:
     ref = extract_ref(text)
     if ref is None:
         return None
+    if ref.get("platform") == "douyin":
+        if ref.get("kind") == "douyin_shortlink":
+            aweme_id = resolve_douyin_shortlink(ref["token"], timeout=timeout)
+            return {
+                "kind": "douyin", "platform": "douyin", "aweme_id": aweme_id,
+                "url": canonical_douyin_url(aweme_id), "input_kind": "shortlink",
+                "resolved_from": ref["url"],
+            }
+        return ref
     if ref.get("kind") != "shortlink":
         return ref
-    final = _resolve_shortlink(ref["url"], timeout=timeout)
+    final = _resolve_shortlink(ref["url"], timeout=timeout, allow_private=allow_private)
     resolved = extract_ref(final)
     if not resolved or not resolved.get("bvid"):
         raise Video2AgentError(

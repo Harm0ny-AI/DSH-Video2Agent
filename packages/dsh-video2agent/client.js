@@ -164,11 +164,11 @@ window.__ModuleLoader__.load({
       '[data-vp-settings-title]{font-size:20px;line-height:1.3;font-weight:650;margin:0 0 4px;letter-spacing:-.02em;}',
       '[data-vp-settings-note]{font-size:12px;line-height:1.5;color:var(--vp-muted,#63605a);margin:0 0 18px;}',
       // Bilibili login block: the primary path to subtitles, so it is not a row.
-      '[data-vp-cloud],[data-vp-bili]{border:1px solid var(--vp-accent-line);border-radius:14px;padding:12px 14px;margin:0 0 16px;background:var(--vp-accent-soft);}',
+      '[data-vp-cloud],[data-vp-bili],[data-vp-douyin]{border:1px solid var(--vp-accent-line);border-radius:14px;padding:12px 14px;margin:0 0 16px;background:var(--vp-accent-soft);}',
       // No loading text or animation: keep the blue card shells and fill their
       // contents when the (cached or prefetched) read is available.
-      '[data-vp-settings][data-loading] [data-vp-cloud],[data-vp-settings][data-loading] [data-vp-bili]{display:block!important;min-height:64px;}',
-      '[data-vp-settings][data-loading] [data-vp-cloud] > *,[data-vp-settings][data-loading] [data-vp-bili] > *{visibility:hidden!important;}',
+      '[data-vp-settings][data-loading] [data-vp-cloud],[data-vp-settings][data-loading] [data-vp-bili],[data-vp-settings][data-loading] [data-vp-douyin]{display:block!important;min-height:64px;}',
+      '[data-vp-settings][data-loading] [data-vp-cloud] > *,[data-vp-settings][data-loading] [data-vp-bili] > *,[data-vp-settings][data-loading] [data-vp-douyin] > *{visibility:hidden!important;}',
       // Cloud controls sit inside the blue card: tint them with the accent,
       // never a native white box, and keep them inside the card (border-box).
       '[data-vp-settings] input:not([type=checkbox]):not([type=color]):not([type=range]),[data-vp-settings] select{box-sizing:border-box!important;max-width:100%!important;background:rgba(10,132,255,.065)!important;color:inherit!important;border:1px solid rgba(10,132,255,.18)!important;border-radius:9px!important;box-shadow:none!important;outline:none!important;}',
@@ -187,6 +187,20 @@ window.__ModuleLoader__.load({
       '[data-vp-bili-btn]{border:1px solid var(--vp-accent);background:transparent;color:var(--vp-accent);border-radius:8px;padding:5px 10px;font:12px/1.2 inherit;cursor:pointer;}',
       '[data-vp-bili-btn]:hover{background:var(--vp-accent-soft);}',
       '[data-vp-bili-btn]:disabled{opacity:.6;cursor:default;}',
+      // Douyin login block: same shape as the Bilibili card, separate state.
+      '[data-vp-douyin-head]{display:flex;align-items:center;justify-content:space-between;gap:12px;}',
+      '[data-vp-douyin-title]{font-size:13px;font-weight:650;}',
+      '[data-vp-douyin-state]{font-size:11px;color:var(--vp-muted,#77746b);}',
+      '[data-vp-douyin-state="on"]{color:#1a7f37;}',
+      '[data-vp-douyin-state="err"]{color:#a03a31;font-weight:600;}',
+      '[data-vp-douyin-hint]{font-size:11.5px;line-height:1.5;color:var(--vp-muted,#77746b);margin-top:6px;}',
+      '[data-vp-douyin-qrbox]{display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:10px;}',
+      '[data-vp-douyin-qr]{max-width:180px;max-height:220px;width:auto;height:auto;object-fit:contain;image-rendering:auto;border-radius:10px;background:#fff;padding:6px;border:1px solid rgba(128,128,128,.18);}',
+      '[data-vp-douyin-tip]{font-size:11px;color:var(--vp-muted,#77746b);}',
+      '[data-vp-douyin-actions]{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}',
+      '[data-vp-douyin-btn]{border:1px solid var(--vp-accent);background:transparent;color:var(--vp-accent);border-radius:8px;padding:5px 10px;font:12px/1.2 inherit;cursor:pointer;}',
+      '[data-vp-douyin-btn]:hover{background:var(--vp-accent-soft);}',
+      '[data-vp-douyin-btn]:disabled{opacity:.6;cursor:default;}',
       '[data-vp-seg]{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid rgba(10,132,255,.16);border-radius:999px;background:rgba(10,132,255,.07);min-width:190px;}',
       '[data-vp-seg] button{flex:1;border:0;border-radius:999px;background:transparent;color:var(--vp-muted,#63605a);padding:5px 11px;font:12px/1.2 inherit;cursor:pointer;white-space:nowrap;}',
       '[data-vp-seg] button[data-on="1"]{background:var(--vp-accent);color:#fff;box-shadow:0 1px 4px rgba(10,132,255,.22);}',
@@ -1148,9 +1162,18 @@ window.__ModuleLoader__.load({
     const B23_RE = /https?:\/\/b23\.tv\/[0-9A-Za-z]+/i
     const BILI_RE = /https?:\/\/(?:(?:www|m)\.)?bilibili\.com\/video\/(BV[0-9A-Za-z]{10}|av\d+)/i
     const BARE_BV_RE = /\bBV[0-9A-Za-z]{10}\b/
+    // Douyin: canonical video pages, iesdouyin share pages and v.douyin.com
+    // short links (the Host resolves the short link and reads SSR metadata).
+    const DY_RE = /https?:\/\/(?:(?:www|m)\.)?douyin\.com\/video\/(\d{15,20})/i
+    const DY_SHARE_RE = /https?:\/\/(?:www\.)?iesdouyin\.com\/share\/video\/(\d{15,20})/i
+    const DY_SHORT_RE = /https?:\/\/v\.douyin\.com\/[0-9A-Za-z_-]+\/?/i
 
     function detectVideoLink(draft) {
       const text = String(draft || '')
+      const dyShort = text.match(DY_SHORT_RE)
+      if (dyShort) return { url: dyShort[0], form: 'douyin' }
+      const dy = text.match(DY_RE) || text.match(DY_SHARE_RE)
+      if (dy) return { url: 'https://www.douyin.com/video/' + dy[1], form: 'douyin' }
       const short = text.match(B23_RE)
       if (short) return { url: short[0], form: 'short' }
       const full = text.match(BILI_RE)
@@ -1548,7 +1571,7 @@ window.__ModuleLoader__.load({
               if (fails >= 5) {
                 // A deleted/pruned job used to poll every 15s forever; the card
                 // is hidden anyway, so stop and leave one visible error.
-                setPollError('进度更新中断，后台任务可能仍在运行；可稍后重试')
+                setPollError('进度更新中断，任务可能仍在处理，可稍后重试。')
                 alive = false
                 return
               }
@@ -2012,7 +2035,7 @@ window.__ModuleLoader__.load({
           if (!response.ok || !data || data.ok !== true) {
             const error = (data && data.error && [data.error.message, data.error.remedy].filter(Boolean).join('：'))
               || (data && (data.error || data.detail))
-              || ('安装失败（HTTP ' + response.status + '）')
+              || '安装失败，请稍后重试。'
             setLog(String(error) + (data && data.output ? '\n' + data.output : ''))
           } else if (data.output) {
             setLog(data.output)
@@ -2027,10 +2050,10 @@ window.__ModuleLoader__.load({
       // Compact: one status line with three chips, install buttons only for what is
       // missing. The full version/path text stays in the chip's tooltip.
       const items = data ? [
-        { key: 'python', label: 'Python', item: data.python, text: data.python && data.python.ok ? String(data.python.detail || '').replace(/^Python\s*/, '') : '缺失' },
-        { key: 'cli', label: 'CLI', item: data.cli, text: data.cli && data.cli.ok ? String(data.cli.detail || '').replace(/^video2agent\s*/, '') : '缺失' },
+        { key: 'python', label: 'Python', item: data.python, text: data.python && data.python.ok ? String(data.python.detail || '').replace(/^Python\s*/, '') : '未安装' },
+        { key: 'cli', label: '视频引擎', item: data.cli, text: data.cli && data.cli.ok ? String(data.cli.detail || '').replace(/^video2agent\s*/, '') : '未就绪' },
         { key: 'ffmpeg', label: 'FFmpeg', item: data.ffmpeg, text: (() => {
-          if (!data.ffmpeg || !data.ffmpeg.ok) return '缺失'
+          if (!data.ffmpeg || !data.ffmpeg.ok) return '未安装'
           const match = String(data.ffmpeg.detail || '').match(/ffmpeg version (\d+(?:\.\d+)*)/i)
           return match ? match[1] : '正常'
         })() },
@@ -2073,13 +2096,13 @@ window.__ModuleLoader__.load({
         updateCli
           ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
               h('span', { style: { fontSize: '11px', color: '#9a6700' } },
-                'CLI 可更新：' + (data.cli.version || '?') + ' → ' + (data.cli.latest || '?')),
+                '视频引擎可更新：' + (data.cli.version || '?') + ' → ' + (data.cli.latest || '?')),
               h('button', {
                 'data-vp-bili-btn': '',
                 disabled: !!busy,
                 onClick: () => install('update-cli'),
                 style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' },
-              }, busy === 'update-cli' ? '更新中…' : '更新 CLI'),
+              }, busy === 'update-cli' ? '更新中…' : '更新引擎'),
             )
           : null,
         missing.length
@@ -2110,6 +2133,9 @@ window.__ModuleLoader__.load({
       // Bilibili login state: the QR flow is what makes "use the subtitles"
       // possible without a user ever touching a cookie file.
       const [bili, setBili] = React.useState(() => BILI_CACHE || { loggedIn: false, uid: '', qr: '', key: '', state: 'loading', busy: false })
+      // Douyin login is CLI-backed: the Host tracks a short-lived `douyin login`
+      // child and serves its QR screenshot; the page polls it until the scan lands.
+      const [douyin, setDouyin] = React.useState({ state: 'loading', stage: '', logged_in: false, qr: '', account: null, error: '', busy: false })
       // A data: URL can still fail to decode (WebKit/Chromium differences, a
       // truncated response); show a retry hint instead of a blank white box.
       const [qrFailed, setQrFailed] = React.useState(false)
@@ -2422,8 +2448,90 @@ window.__ModuleLoader__.load({
         }
         setBili({ loggedIn: false, uid: '', qr: '', key: '', state: 'idle', busy: false })
       }
+      const douyinApply = (patch) => setDouyin((s) => ({ ...s, ...patch }))
+      const douyinFetch = async () => {
+        try {
+          const response = await fetch('/api/video2agent/douyin-login/status')
+          const data = await response.json()
+          if (!response.ok || !data || data.ok === false) throw new Error('status failed')
+          douyinApply({
+            state: data.state || 'idle',
+            stage: data.stage || '',
+            logged_in: !!data.logged_in,
+            qr: data.qr || '',
+            account: data.account || null,
+            error: data.error || '',
+          })
+        } catch {
+          douyinApply({ state: 'error', error: '读取抖音登录状态失败，稍后再试。' })
+        }
+      }
+      React.useEffect(() => {
+        let alive = true
+        ;(async () => {
+          try {
+            const response = await fetch('/api/video2agent/douyin-login/status')
+            const data = await response.json()
+            if (!alive || !data || data.ok === false) return
+            douyinApply({
+              state: data.state || 'idle',
+              stage: data.stage || '',
+              logged_in: !!data.logged_in,
+              qr: data.qr || '',
+              account: data.account || null,
+              error: data.error || '',
+            })
+          } catch { /* the card keeps its idle state */ }
+        })()
+        return () => { alive = false }
+      }, [])
+      React.useEffect(() => {
+        if (douyin.state !== 'waiting') return undefined
+        // Keep polling on a fixed interval. A one-shot timeout keyed on
+        // [state, qr] stopped after the first poll when the QR was not ready yet
+        // (state and qr both unchanged), so the card sat on "等待扫码" while the
+        // backend already had a QR image ready.
+        const timer = setInterval(() => { douyinFetch() }, 2000)
+        return () => clearInterval(timer)
+      }, [douyin.state])
+      const douyinStart = async () => {
+        setDouyin((s) => ({ ...s, busy: true, error: '' }))
+        try {
+          const response = await fetch('/api/video2agent/douyin-login/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+          })
+          const data = await response.json()
+          if (!response.ok || !data || data.ok === false) throw new Error('start failed')
+          setDouyin((s) => ({
+            ...s, busy: false, state: data.state || 'waiting',
+            stage: data.stage || s.stage, qr: data.qr || '', logged_in: !!data.logged_in,
+          }))
+        } catch {
+          setDouyin((s) => ({
+            ...s, busy: false, state: 'error',
+            error: '生成二维码失败，请稍后重试；若持续失败，请在终端运行 video2agent doctor 检查环境。',
+          }))
+        }
+      }
+      const douyinClear = async () => {
+        setDouyin((s) => ({ ...s, busy: true }))
+        try {
+          const response = await fetch('/api/video2agent/douyin-login/clear', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+          })
+          const data = await response.json().catch(() => ({}))
+          if (!response.ok || (data && data.ok === false)) throw new Error('clear failed')
+          setDouyin({ state: 'idle', stage: '', logged_in: false, qr: '', account: null, error: '', busy: false })
+        } catch {
+          setDouyin((s) => ({ ...s, busy: false, state: 'error', error: '退出抖音登录失败，稍后再试。' }))
+        }
+      }
       if (props && props.view === 'summary') {
-        return h('div', { 'data-vp-settings-summary': '' }, '云端 ASR/OCR、B站账号、处理卡片、主题色和缓存。')
+        return h('div', { 'data-vp-settings-summary': '' }, '云端 ASR/OCR、B站/抖音账号、处理卡片、主题色和缓存。')
       }
       const persistUi = async (patch) => {
         // POST only what changed. The old body always carried four defaults, so a
@@ -2549,7 +2657,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { 'data-vp-settings': '', 'data-loading': (cloud.state === 'loading' || models.state === 'loading') ? '1' : undefined },
         h('h1', { 'data-vp-settings-title': '' }, 'Video2Agent'),
-        h('p', { 'data-vp-settings-note': '' }, '环境检查、云模型、B 站、本机模型和界面设置。'),
+        h('p', { 'data-vp-settings-note': '' }, '环境检查、云模型、B 站/抖音登录、本机模型和界面设置。'),
 
         EnvironmentCard(),
 
@@ -2584,7 +2692,7 @@ window.__ModuleLoader__.load({
             }, '清除')
           ),
           h('div', { 'data-vp-bili-hint': '', style: { marginTop: '4px' } }, '国内站注册可获得赠金，并支持作者的肥鱼获得更多米饭！(๑•̀ㅂ•́)و✧'),
-          cloud.source === 'env' ? h('div', { 'data-vp-bili-hint': '', style: { marginTop: '4px' } }, '当前使用环境变量中的 Key；请在启动环境中移除。') : null,
+          cloud.source === 'env' ? h('div', { 'data-vp-bili-hint': '', style: { marginTop: '4px' } }, '当前使用的是系统环境中的 Key。') : null,
           cloud.testMessage ? h('div', { 'data-vp-bili-hint': '', style: { marginTop: '4px' } }, cloud.testMessage) : null,
           cloud.key_error ? h('div', { 'data-vp-warn': 'err', style: { marginTop: '6px' } }, cloud.key_error.message || '保存的 Key 无法解密，请重新保存。') : null,
           cloud.error ? h('div', { 'data-vp-warn': 'err', style: { marginTop: '6px' } }, cloud.error) : null
@@ -2825,8 +2933,39 @@ window.__ModuleLoader__.load({
           bili.state === 'error' ? h('div', { 'data-vp-warn': 'err', role: 'alert', style: { marginTop: '8px' } },
             bili.error || '读取登录状态失败，可重新扫码或稍后再试。') : null,
           h('div', { 'data-vp-bili-actions': '' },
-            h('button', { 'data-vp-bili-btn': '', onClick: biliStart, disabled: bili.busy }, bili.qr ? '重新生成二维码' : '扫码登录'),
+            h('button', { 'data-vp-bili-btn': '', onClick: biliStart, disabled: bili.busy },
+              bili.loggedIn ? '重新登录' : (bili.qr ? '重新生成二维码' : '扫码登录')),
             bili.loggedIn ? h('button', { 'data-vp-bili-btn': '', onClick: biliClear }, '退出登录') : null
+          )
+        ),
+        h('div', { 'data-vp-douyin': '' },
+          h('div', { 'data-vp-douyin-head': '' },
+            h('span', { 'data-vp-douyin-title': '' }, '抖音登录'),
+            h('span', {
+              'data-vp-douyin-state': douyin.logged_in ? 'on' : (douyin.state === 'error' || douyin.state === 'failed' ? 'err' : 'off'),
+            }, douyin.logged_in
+              ? ('已登录' + (douyin.account && douyin.account.nickname ? ' · ' + douyin.account.nickname : ''))
+              : douyin.state === 'waiting' ? '等待确认' : douyin.state === 'loading' ? '读取中…' : '未登录')
+          ),
+          h('div', { 'data-vp-douyin-hint': '' }, '扫码登录，读取自己的作品、收藏和喜欢。'),
+          douyin.state === 'waiting' && !douyin.logged_in
+            ? h('div', { 'data-vp-douyin-tip': '', style: { marginTop: '6px' } },
+                douyin.stage === 'verifying'
+                  ? '请在 Chrome 窗口中完成安全验证。'
+                  : douyin.stage === 'scanned'
+                    ? '已扫码，请在手机上确认。'
+                    : douyin.stage === 'expired'
+                      ? '二维码已过期，请在窗口中刷新。'
+                      : '正在打开登录窗口…')
+            : null,
+          douyin.state === 'failed' ? h('div', { 'data-vp-warn': 'err', role: 'alert', style: { marginTop: '8px' } },
+            douyin.error || '登录失败，请重试。') : null,
+          douyin.state === 'error' ? h('div', { 'data-vp-warn': 'err', role: 'alert', style: { marginTop: '8px' } },
+            douyin.error || '读取抖音登录状态失败，稍后再试。') : null,
+          h('div', { 'data-vp-douyin-actions': '' },
+            h('button', { 'data-vp-douyin-btn': '', onClick: douyinStart, disabled: douyin.busy || (douyin.state === 'waiting' && !douyin.logged_in) },
+              douyin.logged_in ? '重新登录' : (douyin.state === 'waiting' ? '等待确认…' : '扫码登录')),
+            douyin.logged_in ? h('button', { 'data-vp-douyin-btn': '', onClick: douyinClear, disabled: douyin.busy }, '退出登录') : null
           )
         ),
         h('div', { 'data-vp-bili-head': '', style: { marginTop: '6px' } },
@@ -2940,7 +3079,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    const COVER_HOSTS = /(^|\.)(hdslb\.com|biliimg\.com|bilivideo\.com)$/i
+    const COVER_HOSTS = /(^|\.)(hdslb\.com|biliimg\.com|bilivideo\.com|douyinpic\.com|douyinstatic\.com|douyin\.com|iesdouyin\.com)$/i
     // Bilibili refuses hot-linked covers (403 without its referer), so platform
     // covers go through the Host proxy; anything else is used as-is.
     function coverThrough(url) {
@@ -3521,7 +3660,7 @@ window.__ModuleLoader__.load({
                   // let the next poll retry instead of offering a misleading restart.
                   next[job.job_id] = {
                     state: job.state,
-                    message: `进度更新失败（HTTP ${response.status}），稍后重试`,
+                    message: '进度更新中断，请稍后重试。',
                   }
                   return
                 }
@@ -3998,12 +4137,18 @@ window.__ModuleLoader__.load({
       if (!settings.enabled) return null
       if (!url) return null
       const data = state.data || {}
+      // The composer accepts Bilibili and Douyin links; the preview must name the
+      // platform it is actually resolving instead of always saying "B 站".
+      const isDouyin = !!(link && link.form === 'douyin')
+        || String(data.platform || '').toLowerCase() === 'douyin'
+      const platformLabel = isDouyin ? '抖音视频' : 'B 站视频'
       if (state.phase === 'failed') {
         return h('div', { 'data-vp-preview': '' },
           h('div', { 'data-vp-preview-main': '' },
-            h('div', { 'data-vp-preview-kicker': '' }, 'B 站视频 · 未能识别'),
+            h('div', { 'data-vp-preview-kicker': '' }, platformLabel + ' · 未能识别'),
             h('div', { 'data-vp-preview-title': '' }, '检查链接，或稍后再试'),
-            h('div', { 'data-vp-preview-meta': '' }, h('span', {}, '支持 BV 链接、av 号、b23.tv 短链')))
+            h('div', { 'data-vp-preview-meta': '' }, h('span', {},
+              isDouyin ? '支持 douyin.com/video、v.douyin.com 短链' : '支持 BV 链接、av 号、b23.tv 短链')))
         )
       }
       const ready = state.phase === 'ready'
@@ -4036,7 +4181,7 @@ window.__ModuleLoader__.load({
           ready && data.duration ? h('span', { 'data-vp-tile-duration': '' }, String(data.duration)) : null
         ),
         h('div', { 'data-vp-preview-main': '' },
-          h('div', { 'data-vp-preview-kicker': '' }, ready ? 'B 站视频 · 已识别' : 'B 站视频 · 正在识别'),
+          h('div', { 'data-vp-preview-kicker': '' }, ready ? platformLabel + ' · 已识别' : platformLabel + ' · 正在识别'),
           h('div', { 'data-vp-preview-title': '' }, ready ? (data.title || '视频信息') : '正在读取视频信息…'),
           h('div', { 'data-vp-preview-meta': '' },
             // The duration already sits on the cover; repeating it here reads as a bug.

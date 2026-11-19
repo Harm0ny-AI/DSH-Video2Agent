@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "video2agent"
-version = "0.2.0"
-description = "Video search and understanding for AI agents: transcript, scenes, on-screen text, frames."
+version = "0.3.0"
+description = "Bilibili/Douyin favorites gathering dust? Want your agent to gain video retrieval and understanding? Choose Video2Agent! One-click install gives your agent top-tier video understanding and turns online video into an information source. Whether you are researching social trends or working in media, any task that requires watching videos can now be handed to Video2Agent. Local-first; optional cloud ASR/OCR; optional Bilibili/Douyin login to unlock favorites/history and CC/AI subtitles."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "DSH-Video2Agent contributors" }]
-keywords = ["video", "agent", "asr", "ocr", "bilibili", "timestamps", "retrieval", "search", "dsh"]
+keywords = ["video", "agent", "asr", "ocr", "bilibili", "douyin", "favorites", "timestamps", "retrieval", "search", "dsh"]
 dependencies = [
   "numpy>=1.26",
   "Pillow>=10.0",
@@ -32,6 +32,9 @@ dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.6"]
 # marketplace one-click install then failed with `No matching distribution`).
 # Cloud OCR works without it; local OCR needs `pip install "video2agent[ocr]"`.
 ocr = ["rapidocr>=3.10", "onnxruntime>=1.20"]
+# Optional: Douyin account reads/QR login drive the installed Chrome/Edge through
+# Playwright (the JSON APIs need signatures). No browser download is bundled.
+browser = ["playwright>=1.45"]
 
 [project.scripts]
 video2agent = "video2agent.cli:main"

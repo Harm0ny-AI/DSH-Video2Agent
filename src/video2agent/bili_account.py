@@ -466,7 +466,7 @@ class AccountClient:
             moved = None
             for _ in range(6):
                 try:
-                    assert_public_url(current)
+                    assert_public_url(current, allow_private=bool(self.cfg.get("allow_private_urls")))
                     moved = requests.get(
                         current, headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"},
                         timeout=15, allow_redirects=False,

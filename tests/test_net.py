@@ -1,8 +1,56 @@
 import unittest
+from unittest.mock import patch
 
+from video2agent import net
 from video2agent.net import assert_public_url
 from video2agent.sources import path_allowed
 from video2agent.util import Video2AgentError
+
+
+class TunFakeIpTests(unittest.TestCase):
+    """Clash TUN + fake-ip resolves every domain into 198.18.0.0/15.
+
+    That answer comes from the local proxy; the proxy makes the real connection
+    and resolves remotely, so it must not be read as a private-network target.
+    """
+
+    def _resolve_to(self, ip):
+        return patch.object(net.socket, "getaddrinfo", return_value=[
+            (2, 1, 6, "", (ip, 0)),
+        ])
+
+    def test_fake_ip_range_is_not_treated_as_private(self):
+        with self._resolve_to("198.18.0.5"):
+            net.assert_public_url("https://www.bilibili.com/video/BV1xx411c7mD")
+            net.assert_public_url("https://www.bilivideo.com/x.m4s")
+            net.assert_public_url("https://b23.tv/abc")
+
+    def test_other_platform_hosts_also_work_under_fake_ip(self):
+        # Fake-ip is not Bilibili-specific: every domain resolves there in TUN
+        # mode, and the actual target is resolved by the proxy.
+        with self._resolve_to("198.19.255.254"):
+            net.assert_public_url("https://www.youtube.com/watch?v=abc")
+
+    def test_real_private_address_still_blocked(self):
+        with self._resolve_to("10.0.0.8"):
+            with self.assertRaises(Video2AgentError):
+                net.assert_public_url("https://example.com/video.mp4")
+
+    def test_allow_private_keeps_metadata_protection(self):
+        for url in (
+            "http://169.254.169.254/latest/meta-data",
+            "http://metadata.google.internal/computeMetadata/v1/",
+        ):
+            with self.assertRaises(Video2AgentError):
+                net.assert_public_url(url, allow_private=True)
+        with self._resolve_to("169.254.169.254"):
+            with self.assertRaises(Video2AgentError):
+                net.assert_public_url("https://example.com/redirect", allow_private=True)
+
+    def test_link_local_blocked_even_with_allow_private(self):
+        with self._resolve_to("169.254.1.1"):
+            with self.assertRaises(Video2AgentError):
+                net.assert_public_url("https://example.com/x", allow_private=True)
 
 
 class NetTests(unittest.TestCase):

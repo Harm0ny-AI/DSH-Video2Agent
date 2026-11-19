@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — 让 AI Agent 看懂视频，DSH 插件 dsh-video2agent" width="100%">
+  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — 把收藏夹里的视频变成知识，DSH 插件 dsh-video2agent" width="100%">
 </p>
 
 <p align="center">
@@ -14,16 +14,14 @@
   <img alt="Local-first" src="https://img.shields.io/badge/local--first-8b5cf6">
 </p>
 
-<h1 align="center">你的 Agent 浏览了无数网页<br>现在该让它看视频了</h1>
+<h1 align="center">B站/抖音收藏夹吃灰？<br>让 Agent 拥有视频检索和理解能力。</h1>
 
 <p align="center">
-  <b>Video2Agent 让 AI Agent 看懂视频、直接回答。</b><br>
-  B 站和本地视频都能问：讲了什么、哪条更好、值不值得看。
+  B站/抖音收藏夹吃灰？想要Agent获得视频检索和理解能力？欢迎选择Video2Agent！一键安装，让Agent获取顶尖视频理解能力，并获取网络视频作为信息源。无论你是想调研社会趋势，还是自媒体工作者，只要需要你看视频完成的工作，现在统统交给Video2Agent即可！本地优先，云端 ASR/OCR 可选；B 站/抖音登录可选，解锁收藏夹/历史与 CC/AI 字幕。
 </p>
 
-<p align="center"><sub>本地优先 · 云端 ASR/OCR 可选（任意 OpenAI 兼容服务商） · B 站扫码登录解锁 CC/AI 字幕</sub></p>
-
 <p align="center">
+  <a href="#收藏夹不该是视频的终点">收藏夹</a> ·
   <a href="#更快更全面更省">实测</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#它能做什么">它能做什么</a> ·
@@ -38,7 +36,21 @@
   <sub>实录；等待部分已压缩。</sub>
 </p>
 
-<p align="center"><sub><b>1 找视频</b> → <b>2 处理</b> → <b>3 回答</b></sub></p>
+<p align="center"><sub><b>1 贴链接</b> → <b>2 处理</b> → <b>3 提问</b></sub></p>
+
+---
+
+## 收藏夹不该是视频的终点
+
+B 站收藏夹、抖音收藏和喜欢，是很多人最大的“待看清单”，也最容易吃灰：收藏时觉得有用，真要看时找不到、看不完、记不住。
+
+别再让好视频烂在收藏夹里！Video2Agent 先把视频读一遍——转写、画面上的字、场景、关键画面——存成你自己的本地知识库。然后你只负责问：
+
+- **“这条到底讲了什么？”** → 几分钟读完，带时间码；
+- **“第 12 分钟那张表写了什么？”** → 原帧 + 同一帧上的文字，不靠猜；
+- **“这几条哪条讲得最全？”** → 1–10 条批量对比，共识和分歧都列出来。
+
+收藏照旧，读的事交给它。
 
 ---
 
@@ -56,31 +68,47 @@
 
 ## 它能做什么
 
-### 1. 检索网络视频
+### 1. 把收藏夹变成知识库
 
-在 B 站按关键词找片，按 UP 主、发布时间筛选；也可以直接贴 BV、av 或 b23 链接，先看标题、封面、时长，再决定要不要处理。
+B 站扫码登录后，Agent 能读你的收藏夹、历史、文件夹（只读），看到时长、UP 主和看完进度；挑几条交给它，1–10 条一起处理。抖音登录后也能读自己的作品、收藏和喜欢列表——命令行和 DSH 里的 Agent 都能读。处理完的视频进本地库：转写、画面文字、场景、关键帧，之后随时搜、随时问。
 
-### 2. 批量处理视频
+- **只看不改**：DSH 里的 `account` 工具不改你的收藏夹；要整理文件夹、批量分类，回 CLI 加 `--confirm`。
+- **抖音列表可能被风控**：会如实返回 `unavailable` 和原因，不会把“读不到”说成“没有视频”。
 
-本地文件或链接都能处理：先读视频信息，再走 CC/AI 字幕或 ASR，切镜头、抽取关键画面、做 OCR，最后把转写、画面文字、场景和关键画面存到本地。一次一批 1–10 条；之后问答、对比、整理都直接查这份内容，长视频也不用整段重看。
+### 2. 给 Agent 的视频信息源
 
-### 3. 获得全面视频理解
+同一份视频库，也是 Agent 的信息源：`video2agent` 工具 + `/video` 命令，让 Agent 回答前先查视频库，引用具体时间码和画面。B 站按关键词、UP 主、发布时间找片；抖音链接、本地文件走同一套索引；一次入库，之后搜索、对比、整理都直接查这份内容。你问的是收藏夹，Agent 拿到的是能回原片核对的证据。
 
-插件给出的不只是转写，而是转写、画面文字、场景结构、关键画面和运动信息。Agent 可以据此回答视频里的问题、比较多条视频，或者把内容整理成步骤、结论和可用的建议。
+抖音搜索暂不支持（`find` 仍只搜 B 站）。
 
-- **长电影、长课程**：先看结构和关键内容，再决定要不要深入，不用从头看到尾。
-- **UI 动效、操作录屏**：看切镜、运动和界面变化，帮开发定位交互、动效和实现问题。
+### 3. 一条视频，问到底
+
+贴 B 站/抖音链接或本地文件，先看标题、封面、时长，再决定要不要处理。处理完可以问：讲了什么、值不值得看、结论在第几分钟、画面里那张表写了什么。答案带时间码；需要核对时，取回同一时刻的原帧和文字。
+
+抖音网页有风控，匿名分享页可能返回验证页：会明确说被拦了并建议重试，不会把失败伪装成“没有内容”。
+
+### 4. 批量对比，挑出真正值得看的
+
+一次处理 1–10 条视频，横向对比教程、评测、访谈：哪条讲得全、哪里互相矛盾、哪条可以跳过。长视频不用整段重看，先看结构和关键内容，再决定深入哪一段。
+
+- **长电影、长课程**：先看结构和关键内容，再决定要不要深入；
+- **UI 动效、操作录屏**：看切镜、运动和界面变化，帮开发定位交互和实现问题；
 - **教程、评测、访谈**：把步骤、参数、观点和结论抽出来，多条视频放在一起对比。
 
-### 4. 管理 B 站收藏夹
+### 5. 准确到帧，不装懂
 
-扫码登录后，能看收藏夹、历史、文件夹，统计时长、UP 主和未看完，按 UP 主生成分类草案。DSH 里的 `account` 工具只读；真正整理文件夹、批量分类，回 CLI 加 `--confirm` 才动手，Cookie 只留在本地。
+- **字幕会核对**：B 站 AI 字幕按音频生成，直接用；人工/社区字幕会抽两段音频比对，可疑就回退 ASR，不拿错字幕糊弄你。
+- **图文同帧**：引用画面时，图和文字一定来自同一帧，时间码可回原片。
+- **不知道就说不知道**：OCR 没读、读取失败、时间码越界都会明确说明，不会写成“没有”。
+- **本地优先**：转写、抽帧、OCR 默认在本机跑；云端 ASR/OCR 可选，只上传你点名要处理的内容。
 
 ## 本地、云端与账号
 
 - **默认全本地。** 转写优先用视频自带字幕（CC/AI），没有字幕时才走本地 Whisper；ASR 模型**不随包分发、也不会自动下载**，需要时用 `video2agent models download`（`small` 约 464 MB）或在设置里连接云端 ASR。画面文字（RapidOCR）、场景切分和抽帧都在本机跑，视频文件不出机器；不需要 GPU，不需要 API Key。
 - **云端可选。** 设置页可以接入任意 OpenAI 兼容的 ASR/OCR 服务商（内置默认服务商，有免费额度）：转写只上传音频，云端 OCR 只读你点名时刻的画帧，不会把整批抽帧发给付费图像模型。Key 用 Windows DPAPI 加密存在本机，不写进配置、argv、日志或接口响应。
 - **B 站登录可选。** 扫码登录后解锁 CC/AI 字幕（匿名请求拿不到字幕列表）、按 UP 主/发布时间筛选候选，以及收藏夹、历史、文件夹的读取与分类草案。Cookie 只留在 `~/.video2agent/cookies/`；`account` 工具只读，改文件夹/批量分类要回 CLI 加 `--confirm`。
+- **抖音登录可选。** `pip install "video2agent[browser]"` 后，`video2agent douyin login` 会打开一个登录窗口用于扫码和安全验证（设置页只显示登录状态，不显示二维码），确认后窗口自动关闭并保存登录状态；`douyin profile --url <主页>` / `me` 读主页资料，`douyin videos --url <主页> --tab works|likes|favorites` 读作品/收藏/喜欢列表。用 Playwright 驱动本机 Chrome/Edge，不内置浏览器。
+
 ## 快速开始
 
 **环境：** Python 3.11+、FFmpeg（在 `PATH` 中），以及 DSH（用插件界面时需要）。
@@ -90,14 +118,14 @@
 
 各平台密钥存储：Windows 用 DPAPI，macOS 用登录钥匙串（Keychain），Linux 用 `$VIDEO2AGENT_HOME/secrets/cloud.key`（0600）；任何平台都可以改用 `SILICONFLOW_API_KEY` 环境变量。
 
-已发布到 PyPI 和 npm，可以直接安装：
+直接安装：
 
 ```bash
 pip install video2agent
 dsh plugin --profile web add dsh-video2agent
 ```
 
-想用源码或参与开发，走下面的克隆方式。
+想先试 0.3.0，或者参与开发，走下面的源码方式。
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent
@@ -108,7 +136,7 @@ pip install -e .
 
 video2agent setup          # 把 Skill 安装到 ~/.dsh/skills
 video2agent doctor
-video2agent ingest ./your-video.mp4      # 或 B 站链接
+video2agent ingest ./your-video.mp4      # 或 B 站 / 抖音链接
 video2agent list
 video2agent search "what you remember"
 ```
@@ -151,9 +179,13 @@ sequenceDiagram
 
 ## 截图
 
-| DSH 插件 | 批量任务 | 设置 |
-|---|---|---|
-| ![输入框预览](docs/preview-shot.png) | ![批量任务表](docs/selected-table-shot.png) | ![设置页](docs/settings-page-shot.png) |
+**单条视频的详细分析**
+
+![单条视频的详细分析](docs/preview-shot.png)
+
+**B 站 / 抖音登录**
+
+![B 站和抖音登录卡片](docs/settings-page-shot.png)
 
 深色社交分享图和插件市场卡片在 [`docs/assets/`](docs/assets)。
 
@@ -166,13 +198,6 @@ sequenceDiagram
 - [长视频实测](docs/LONG-VIDEO-BENCH.md)
 - [B 站字幕与登录](docs/BILIBILI-SUBTITLES.md)
 - [CLI 命令参考](docs/ARCHITECTURE.md) · `video2agent --help`
-
-## 状态
-
-- **0.2.0 已发布（2026-11-17）。** CLI、Skill 和 DSH 插件均可用，从 PyPI 或 npm 安装；0.1.3 把设置页「环境检查」收成一行状态胶囊（缺依赖时才展开安装按钮），修复 `perceive`/`video2agent doctor` 不认 `FFMPEG_BIN`/`FFPROBE_BIN` 的问题，并更新插件页安装说明；0.1.2 加入了「环境检查 + 一键安装」，0.1.1 修了「读到结尾被报错」「毫秒参数被当成秒」「中文被识别成日语」「进度环标错行」和「单次等待过长被杀」。`
-- 默认在本地跑，不需要 GPU；云端可选。
-- 已发布到 PyPI 和 npm：`pip install video2agent`、`npm i dsh-video2agent`；插件市场条目已按 awesome 列表格式准备好。
-- 已知限制：单字中文搜索、小字/低对比度文字的 OCR、跨镜头计数。
 
 ## 插件市场
 
@@ -195,9 +220,6 @@ node tests/test_plugin_campaign.mjs
 node tests/test_plugin_dock_state.mjs
 ```
 
-## 使用与内容权利
-
-本项目是一个本地运行的工具：不托管、不缓存、不分发任何视频内容，也不提供公开的视频下载服务。请只处理你有权访问和使用的内容。通过平台链接下载视频、保存转写与截图可能受平台服务条款和著作权法约束，这些内容的合法使用由使用者自行负责；请勿用于批量抓取、镜像传播或商业再分发。发现侵权或滥用，请按 `SECURITY.md` 的方式私下联系。
 ## 许可证
 
 Apache-2.0。第三方声明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

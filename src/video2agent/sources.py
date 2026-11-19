@@ -200,6 +200,73 @@ def find_downloaded_subtitles(directory: str | Path) -> list[Path]:
     return sorted([*d.glob("*.vtt"), *d.glob("*.srt")])
 
 
+def _douyin_source(ref: dict[str, Any], cfg: Config) -> dict[str, Any]:
+    """Build an ingest source from one Douyin video (SSR metadata + direct mp4)."""
+    from .douyin import download, get_item
+
+    item = get_item(
+        str(ref["aweme_id"]),
+        attempts=6,
+        cache_dir=cfg.home / "cache" / "douyin",
+    )
+    canonical = str(ref["url"])
+    vid = stable_id("vid", canonical)
+    out_dir = ensure_dir(cfg.media_dir / vid)
+    target = out_dir / "source.mp4"
+    if not (target.is_file() and target.stat().st_size > 50_000):
+        download(item, target)
+    info = probe(target)
+    title = normalize_text(item.get("title") or info.get("title") or target.stem)
+    author = item.get("author") or {}
+    stats = item.get("stats") or {}
+    cover = str(item.get("cover_url") or "")
+    cover_path = ""
+    if cover:
+        cp = cfg.covers_dir / f"douyin_{item.get('aweme_id')}.jpg"
+        got = download_cover(cover, cp, allow_private=bool(cfg.get("allow_private_urls")))
+        if got:
+            cover_path = str(got)
+    digest = sha256_file(target)
+    duration_ms = item.get("duration_ms") or 0
+    duration_s = round(float(duration_ms) / 1000.0, 3) if duration_ms else (info.get("duration") or None)
+    created = item.get("create_time")
+    upload_date = time.strftime("%Y%m%d", time.localtime(int(created))) if created else None
+    meta = {
+        "id": str(item.get("aweme_id") or ""),
+        "title": title,
+        "uploader": author.get("nickname") or author.get("unique_id") or "",
+        "uploader_id": author.get("unique_id") or author.get("uid") or "",
+        "channel": author.get("nickname") or "",
+        "channel_id": author.get("sec_uid") or "",
+        "duration": duration_s,
+        "thumbnail": cover,
+        "cover_path": cover_path or None,
+        "webpage_url": canonical,
+        "description": str(item.get("description") or title),
+        "upload_date": upload_date,
+        "view_count": stats.get("view"),
+        "like_count": stats.get("like"),
+        "comment_count": stats.get("comment"),
+        "repost_count": stats.get("share"),
+        "collect_count": stats.get("collect"),
+        "music": item.get("music") or "",
+        "platform": "douyin",
+    }
+    return {
+        "id": vid,
+        "kind": "url",
+        "uri": canonical,
+        "path": str(target.resolve()),
+        "sha256": digest,
+        "platform": "douyin",
+        "title": title,
+        "language": language_hint(title) or "zh",
+        "probe": info,
+        "meta": {k: v for k, v in meta.items() if v is not None},
+        "subtitles": [],
+    }
+
+
 def resolve_source(source: str, cfg: Config) -> dict[str, Any]:
     text = str(source).strip()
     p = Path(text).expanduser()
@@ -222,9 +289,19 @@ def resolve_source(source: str, cfg: Config) -> dict[str, Any]:
             "meta": {"source": "local"},
             "subtitles": [str(find_sidecar_for(p))] if find_sidecar_for(p) else [],
         }
-    ref = normalize_video_ref(text, timeout=8.0)
+    ref = normalize_video_ref(text, timeout=8.0, allow_private=bool(cfg.get("allow_private_urls")))
     if ref:
         text = ref["url"]
+    if ref and ref.get("platform") == "douyin":
+        return _douyin_source(ref, cfg)
+    if ref is None and re.match(r"https?://", text, re.I) and re.search(
+        r"^https?://(?:www\.|m\.)?(?:ies)?douyin\.com/(?:share/)?user/", text, re.I
+    ):
+        raise Video2AgentError(
+            "E_SOURCE",
+            "这是抖音用户主页，不是视频",
+            "贴视频链接（douyin.com/video/<数字id> 或 v.douyin.com 短链）；账户资料用 video2agent douyin profile。",
+        )
     if re.match(r"https?://", text, re.I):
         assert_public_url(text, allow_private=bool(cfg.get("allow_private_urls")))
         meta = fetch_metadata(text, cfg)
@@ -304,7 +381,7 @@ def discover_bilibili(query: str, cfg: Config, *, limit: int = 8, covers: bool =
         cover_text = ""
         if covers and cover:
             cp = cfg.covers_dir / f"bili_{bvid or idx}.jpg"
-            got = download_cover(cover, cp)
+            got = download_cover(cover, cp, allow_private=bool(cfg.get("allow_private_urls")))
             if got:
                 cover_path = str(got)
                 cover_paths.append(got)

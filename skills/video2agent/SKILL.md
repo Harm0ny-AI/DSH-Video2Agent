@@ -43,14 +43,14 @@ that file. A file is not a substitute.
 
 | command | returns | use when |
 |---|---|---|
-| `find` | Bilibili candidates (title/uploader/duration/reason) | looking for a video; `scope:"library"` searches indexed videos; `url` resolves one link |
+| `find` | Bilibili candidates (title/uploader/duration/reason) | looking for a video; `scope:"library"` searches indexed videos; `url` resolves one Bilibili/Douyin link |
 | `ingest` | job id(s) | index a path/URL; `video_ids` starts the selected shortlist; `job_id` polls; `campaign_id` advances a campaign |
 | `outline` | one-call index: transcript/OCR lines, keyframes, cuts, coverage (`detail:"digest"`), metadata (`overview`), visual map | first look at a video |
 | `read` | compact timestamped transcript, or a 2-10 video comparison | text answer or comparison |
 | `evidence` | the frame at a timestamp + its OCR text + transcript | prove a moment; the normal image path |
 | `frames` | exact frames, dense window, sheet, shot candidates, OCR window | pixels the text cannot answer |
 | `perceive` | number-only map: cuts, per-cell motion, ranked moments, loop, capture quality — never images | motion/UI/animation questions |
-| `admin` | list/export/ocr-index/account/doctor | library maintenance, export, Bilibili library |
+| `admin` | list/export/ocr-index/account/douyin/doctor | library, export, Bilibili/Douyin accounts |
 
 ## Workflow
 
@@ -135,8 +135,8 @@ duplicate frames, flicker) as numbers.
 
 ### 6. Account and export
 
-`admin` with `admin_action:"account"` reads favorites/history/folders; writes are
-CLI-only (`--confirm`); folders ≤20 chars, ≤100 videos per write.
+`admin` `account` reads Bilibili favorites/history/folders; writes are CLI-only
+(`--confirm`; folders ≤20 chars, ≤100 videos per write).
 
 `admin` with `admin_action:"export"` writes a knowledge pack only when asked.
 

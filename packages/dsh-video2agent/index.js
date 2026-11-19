@@ -28,6 +28,10 @@ try {
 // available so guardWrite can compare the browser's Origin with the advertised
 // one; without it the advertised-origin fallback used to be an undefined variable.
 let ACTIVE_WEB_SERVER = null
+// One optional Douyin QR-login child at a time. The CLI prints the QR screenshot
+// first and blocks until the scan (or its timeout), so the Host keeps the child
+// and serves the image instead of holding a three-minute HTTP request open.
+let DOUYIN_LOGIN_STATE = null
 
 // The npm package version. The environment card compares it with the installed
 // Python CLI: the CLI carries the platform fixes (macOS Keychain key storage,
@@ -175,7 +179,7 @@ const WORKER_IDLE_MS = 10 * 60 * 1000
 const WORKER_COMMANDS = new Set(['search', 'overview', 'transcript', 'compare', 'digest', 'perceive', 'evidence', 'frames', 'map', 'candidates', 'ocr-window', 'list', 'find', 'outline', 'read', 'admin'])
 // The worker is read-only; admin write actions must run in their own process and
 // must never be re-run by the worker-failure fallback.
-const ADMIN_WRITE_ACTIONS = new Set(['ocr-index', 'export', 'account'])
+const ADMIN_WRITE_ACTIONS = new Set(['ocr-index', 'export', 'account', 'douyin'])
 
 // Hard routing: public practical questions try one Bilibili find before web
 // search. It is registered only after the tool exists, owned by this plugin's
@@ -595,6 +599,31 @@ function badPositional(value) {
   return text.startsWith('-')
 }
 
+// Douyin account reads are browser-backed and read-only. Keep the mapping here
+// so the tool can read a logged-in Douyin account from any session, not only the
+// CLI. Login itself stays in the settings card / CLI.
+function douyinAccountArgs(args) {
+  const action = String(args.douyin_action || 'me')
+  if (!['me', 'profile', 'videos', 'status'].includes(action)) return null
+  const out = ['douyin', action]
+  const url = args.douyin_url == null ? '' : String(args.douyin_url).trim()
+  if (action === 'profile' && !url) return null
+  if ((action === 'profile' || action === 'videos') && url) {
+    if (badPositional(url)) return null
+    out.push('--url', url)
+  }
+  if (action === 'videos') {
+    const tab = String(args.douyin_tab || 'works')
+    if (!['works', 'likes', 'favorites'].includes(tab)) return null
+    out.push('--tab', tab)
+    if (args.limit !== undefined && args.limit !== null && args.limit !== '') {
+      out.push('--limit', String(clampInt(args.limit, 20, 1, 50)))
+    }
+  }
+  out.push('--json')
+  return out
+}
+
 function commandArgs(args) {
   const command = String(args.command || '')
   // Eight model-facing verbs; the rest are internal CLI names. One implementation
@@ -624,6 +653,7 @@ function commandArgs(args) {
   }
   if (command === 'admin') {
     const action = String(args.admin_action || 'list')
+    if (action === 'douyin') return douyinAccountArgs(args)
     const mapped = action === 'export' ? 'export'
       : (action === 'ocr-index' ? 'ocr-index' : (action === 'account' ? 'account' : (action === 'doctor' ? 'doctor' : 'list')))
     return commandArgs({ ...args, command: mapped })
@@ -958,7 +988,7 @@ function guardRead(req, res) {
   // cross-site refusal.
   const pathOnly = String(req.url || '').split('?')[0]
   const isWriteRoute = req.method === 'POST'
-    && /^\/api\/video2agent\/(settings|cloud|models|bili-login\/|jobs\/cancel|retry|discovery\/clear|campaign|setup)/.test(pathOnly)
+    && /^\/api\/video2agent\/(settings|cloud|models|bili-login\/|douyin-login\/|jobs\/cancel|retry|discovery\/clear|campaign|setup)/.test(pathOnly)
   // A frame <img> is a cross-site no-cors image read when the page is the
   // desktop shell (dsh-app://app): the model's markdown needs an absolute URL,
   // and an absolute URL is cross-site from there. Serve only image destinations
@@ -1241,22 +1271,34 @@ export function apply(ctx, config) {
     return { ok: false, detail: '未安装', via: '' }
   }
 
-  async function detectOcr(python) {
-    // Two engines are accepted: rapidocr 3.x (pure-Python wheel, works on Python
-    // 3.13) and the legacy rapidocr-onnxruntime (<=3.12). Either one makes local
-    // OCR usable; the card must offer a one-click install on every supported
-    // Python, not only where the legacy wheel exists.
-    const supported = !!python.ok
-    const detail = !python.ok ? '需要 Python' : '可选'
-    const engineOf = async () => {
-      const probe = await runCommand(python.command, [
-        ...python.prefix, '-c',
-        "import importlib.util as u; print('rapidocr' if u.find_spec('rapidocr') else ('legacy' if u.find_spec('rapidocr_onnxruntime') else ''))",
-      ], 30000)
-      return String(probe.out || '').trim().split('\n').pop() || ''
+  async function detectOcr(python, cli) {
+    // OCR runs inside the interpreter that runs the CLI. Probing `py -3` directly
+    // said "未安装" on a machine where the CLI (a different Python) had rapidocr
+    // installed, so ask the CLI first and only fall back to a Python import probe.
+    const supported = !!(python.ok || (cli && cli.ok))
+    if (cli && cli.ok) {
+      const r = await runCli(['models', 'status', '--json'], 30000)
+      try {
+        const data = JSON.parse(String(r.out || '').trim() || '{}')
+        const ocr = data && data.ocr
+        if (r.code === 0 && ocr && typeof ocr.available === 'boolean') {
+          const engine = String(ocr.engine_package || (ocr.available ? 'rapidocr' : ''))
+          return {
+            ok: !!ocr.available,
+            supported: true,
+            detail: ocr.available ? ('已安装' + (engine ? '（' + engine + '）' : '')) : '未安装',
+            engine,
+          }
+        }
+      } catch {}
     }
+    const detail = !python.ok ? '需要 CLI 或 Python' : '可选'
     if (!python.ok) return { ok: false, supported, detail, engine: '' }
-    const engine = await engineOf()
+    const probe = await runCommand(python.command, [
+      ...python.prefix, '-c',
+      "import importlib.util as u; print('rapidocr' if u.find_spec('rapidocr') else ('legacy' if u.find_spec('rapidocr_onnxruntime') else ''))",
+    ], 30000)
+    const engine = String(probe.out || '').trim().split('\n').pop() || ''
     return {
       ok: engine !== '',
       supported,
@@ -1272,7 +1314,7 @@ export function apply(ctx, config) {
     const cliVersion = (String(cli.detail || '').match(/(\d+\.\d+\.\d+)/) || [])[1] || ''
     const cliOutdated = Boolean(cliOk && PLUGIN_VERSION && cliVersion && compareVersions(cliVersion, PLUGIN_VERSION) < 0)
     const ffmpeg = await detectFfmpeg()
-    const ocr = await detectOcr(python)
+    const ocr = await detectOcr(python, cli)
     const ffmpegHint = process.platform === 'win32'
       ? 'winget install Gyan.FFmpeg'
       : process.platform === 'darwin' ? 'brew install ffmpeg' : 'sudo apt install ffmpeg'
@@ -1303,7 +1345,7 @@ export function apply(ctx, config) {
         cli: python.ok && !cliOk,
         updateCli: python.ok && cliOutdated,
         ffmpeg: process.platform !== 'linux' && !ffmpeg.ok,
-        ocr: python.ok && ocr.supported && !ocr.ok,
+        ocr: (python.ok || cliOk) && ocr.supported && !ocr.ok,
       },
     }
   }
@@ -1787,7 +1829,7 @@ export function apply(ctx, config) {
   // which is why the cards looked text-only. Fetch with the platform referer, cache
   // on disk, and serve from here. Only the platform CDNs are allowed (no SSRF).
   whenWebServer(ctx, 'cover proxy route', (webServer) => {
-    const ALLOWED = /(^|\.)(hdslb\.com|biliimg\.com|bilivideo\.com)$/i
+    const ALLOWED = /(^|\.)(hdslb\.com|biliimg\.com|bilivideo\.com|douyinpic\.com|douyinstatic\.com|douyin\.com|iesdouyin\.com)$/i
     webServer.register({
       kind: 'exact',
       path: '/api/video2agent/cover',
@@ -1816,7 +1858,11 @@ export function apply(ctx, config) {
               const request = https.get(parsed, {
                 headers: {
                   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                  Referer: 'https://www.bilibili.com/',
+                  // Douyin signed covers reject the Bilibili referer and vice
+                  // versa; send the referer of the platform the host belongs to.
+                  Referer: /(^|\.)douyin(pic|static)?\.com$|(^|\.)iesdouyin\.com$/i.test(parsed.hostname)
+                    ? 'https://www.douyin.com/'
+                    : 'https://www.bilibili.com/',
                   Accept: 'image/*',
                 },
                 timeout: 8000,
@@ -2058,6 +2104,136 @@ export function apply(ctx, config) {
     })
   })
 
+  // Douyin QR login (optional browser extra). The CLI generates the QR and waits
+  // for the scan; the Host only tracks that one child and serves the QR image, so
+  // the settings page can show it without blocking a three-minute HTTP request.
+  whenWebServer(ctx, 'douyin login routes', (webServer) => {
+    const home = () => video2agentHome()
+    const cookiePath = () => path.join(home(), 'cookies', 'douyin.txt')
+    const accountPath = () => path.join(home(), 'cookies', 'douyin_account.json')
+    const qrPath = () => path.join(home(), 'cookies', 'douyin_qr.png')
+    const loginStagePath = () => path.join(home(), 'cookies', 'douyin_login.json')
+    const readStage = () => {
+      try {
+        const raw = JSON.parse(fs.readFileSync(loginStagePath(), 'utf8'))
+        return String((raw && raw.stage) || 'waiting')
+      } catch { return 'waiting' }
+    }
+    const readAccount = () => {
+      try { return JSON.parse(fs.readFileSync(accountPath(), 'utf8')) } catch { return null }
+    }
+    const loggedIn = () => { try { return fs.existsSync(cookiePath()) } catch { return false } }
+    const snapshot = () => {
+      const current = DOUYIN_LOGIN_STATE
+      if (current && current.state === 'waiting') {
+        return { ok: true, state: 'waiting', stage: readStage(), logged_in: loggedIn(), started_at: current.startedAt }
+      }
+      if (current && current.state === 'ready') {
+        return { ok: true, state: 'ready', logged_in: true, account: current.account || readAccount() }
+      }
+      if (current && current.state === 'failed') {
+        return { ok: true, state: 'failed', logged_in: loggedIn(), error: current.error || '登录失败' }
+      }
+      return { ok: true, state: 'idle', logged_in: loggedIn(), account: loggedIn() ? readAccount() : null }
+    }
+    const startLogin = () => {
+      if (DOUYIN_LOGIN_STATE && DOUYIN_LOGIN_STATE.state === 'waiting') return
+      const qr = qrPath()
+      const cookie = cookiePath()
+      const stageFile = loginStagePath()
+      try {
+        fs.mkdirSync(path.dirname(qr), { recursive: true })
+        fs.rmSync(qr, { force: true })
+        fs.rmSync(cookie, { force: true })
+        fs.rmSync(stageFile, { force: true })
+      } catch {}
+      const invocation = cliCommand()
+      // The CLI drives a real Chrome window placed off-screen: headless sessions
+      // showed the QR but never received the login cookies after a real scan. A
+      // visible window still opens only if Douyin asks for a slider verification.
+      const args = [...invocation.prefix, 'douyin', 'login', '--timeout', '180',
+        '--qr-out', qr, '--status-out', stageFile, '--json']
+      let child
+      try {
+        child = spawn(invocation.command, args, { windowsHide: true, env: managedToolEnv() })
+      } catch (e) {
+        DOUYIN_LOGIN_STATE = { state: 'failed', error: String((e && e.message) || e), startedAt: Date.now() }
+        return
+      }
+      const entry = { state: 'waiting', startedAt: Date.now(), child, out: '', err: '', account: null }
+      DOUYIN_LOGIN_STATE = entry
+      try { child.stdin.end() } catch {}
+      child.stdout.setEncoding('utf8')
+      child.stderr.setEncoding('utf8')
+      child.stdout.on('data', (d) => { entry.out = appendCapture(entry.out, d) })
+      child.stderr.on('data', (d) => { entry.err = appendCapture(entry.err, d) })
+      const fail = (message) => {
+        if (entry.state !== 'waiting') return
+        entry.state = 'failed'
+        entry.error = String(message || '登录失败').slice(0, 400)
+      }
+      child.on('error', (e) => fail((e && e.message) || '无法启动抖音登录'))
+      child.on('close', (code) => {
+        if (entry.state !== 'waiting') return
+        let data = null
+        try { data = JSON.parse((entry.out || '').trim() || '{}') } catch { data = null }
+        if (data && data.ok === true) {
+          entry.state = 'ready'
+          entry.account = data.account || null
+          try { if (entry.account) fs.writeFileSync(accountPath(), JSON.stringify(entry.account), 'utf8') } catch {}
+        } else {
+          const message = (data && data.error && (data.error.message || data.error.remedy)) || entry.err.trim() || ('exit code ' + code)
+          fail(message)
+        }
+      })
+      const timer = setTimeout(() => {
+        try { killTree(child) } catch {}
+        fail('登录超时，请重新扫码')
+      }, 200000)
+      child.on('close', () => clearTimeout(timer))
+    }
+    webServer.register({
+      kind: 'exact',
+      path: '/api/video2agent/douyin-login/status',
+      handler: async (req, res) => {
+        try {
+          if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
+          return sendJson(res, 200, snapshot())
+        } catch (e) { return sendJson(res, (e && e.status) || 500, { error: 'internal error', code: 'E_ROUTE' }) }
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/api/video2agent/douyin-login/start',
+      handler: async (req, res) => {
+        try {
+          if (!guardWrite(req, res)) return
+          startLogin()
+          return sendJson(res, 200, snapshot())
+        } catch (e) { return sendJson(res, (e && e.status) || 500, { error: 'internal error', code: 'E_ROUTE' }) }
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/api/video2agent/douyin-login/clear',
+      handler: async (req, res) => {
+        try {
+          if (!guardWrite(req, res)) return
+          const current = DOUYIN_LOGIN_STATE
+          if (current && current.child) { try { killTree(current.child) } catch {} }
+          DOUYIN_LOGIN_STATE = null
+          try {
+            fs.rmSync(cookiePath(), { force: true })
+            fs.rmSync(accountPath(), { force: true })
+            fs.rmSync(qrPath(), { force: true })
+            fs.rmSync(loginStagePath(), { force: true })
+          } catch {}
+          return sendJson(res, 200, { ok: true, state: 'idle', logged_in: false })
+        } catch (e) { return sendJson(res, (e && e.status) || 500, { error: 'internal error', code: 'E_ROUTE' }) }
+      },
+    })
+  })
+
   // Cancel is a request to the worker, not a UI hide. The worker checks this
   // marker between stages and writes a terminal canceled state.
   whenWebServer(ctx, 'cancel route', (webServer) => {
@@ -2115,8 +2291,13 @@ export function apply(ctx, config) {
             const incomingSource = incoming && String(incoming.source || '')
             const validVideo = /^BV[0-9A-Za-z]{10}$/
             const validSource = /^https:\/\/www\.bilibili\.com\/video\/BV[0-9A-Za-z]{10}\/?$/
+            // A failed Douyin start has no job id and no BV id; its row carries the
+            // platform URL, which the CLI can ingest again. Any http(s) source is
+            // therefore retryable — the CLI validates the platform itself.
+            const validUrl = /^https?:\/\/[^\s]+$/i
             if (jobId && !/^[A-Za-z0-9_-]{3,64}$/.test(jobId)) return sendJson(res, 400, { error: 'invalid job_id' })
-            if (!jobId && !validVideo.test(videoId) && !validSource.test(incomingSource)) {
+            if (!jobId && !validVideo.test(videoId) && !validSource.test(incomingSource)
+                && !validUrl.test(incomingSource)) {
               return sendJson(res, 400, { error: 'invalid video_id or source' })
             }
             let job = null
@@ -3207,7 +3388,7 @@ function guardWrite(req, res) {
       + 'evidence (a timestamp plus its on-screen text and an optional frame), '
       + 'frames (exact frames, windows, sheets; view:candidates for shots; view:ocr to read a window), '
       + 'perceive (number-only motion/cut/loop map for a window, never images), '
-      + 'admin (list, export, ocr-index, account read-only, doctor). Call it directly at the top '
+      + 'admin (list, export, ocr-index, account read-only for Bilibili, douyin read for a logged-in Douyin account, doctor). Call it directly at the top '
       + 'level; in a harness that only exposes run_code, wrap it in run_code (the dock card may not render); never shell out to the CLI. On failure return the error; do not invent content.',
     parameters: {
       type: 'object',
@@ -3217,7 +3398,7 @@ function guardWrite(req, res) {
         command: {
           type: 'string',
           enum: ['find', 'ingest', 'outline', 'read', 'evidence', 'frames', 'perceive', 'admin'],
-          description: 'What to do. find: Bilibili search, library search (scope library), or resolve a URL. ingest: index a path/URL, start a shortlist (video_ids), poll a job (job_id) or a campaign (campaign_id). outline: one-call index (detail digest), overview, or map. read: transcript or compare. evidence: a timestamp plus its text. frames: pixels. perceive: motion numbers. admin: list/export/ocr-index/account/doctor.',
+          description: 'What to do. find: Bilibili search, library search (scope library), or resolve a URL. ingest: index a path/URL, start a shortlist (video_ids), poll a job (job_id) or a campaign (campaign_id). outline: one-call index (detail digest), overview, or map. read: transcript or compare. evidence: a timestamp plus its text. frames: pixels. perceive: motion numbers. admin: list/export/ocr-index/account (Bilibili)/douyin (Douyin account)/doctor.',
         },
         scope: {
           type: 'string',
@@ -3238,8 +3419,22 @@ function guardWrite(req, res) {
         },
         admin_action: {
           type: 'string',
-          enum: ['list', 'export', 'ocr-index', 'account', 'doctor'],
-          description: 'admin: list (default), export, ocr-index, account, or doctor.',
+          enum: ['list', 'export', 'ocr-index', 'account', 'douyin', 'doctor'],
+          description: 'admin: list (default), export, ocr-index, account (Bilibili), douyin (Douyin account), or doctor.',
+        },
+        douyin_action: {
+          type: 'string',
+          enum: ['me', 'profile', 'videos', 'status'],
+          description: 'admin douyin: me (own profile), profile (douyin_url), videos (douyin_url optional; douyin_tab works/likes/favorites), or status.',
+        },
+        douyin_url: {
+          type: 'string',
+          description: 'admin douyin: profile URL or sec_uid (required for profile, optional for videos).',
+        },
+        douyin_tab: {
+          type: 'string',
+          enum: ['works', 'likes', 'favorites'],
+          description: 'admin douyin videos: works, likes or favorites (default works).',
         },
         account_action: {
           type: 'string',
@@ -3317,7 +3512,7 @@ function guardWrite(req, res) {
         windows: { type: 'number', description: 'frames: split start/end into 2-9 windows.' },
         force: { type: 'boolean', description: 'ingest: re-index an existing video.' },
         format: { type: 'string', enum: ['md', 'html', 'json', 'knowledge'], description: 'export: md/html/json/knowledge.' },
-        limit: { type: 'number', description: 'Result limit (default 8; map 50; account 50).' },
+        limit: { type: 'number', description: 'Result limit (default 8; map 50; account/douyin 50).' },
         images: { type: 'number', description: 'evidence: 0-6 images (default 2; use 0 when transcript/OCR text answers).' },
         include_images: { type: 'boolean', description: 'frames (candidates): one montage image.' },
         ocr_tiles: { type: 'boolean', description: 'evidence/ocr: tile small text.' },
@@ -3394,7 +3589,7 @@ function guardWrite(req, res) {
         const error = {
           code: 'E_ARGS',
           message: `Missing required argument for "${command || 'unknown'}".`,
-          remedy: 'discover/search need query; shortlist needs 1-10 video_ids, default_selected plus primary; ingest needs source; overview/transcript/frames/map/evidence/export need video_id; evidence needs at; resolve needs url. Positional values must not start with "-".',
+          remedy: 'discover/search need query; shortlist needs 1-10 video_ids, default_selected plus primary; ingest needs source; overview/transcript/frames/map/evidence/export need video_id; evidence needs at; resolve needs url; admin douyin needs douyin_action (profile also needs douyin_url). Positional values must not start with "-".',
         }
         return { ok: false, text: JSON.stringify({ ok: false, error }), error }
       }

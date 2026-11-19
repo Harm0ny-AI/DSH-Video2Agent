@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — video understanding for AI agents, a DSH plugin (dsh-video2agent)" width="100%">
+  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — turn favorites into knowledge, a DSH plugin (dsh-video2agent)" width="100%">
 </p>
 
 <p align="center">
@@ -14,16 +14,14 @@
   <img alt="Local-first" src="https://img.shields.io/badge/local--first-8b5cf6">
 </p>
 
-<h1 align="center">Your agent has read the web<br>Now let it watch the video</h1>
+<h1 align="center">Bilibili/Douyin favorites gathering dust?<br>Give your agent video retrieval and understanding.</h1>
 
 <p align="center">
-  <b>Video2Agent lets an AI agent understand video and answer directly.</b><br>
-  Ask Bilibili and local videos: what happens, which one is better, is it worth watching.
+  Bilibili/Douyin favorites gathering dust? Want your agent to gain video retrieval and understanding? Choose Video2Agent! One-click install gives your agent top-tier video understanding and turns online video into an information source. Whether you are researching social trends or working in media, any task that requires watching videos can now be handed to Video2Agent. Local-first; optional cloud ASR/OCR; optional Bilibili/Douyin login to unlock favorites/history and CC/AI subtitles.
 </p>
 
-<p align="center"><sub>Local-first · optional cloud ASR/OCR (any OpenAI-compatible provider) · Bilibili QR login unlocks CC/AI subtitles</sub></p>
-
 <p align="center">
+  <a href="#favorites-shouldnt-be-where-videos-go-to-die">Favorites</a> ·
   <a href="#faster-broader-cheaper">Benchmarks</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#what-it-does">What it does</a> ·
@@ -38,7 +36,21 @@
   <sub>Real recording; waiting sections compressed.</sub>
 </p>
 
-<p align="center"><sub><b>1 Find</b> → <b>2 Process</b> → <b>3 Answer</b></sub></p>
+<p align="center"><sub><b>1 Paste</b> → <b>2 Process</b> → <b>3 Ask</b></sub></p>
+
+---
+
+## Favorites shouldn’t be where videos go to die
+
+Saved videos across Bilibili and Douyin are where good videos pile up and never get watched: saved because they looked useful, then lost, unfinished, forgotten.
+
+Stop letting good videos gather dust! Video2Agent reads the video first—transcript, on-screen text, scenes, key frames—into your own local knowledge base. Then all you do is ask:
+
+- **“What does this one actually say?”** → a few minutes of reading, with timecodes;
+- **“What was that table at 12:00?”** → the source frame plus the text on that same frame;
+- **“Which of these is the most complete?”** → compare 1–10 videos, with agreements and conflicts.
+
+Keep saving. Let it do the reading.
 
 ---
 
@@ -56,42 +68,47 @@ On the [llm-stats](https://llm-stats.com/benchmarks/video-mme) Video-MME board (
 
 ## What it does
 
-### 1. Find videos
+### 1. Turn favorites into a knowledge base
 
-Search Bilibili by keyword, filter by uploader or date, or paste a BV, av or b23 link to check the
-title, cover and duration before processing.
+After Bilibili QR login your agent can read your favorites, history and folders (read-only), see duration, uploader and watch progress, then hand 1–10 videos over for processing. Douyin login reads your own works, favorites and liked videos—from the CLI or from any DSH session. Every processed video lands in a local library: transcript, on-screen text, scenes, key frames—searchable and askable later.
 
-### 2. Process videos in batches
+- **Read, don’t edit**: the DSH `account` tool never changes your favorites; folder edits and batch classification stay in the CLI behind `--confirm`.
+- **Douyin lists can be risk-blocked**: the tool returns `unavailable` with a reason instead of calling an unreadable list “empty”.
 
-Process local files or links: read the video's metadata, use CC/AI captions or ASR, detect scenes,
-sample key frames, run OCR, then store the transcript, on-screen text, scenes and key frames locally.
-Process 1–10 videos per batch; ask questions, compare videos and organize what you find, even on long
-videos.
+### 2. A video source for your agent
 
-### 3. Understand the whole video
+The same library is an agent’s video source: the `video2agent` tool plus `/video` lets an agent check the video library before answering and cite exact timecodes and frames. Search Bilibili by keyword, uploader or date; Douyin links and local files share the same index—index once, then search, compare and organize from that library. You ask about your favorites; the agent answers with evidence you can trace back to the source frame.
 
-The plugin returns more than a transcript: transcript, on-screen text, scene structure, key frames and
-motion. An agent can use that to answer questions, compare several videos, or turn the content into
-steps, conclusions and usable advice.
+Douyin search is not supported (`find` stays Bilibili-only).
 
-- **Long films and courses**: see the structure and key content first, then decide what to dig into,
-  without watching end to end.
-- **UI motion and screen recordings**: read cuts, motion and interface changes to help developers
-  trace interaction, animation and implementation issues.
-- **Tutorials, reviews and interviews**: pull out steps, parameters, opinions and conclusions, and
-  compare several videos together.
+### 3. Ask one video anything
 
-### 4. Manage Bilibili favorites
+Paste a Bilibili or Douyin link, or a local file; check the title, cover and duration before processing. Then ask what it says, whether it is worth watching, which minute holds the conclusion, or what that table on screen actually says. Answers carry timecodes; when you need proof, it returns the source frame and the text on that same frame.
 
-After QR login, browse favorites, history and folders; see duration, uploader and unfinished counts;
-generate a classification draft grouped by uploader. The DSH `account` tool is read-only; folder edits
-and batch classification stay in the CLI behind `--confirm`, and cookies stay local.
+Douyin risk-gates anonymous requests: a share page can answer with a verification page. The tool says it was blocked and suggests a retry instead of pretending the video has no content.
+
+### 4. Compare a batch and skip what isn’t worth it
+
+Process 1–10 videos and compare tutorials, reviews or interviews: which one is most complete, where they disagree, which one you can skip. Long videos do not need a full watch—see the structure and key content first, then decide where to dig in.
+
+- **Long films and courses**: see structure and key content first;
+- **UI motion and screen recordings**: read cuts, motion and interface changes;
+- **Tutorials, reviews and interviews**: pull out steps, parameters, opinions and conclusions.
+
+### 5. Accurate to the frame, honest about gaps
+
+- **Captions are checked**: Bilibili AI captions are generated from the audio and used directly; human/community captions are compared with two audio windows and fall back to ASR on a mismatch.
+- **Image and text share a frame**: every cited frame comes with the text on that exact frame and a timecode back to the source.
+- **Unknown stays unknown**: unread OCR, failed reads and out-of-range timecodes are reported, never turned into a fake zero.
+- **Local-first**: transcription, frame sampling and OCR run on your machine by default; cloud ASR/OCR is optional and only uploads what you explicitly ask for.
 
 ## Local, cloud and accounts
 
 - **Local by default.** Transcription prefers the video's own captions (CC/AI) and only falls back to local Whisper when there are none. The ASR model is **not bundled and never downloaded automatically** — fetch it with `video2agent models download` (small ≈464 MB) or connect a cloud ASR provider in settings. On-screen text (RapidOCR), scene split and frame sampling run locally; video files never leave the machine, and no GPU or API key is required.
 - **Cloud is optional.** The settings page can connect any OpenAI-compatible ASR/OCR provider (a default one with free quota is built in): transcription uploads audio only, and cloud OCR reads only the frames you explicitly ask about — a batch of sampled frames is never sent to a paid image model. The key is encrypted with Windows DPAPI on your machine and never appears in config, argv, logs or route responses.
 - **Bilibili login is optional.** After QR login you get CC/AI subtitles (anonymous requests cannot list them), candidate search with uploader/date filters, and read access to favorites, history and folders plus a classification draft. Cookies stay in `~/.video2agent/cookies/`; the `account` tool is read-only and folder writes require `--confirm` on the CLI.
+- **Douyin login is optional.** With `pip install "video2agent[browser]"`, `video2agent douyin login` opens a login window for the scan and security check (settings only shows status), stores the session and closes automatically; `douyin profile --url <profile>` / `me` reads profile data, and `douyin videos --url <profile> --tab works|likes|favorites` lists works, favorites and liked videos. It drives the installed Chrome/Edge through Playwright; no browser is bundled.
+
 ## Quick start
 
 **Requirements:** Python 3.11+, FFmpeg on `PATH`, and DSH for the plugin surface.
@@ -99,14 +116,14 @@ The marketplace install is only the DSH integration layer; video work needs the 
 A speech model is only needed when a video has no captions (about 464 MB for `small`).
 Local on-screen-text OCR is an optional extra: `pip install "video2agent[ocr]"` (Python 3.11/3.12). Core search/transcription/evidence and cloud OCR work without it.
 
-Published on PyPI and npm — install directly:
+Install directly:
 
 ```bash
 pip install video2agent
 dsh plugin --profile web add dsh-video2agent
 ```
 
-Use the clone route below for source or development.
+To try 0.3.0 now, or to work on the source, use the clone route below.
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent
@@ -117,7 +134,7 @@ pip install -e .
 
 video2agent setup          # install the Skill into ~/.dsh/skills
 video2agent doctor
-video2agent ingest ./your-video.mp4      # or a Bilibili URL
+video2agent ingest ./your-video.mp4      # or a Bilibili / Douyin URL
 video2agent list
 video2agent search "what you remember"
 ```
@@ -166,9 +183,13 @@ sequenceDiagram
 
 ## Screenshots
 
-| DSH plugin | Batch table | Settings |
-|---|---|---|
-| ![Composer preview](docs/preview-shot.png) | ![Batch table](docs/selected-table-shot.png) | ![Settings](docs/settings-page-shot.png) |
+**Detailed analysis of a single video**
+
+![Detailed analysis of a single video](docs/preview-shot.png)
+
+**Bilibili / Douyin login**
+
+![Bilibili and Douyin login cards](docs/settings-page-shot.png)
 
 The dark social card and marketplace card live in [`docs/assets/`](docs/assets).
 
@@ -181,13 +202,6 @@ The dark social card and marketplace card live in [`docs/assets/`](docs/assets).
 - [Long-video runs](docs/LONG-VIDEO-BENCH.md)
 - [Bilibili subtitles and login](docs/BILIBILI-SUBTITLES.md)
 - [CLI command reference](docs/ARCHITECTURE.md) · `video2agent --help`
-
-## Status
-
-- **0.2.0 released (2026-11-17).** CLI, Skill and the DSH plugin are available; install from PyPI or npm. 0.1.3 compacts the settings-page environment check into one status row (install buttons only for what is missing), makes `perceive` and `video2agent doctor` honour `FFMPEG_BIN`/`FFPROBE_BIN` like the media paths, and ships the real install steps on the plugin page. 0.1.2 added the environment check with one-click installs; 0.1.1 fixed reading to the end (no more E_OUT_OF_RANGE), bare millisecond values, Chinese audio mis-detected as Japanese, a misplaced batch progress ring, and an over-long single wait.
-- Local-first by default; no GPU required. Cloud is optional.
-- Published on PyPI and npm (`pip install video2agent`, `npm i dsh-video2agent`); the marketplace entry is prepared in the awesome-list format.
-- Known limits: single-character CJK search, OCR on tiny/low-contrast text, counting across shots.
 
 ## Marketplace
 
@@ -211,9 +225,6 @@ node tests/test_plugin_campaign.mjs
 node tests/test_plugin_dock_state.mjs
 ```
 
-## Usage and content rights
-
-This is a local tool: it does not host, cache or distribute any video content, and it does not provide a public download service. Process only content you have the right to access and use. Downloading videos through platform links and storing transcripts or frames may be subject to platform terms and copyright law; lawful use of that material is the user's responsibility. Do not use it for bulk scraping, mirrored redistribution or commercial redistribution. Report infringement or abuse privately via `SECURITY.md`.
 ## License
 
 Apache-2.0. Third-party notices are in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

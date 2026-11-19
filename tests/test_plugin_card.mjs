@@ -109,6 +109,10 @@ const linkCases = [
   ['看这个 https://bilibili.com/video/av170001 讲得不错', 'https://www.bilibili.com/video/av170001'],
   ['https://b23.tv/AbCd123', 'https://b23.tv/AbCd123'],
   ['分享 BV1GJ411x7h7 这个视频', 'https://www.bilibili.com/video/BV1GJ411x7h7'],
+  // Douyin: canonical, share page and short link all normalise to a video URL.
+  ['https://www.douyin.com/video/7665930064613199114', 'https://www.douyin.com/video/7665930064613199114'],
+  ['https://www.iesdouyin.com/share/video/7665930064613199114/', 'https://www.douyin.com/video/7665930064613199114'],
+  ['7.85 复制打开抖音 https://v.douyin.com/s-GVFhZGxtk/ 看看', 'https://v.douyin.com/s-GVFhZGxtk/'],
 ]
 for (const [input, expected] of linkCases) {
   const got = detectVideoLink(input)
@@ -117,6 +121,11 @@ for (const [input, expected] of linkCases) {
 if (detectVideoLink('https://example.com/watch?v=1') !== null) throw new Error('non-Bilibili link must not trigger the preview')
 const shortPreview = previewEntry.component({ input: { draft: '看看 https://b23.tv/AbCd123' } })
 if (!shortPreview || !JSON.stringify(shortPreview).includes('正在读取视频信息')) throw new Error('b23 short link preview did not render')
+// Douyin links go through the same preview, but must be labelled 抖音视频.
+const douyinPreview = previewEntry.component({ input: { draft: 'https://www.douyin.com/video/7665930064613199114' } })
+const douyinJson = JSON.stringify(douyinPreview)
+if (!douyinJson.includes('抖音视频')) throw new Error('Douyin preview must be labelled 抖音视频')
+if (douyinJson.includes('B 站视频')) throw new Error('Douyin preview must not be labelled B 站视频')
 const preview = previewEntry.component({ input: { draft: 'https://www.bilibili.com/video/BV1test12345' } })
 if (!preview || !JSON.stringify(preview).includes('正在读取视频信息')) throw new Error('composer preview did not render')
 
@@ -413,6 +422,8 @@ if (!deep(bundleSettings.component({ view: 'page' })).includes('单次处理上�
   if (!(settingsText.match(/data-vp-color/g) || []).length) throw new Error('custom colour picker missing')
   if (!settingsText.includes('B 站登录')) throw new Error('settings page missing the Bilibili login block')
   if (!(settingsText.match(/data-vp-bili/g) || []).length) throw new Error('Bilibili login block markup missing')
+  if (!settingsText.includes('抖音登录')) throw new Error('settings page missing the Douyin login block')
+  if (!(settingsText.match(/data-vp-douyin/g) || []).length) throw new Error('Douyin login block markup missing')
   if (!settingsText.includes('单次处理上限')) throw new Error('process limit setting missing')
   if (!(settingsText.match(/data-vp-process-limit/g) || []).length) throw new Error('process limit input missing')
 }

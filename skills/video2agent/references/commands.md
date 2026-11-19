@@ -12,7 +12,7 @@ verbs onto them, so a script can use either.
 | `evidence` | `video_id`, `at`, `images`, `max_images`, `ocr_tiles` | `evidence` |
 | `frames` | `video_id`, `at` / `start`+`end`, `count`, `fps`, `max`, `mode`, `sheet`, `windows`, `crop`, `scale`; `view:"candidates"` / `"ocr"` | `frames` / `candidates` / `ocr-window` |
 | `perceive` | `video_id`, `start`, `end`, `fps`, `max_frames`, `brief` | `perceive` |
-| `admin` | `admin_action` (`list` \| `export` \| `ocr-index` \| `account` \| `doctor`), `video_id`, `format`, `account_action`, `folder_id`, `days` | `list` / `export` / `ocr-index` / `account` / `doctor` |
+| `admin` | `admin_action` (`list` \| `export` \| `ocr-index` \| `account` \| `douyin` \| `doctor`), `video_id`, `format`, `account_action`, `folder_id`, `days`; douyin: `douyin_action`, `douyin_url`, `douyin_tab`, `limit` | `list` / `export` / `ocr-index` / `account` / `douyin` / `doctor` |
 
 ## Flags worth remembering
 
@@ -22,6 +22,8 @@ verbs onto them, so a script can use either.
 - `evidence` defaults to 2 images; `images:0` is text-only.
 - `perceive`: `brief` ≈ 340 tokens; a full 2.5 min map ≈ 850; >10 min needs a
   window unless `start`/`end` is explicit.
-- `admin account` is read-only in the tool; writes are CLI-only (`--confirm`).
+- `admin account` (Bilibili) and `admin douyin` (Douyin account) are read-only in
+  the tool; writes are CLI-only (`--confirm`). `douyin_action` = `me` / `profile` /
+  `videos` / `status`; `douyin_tab` = `works` / `likes` / `favorites`.
 - `export`: `format` = `md` / `html` / `json` / `knowledge`; redacts paths unless
   `--include-paths` (CLI).

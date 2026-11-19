@@ -763,6 +763,18 @@ def _make_parser() -> argparse.ArgumentParser:
     cl = cmd("cloud", "Configure an OpenAI-compatible cloud ASR/OCR provider")
     cl.add_argument("action", choices=["status", "config", "save", "test", "clear", "ocr-on", "ocr-off", "asr-on", "asr-off"])
 
+    # Douyin account reads (optional browser extra): public profile, QR login and
+    # the logged-in "me" page. Douyin's JSON APIs need signatures, so this drives
+    # the user's own Chrome/Edge instead.
+    dy = cmd("douyin", "Read a public Douyin profile or log in via a browser (optional)")
+    dy.add_argument("action", choices=["profile", "login", "status", "me", "videos"])
+    dy.add_argument("--tab", choices=["works", "likes", "favorites"], default="works", help="videos: works, likes or favorites")
+    dy.add_argument("--limit", type=int, default=20, help="videos: maximum rows (default 20)")
+    dy.add_argument("--url", default=None, help="Douyin profile URL or sec_uid")
+    dy.add_argument("--qr-out", default=None, help="Where to save the login QR screenshot")
+    dy.add_argument("--status-out", default=None, help="Write the login stage (verifying/qr/waiting) here")
+    dy.add_argument("--timeout", type=float, default=180.0, help="Seconds to wait for the QR scan")
+
     lm = cmd("models", "Inspect or download the local ASR model")
     lm.add_argument("action", choices=["status", "select", "download", "uninstall", "select-ocr"])
     lm.add_argument("--model", default=None, help="Preset name, HuggingFace model ID, or local CTranslate2 path")
@@ -1312,6 +1324,51 @@ def _run_cloud(args: Any, cfg: Any) -> dict[str, Any]:
     if action in ("asr-on", "asr-off"):
         return cloud.set_asr_enabled(cfg, action == "asr-on")
     raise Video2AgentError("E_CLOUD_ARGS", f"未知 cloud 操作：{action}")
+
+
+def _run_douyin(args: Any, cfg: Any) -> dict[str, Any]:
+    """Optional browser-based Douyin account reads (public profile + QR login)."""
+    from . import browser
+
+    action = str(getattr(args, "action", "") or "")
+    cookies = cfg.home / "cookies" / "douyin.txt"
+    if action == "status":
+        return {
+            "ok": True,
+            "platform": "douyin",
+            "logged_in": cookies.is_file(),
+            "cookie_path": str(cookies),
+        }
+    if action == "videos":
+        target = getattr(args, "url", None) or "https://www.douyin.com/user/self"
+        return browser.user_videos(
+            target,
+            tab=str(getattr(args, "tab", "works") or "works"),
+            limit=int(getattr(args, "limit", 20) or 20),
+            cookie_path=cookies,
+        )
+    if action == "login":
+        qr = Path(getattr(args, "qr_out", None) or (cfg.home / "cookies" / "douyin_qr.png"))
+        status_out = getattr(args, "status_out", None) or (cfg.home / "cookies" / "douyin_login.json")
+        result = browser.qr_login(
+            cookies, qr,
+            timeout=float(getattr(args, "timeout", 180.0)),
+            headless=False,
+            status_path=status_out,
+        )
+        try:
+            result["account"] = browser.profile("https://www.douyin.com/user/self", cookie_path=cookies)
+        except Video2AgentError:
+            pass
+        return result
+    target = getattr(args, "url", None) or ("https://www.douyin.com/user/self" if action == "me" else None)
+    if not target:
+        raise Video2AgentError(
+            "E_DOUYIN_USER",
+            "缺少抖音主页参数",
+            "传 --url <https://www.douyin.com/user/MS4wLjAB...>，或先 douyin login 再用 douyin me。",
+        )
+    return browser.profile(target, cookie_path=cookies if action == "me" else None)
 
 
 def _run_models(args: Any, cfg: Any) -> dict[str, Any]:
@@ -2018,6 +2075,10 @@ def main(argv: list[str] | None = None) -> int:
             return _worker(args)
         if args.command == "account":
             result = _run_account(args, cfg)
+            _emit(result, as_json)
+            return 0 if result.get("ok", True) else 1
+        if args.command == "douyin":
+            result = _run_douyin(args, cfg)
             _emit(result, as_json)
             return 0 if result.get("ok", True) else 1
         if args.command == "cloud":
