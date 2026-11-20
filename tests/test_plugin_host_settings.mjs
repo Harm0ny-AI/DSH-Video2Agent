@@ -136,6 +136,10 @@ assert.equal(typeof setupData.canInstall.updateCli, 'boolean', 'the card needs t
 assert.equal(typeof setupData.ocr, 'object', 'the optional local-OCR status must be reported')
 assert.equal(typeof setupData.ocr.supported, 'boolean', 'OCR support depends on the Python version')
 assert.equal(typeof setupData.canInstall.ocr, 'boolean', 'the card needs to know whether an OCR install makes sense')
+assert.equal(typeof setupData.browser, 'object', 'the optional browser status must be reported')
+assert.equal(typeof setupData.browser.ok, 'boolean', 'browser availability must be measured, not assumed')
+assert.equal(typeof setupData.canInstall.browser, 'boolean', 'the card needs to know whether a browser install makes sense')
+assert.equal(typeof setupData.hints.browser, 'string', 'the browser install hint must be copy-pasteable')
 // VIDEO2AGENT_BIN points at a missing binary, but this machine may still have a
 // working python -m video2agent (the setup card's fallback). Both are truthful:
 // assert the shape, and the only usable-CLI path is that fallback.

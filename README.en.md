@@ -107,12 +107,12 @@ Process 1–10 videos and compare tutorials, reviews or interviews: which one is
 - **Local by default.** Transcription prefers the video's own captions (CC/AI) and only falls back to local Whisper when there are none. The ASR model is **not bundled and never downloaded automatically** — fetch it with `video2agent models download` (small ≈464 MB) or connect a cloud ASR provider in settings. On-screen text (RapidOCR), scene split and frame sampling run locally; video files never leave the machine, and no GPU or API key is required.
 - **Cloud is optional.** The settings page can connect any OpenAI-compatible ASR/OCR provider (a default one with free quota is built in): transcription uploads audio only, and cloud OCR reads only the frames you explicitly ask about — a batch of sampled frames is never sent to a paid image model. The key is encrypted with Windows DPAPI on your machine and never appears in config, argv, logs or route responses.
 - **Bilibili login is optional.** After QR login you get CC/AI subtitles (anonymous requests cannot list them), candidate search with uploader/date filters, and read access to favorites, history and folders plus a classification draft. Cookies stay in `~/.video2agent/cookies/`; the `account` tool is read-only and folder writes require `--confirm` on the CLI.
-- **Douyin login is optional.** With `pip install "video2agent[browser]"`, `video2agent douyin login` opens a login window for the scan and security check (settings only shows status), stores the session and closes automatically; `douyin profile --url <profile>` / `me` reads profile data, and `douyin videos --url <profile> --tab works|likes|favorites` lists works, favorites and liked videos. It drives the installed Chrome/Edge through Playwright; no browser is bundled.
+- **Douyin login is optional.** The settings environment check can install the browser component in one click; manually, `pip install "video2agent[browser]"`. `video2agent douyin login` then opens a login window for the scan and security check (settings only shows status), stores the session and closes automatically; `douyin profile --url <profile>` / `me` reads profile data, and `douyin videos --url <profile> --tab works|likes|favorites` lists works, favorites and liked videos. It drives the installed Chrome/Edge through Playwright; no browser is bundled.
 
 ## Quick start
 
 **Requirements:** Python 3.11+, FFmpeg on `PATH`, and DSH for the plugin surface.
-The marketplace install is only the DSH integration layer; video work needs the CLI and FFmpeg. After installing, the plugin settings page has an environment check with one-click installs (CLI via pip, FFmpeg via winget/brew); or do it manually: `pip install video2agent`. Missing FFmpeg? `winget install Gyan.FFmpeg` (Windows), `brew install ffmpeg` (macOS), `apt install ffmpeg` (Linux), or point `FFMPEG_BIN` at an existing binary.
+The marketplace install is only the DSH integration layer; video work needs the CLI, FFmpeg, and optionally the browser component/OCR. After installing, the plugin settings page has an environment check with per-item installs and a single "install missing" action (CLI, FFmpeg, browser component, OCR); or do it manually: `pip install video2agent`. Missing FFmpeg? `winget install Gyan.FFmpeg` (Windows), `brew install ffmpeg` (macOS), `apt install ffmpeg` (Linux), or point `FFMPEG_BIN` at an existing binary.
 A speech model is only needed when a video has no captions (about 464 MB for `small`).
 Local on-screen-text OCR is an optional extra: `pip install "video2agent[ocr]"` (Python 3.11/3.12). Core search/transcription/evidence and cloud OCR work without it.
 
@@ -123,7 +123,7 @@ pip install video2agent
 dsh plugin --profile web add dsh-video2agent
 ```
 
-To try 0.3.1 now, or to work on the source, use the clone route below.
+To try 0.3.2 now, or to work on the source, use the clone route below.
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent

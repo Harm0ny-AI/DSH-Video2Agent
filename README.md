@@ -107,12 +107,12 @@ B 站扫码登录后，Agent 能读你的收藏夹、历史、文件夹（只读
 - **默认全本地。** 转写优先用视频自带字幕（CC/AI），没有字幕时才走本地 Whisper；ASR 模型**不随包分发、也不会自动下载**，需要时用 `video2agent models download`（`small` 约 464 MB）或在设置里连接云端 ASR。画面文字（RapidOCR）、场景切分和抽帧都在本机跑，视频文件不出机器；不需要 GPU，不需要 API Key。
 - **云端可选。** 设置页可以接入任意 OpenAI 兼容的 ASR/OCR 服务商（内置默认服务商，有免费额度）：转写只上传音频，云端 OCR 只读你点名时刻的画帧，不会把整批抽帧发给付费图像模型。Key 用 Windows DPAPI 加密存在本机，不写进配置、argv、日志或接口响应。
 - **B 站登录可选。** 扫码登录后解锁 CC/AI 字幕（匿名请求拿不到字幕列表）、按 UP 主/发布时间筛选候选，以及收藏夹、历史、文件夹的读取与分类草案。Cookie 只留在 `~/.video2agent/cookies/`；`account` 工具只读，改文件夹/批量分类要回 CLI 加 `--confirm`。
-- **抖音登录可选。** `pip install "video2agent[browser]"` 后，`video2agent douyin login` 会打开一个登录窗口用于扫码和安全验证（设置页只显示登录状态，不显示二维码），确认后窗口自动关闭并保存登录状态；`douyin profile --url <主页>` / `me` 读主页资料，`douyin videos --url <主页> --tab works|likes|favorites` 读作品/收藏/喜欢列表。用 Playwright 驱动本机 Chrome/Edge，不内置浏览器。
+- **抖音登录可选。** 设置页「环境检查」可一键安装浏览器组件；也可手动 `pip install "video2agent[browser]"`。之后 `video2agent douyin login` 会打开一个登录窗口用于扫码和安全验证（设置页只显示登录状态，不显示二维码），确认后窗口自动关闭并保存登录状态；`douyin profile --url <主页>` / `me` 读主页资料，`douyin videos --url <主页> --tab works|likes|favorites` 读作品/收藏/喜欢列表。用 Playwright 驱动本机 Chrome/Edge，不内置浏览器。
 
 ## 快速开始
 
 **环境：** Python 3.11+、FFmpeg（在 `PATH` 中），以及 DSH（用插件界面时需要）。
-从插件市场安装的只是 DSH 集成层：实际处理视频还需要 CLI 和 FFmpeg。安装后打开插件设置页的「环境检查」，缺什么可以一键安装（CLI 走 pip，FFmpeg 走 winget/brew），也可以手动 `pip install video2agent`（FFmpeg 缺失时先 `winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg`，或设置 `FFMPEG_BIN`）。
+从插件市场安装的只是 DSH 集成层：实际处理视频还需要 CLI、FFmpeg 以及可选的浏览器组件/OCR。安装后打开插件设置页的「环境检查」，缺什么可以逐项安装，也可以点「一键安装缺少项」（CLI、FFmpeg、浏览器组件、OCR）；也可以手动 `pip install video2agent`（FFmpeg 缺失时先 `winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg`，或设置 `FFMPEG_BIN`）。
 视频没有字幕时，才需要语音模型（`small` 约 464 MB，**不会自动下载**，用 `video2agent models download` 显式安装）。
 本地画面文字 OCR 是可选额外包：`pip install "video2agent[ocr]"`（需要 Python 3.11/3.12；核心检索/转写/取帧不需要它，云端 OCR 也不需要）。
 
@@ -125,7 +125,7 @@ pip install video2agent
 dsh plugin --profile web add dsh-video2agent
 ```
 
-想先试 0.3.1，或者参与开发，走下面的源码方式。
+想先试 0.3.2，或者参与开发，走下面的源码方式。
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent

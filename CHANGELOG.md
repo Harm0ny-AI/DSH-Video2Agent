@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 (2026-11-20)
+
+- **One-click environment setup, including the browser.** The settings
+  environment card now reports the optional Playwright browser extra and can
+  install it with the CLI, FFmpeg and OCR from one **一键安装缺少项** action. The
+  browser install uses the interpreter that runs the CLI, prefers the installed
+  Chrome/Edge, and only downloads Chromium when neither is present. The Douyin
+  login failure now points at the environment card instead of exposing the raw
+  Playwright import error.
+
 ## 0.3.1 (2026-11-20)
 
 - **Cache expiry frees media; it no longer deletes knowledge.** The default

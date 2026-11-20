@@ -89,6 +89,15 @@ function cliCommand() {
   return { command: 'video2agent', prefix: [] }
 }
 
+function cliInterpreter() {
+  const invocation = cliCommand()
+  if (invocation.prefix.length >= 2 &&
+      invocation.prefix[invocation.prefix.length - 2] === '-m') {
+    return { command: invocation.command, prefix: invocation.prefix.slice(0, -2) }
+  }
+  return null
+}
+
 function binPath() {
   const invocation = cliCommand()
   return invocation.prefix.length ? invocation.command + ' ' + invocation.prefix.join(' ') : invocation.command
@@ -1309,6 +1318,27 @@ export function apply(ctx, config) {
     }
   }
 
+  async function detectBrowser(python, cli) {
+    // The browser is an optional Python extra. Probe the interpreter that runs the
+    // CLI, not a different "python" on PATH; a successful pip install in another
+    // environment is exactly how the settings card used to keep reporting the
+    // dependency as missing.
+    const interpreter = cliInterpreter() || (python.ok ? python : null)
+    if (!interpreter) {
+      return { ok: false, supported: !!(python.ok || cli.ok), detail: '需要 CLI 或 Python' }
+    }
+    const probe = await runCommand(interpreter.command, [
+      ...(interpreter.prefix || []), '-c',
+      "import importlib.util as u; print('yes' if u.find_spec('playwright') else 'no')",
+    ], 30000)
+    const ok = probe.code === 0 && String(probe.out || '').trim().split('\n').pop() === 'yes'
+    return {
+      ok,
+      supported: true,
+      detail: ok ? '已安装' : '未安装',
+    }
+  }
+
   async function setupStatus() {
     const python = await detectPython()
     const cli = await detectCli()
@@ -1317,6 +1347,7 @@ export function apply(ctx, config) {
     const cliOutdated = Boolean(cliOk && PLUGIN_VERSION && cliVersion && compareVersions(cliVersion, PLUGIN_VERSION) < 0)
     const ffmpeg = await detectFfmpeg()
     const ocr = await detectOcr(python, cli)
+    const browser = await detectBrowser(python, cli)
     const ffmpegHint = process.platform === 'win32'
       ? 'winget install Gyan.FFmpeg'
       : process.platform === 'darwin' ? 'brew install ffmpeg' : 'sudo apt install ffmpeg'
@@ -1339,8 +1370,10 @@ export function apply(ctx, config) {
         python: '安装 Python 3.11+：https://www.python.org/downloads/（Windows 可 winget install Python.Python.3.12）',
         cli: 'pip install video2agent',
         ffmpeg: ffmpegHint,
+        browser: 'pip install "video2agent[browser]"（扫码登录所需的浏览器组件）',
       },
       ocr: { ok: ocr.ok, supported: ocr.supported, detail: ocr.detail, engine: ocr.engine },
+      browser: { ok: browser.ok, supported: browser.supported, detail: browser.detail },
       // Linux installs FFmpeg with sudo, which the plugin cannot run; offer the
       // command instead of a button that always fails.
       canInstall: {
@@ -1348,6 +1381,7 @@ export function apply(ctx, config) {
         updateCli: python.ok && cliOutdated,
         ffmpeg: process.platform !== 'linux' && !ffmpeg.ok,
         ocr: (python.ok || cliOk) && ocr.supported && !ocr.ok,
+        browser: (python.ok || !!cliInterpreter()) && browser.supported && !browser.ok,
       },
     }
   }
@@ -1472,6 +1506,143 @@ export function apply(ctx, config) {
     }
     stopWorker()
     return { ok: true, output, status }
+  }
+
+  async function detectSystemBrowser() {
+    const candidates = []
+    if (process.platform === 'win32') {
+      const roots = [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean)
+      for (const root of roots) {
+        candidates.push(path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+        candidates.push(path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+      }
+    } else if (process.platform === 'darwin') {
+      candidates.push('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+      candidates.push('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge')
+    }
+    for (const candidate of candidates) {
+      try { if (fs.existsSync(candidate)) return true } catch {}
+    }
+    if (process.platform !== 'win32' && process.platform !== 'darwin') {
+      for (const command of ['google-chrome', 'chromium', 'chromium-browser', 'microsoft-edge']) {
+        const probe = await runCommand(command, ['--version'], 15000)
+        if (probe.code === 0) return true
+      }
+    }
+    return false
+  }
+
+  async function installBrowser() {
+    const before = await setupStatus()
+    if (before.browser && before.browser.ok) return { ok: true, already: true, output: '', status: before }
+    const interpreter = cliInterpreter() || await detectPython()
+    if (!interpreter || !interpreter.command) {
+      return {
+        ok: false,
+        error: { code: 'E_PYTHON', message: '没有找到可用的 Python', remedy: '安装 Python 3.11+ 后重试。' },
+        status: before,
+      }
+    }
+    const pipInstall = (extraArgs = []) => runCommand(
+      interpreter.command,
+      [...(interpreter.prefix || []), '-m', 'pip', 'install', '--upgrade', ...extraArgs, 'video2agent[browser]'],
+      SETUP_INSTALL_TIMEOUT,
+    )
+    let result = await pipInstall()
+    let mirrorNote = ''
+    if (result.code !== 0) {
+      mirrorNote = '默认 PyPI 源安装失败，改用清华镜像重试…\n'
+      result = await pipInstall(['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'])
+    }
+    let output = (mirrorNote + ((String(result.out || '') + '\n' + String(result.err || '')).trim())).slice(-6000)
+    if (result.code !== 0) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_PIP',
+          message: '浏览器组件安装失败',
+          remedy: '检查网络后重试；也可手动运行 pip install "video2agent[browser]"。',
+        },
+        output,
+        status: await setupStatus(),
+      }
+    }
+    // Prefer the user's Chrome/Edge. Only download Chromium when no system
+    // browser exists; otherwise a one-click install would add hundreds of MB for
+    // no reason on most desktops.
+    if (!(await detectSystemBrowser())) {
+      const browserInstall = await runCommand(
+        interpreter.command,
+        [...(interpreter.prefix || []), '-m', 'playwright', 'install', 'chromium'],
+        SETUP_INSTALL_TIMEOUT,
+      )
+      output = (output + '\n' + ((String(browserInstall.out || '') + '\n' + String(browserInstall.err || '')).trim())).slice(-8000)
+      if (browserInstall.code !== 0) {
+        return {
+          ok: false,
+          error: {
+            code: 'E_BROWSER_INSTALL',
+            message: 'Playwright 已装好，但 Chromium 下载失败',
+            remedy: '先安装 Chrome/Edge，或运行 python -m playwright install chromium 后重试。',
+          },
+          output,
+          status: await setupStatus(),
+        }
+      }
+    }
+    stopWorker()
+    return { ok: true, output, status: await setupStatus() }
+  }
+
+  async function installAll() {
+    const before = await setupStatus()
+    const outputs = []
+    const failed = []
+    const runStep = async (key, task) => {
+      const result = await task()
+      if (result && result.output) outputs.push('[' + key + ']\n' + result.output)
+      if (!result || result.ok !== true) {
+        failed.push({ key, error: (result && result.error) || { code: 'E_INSTALL', message: key + ' 安装失败' } })
+      }
+      return result
+    }
+    if (!before.cli.ok) await runStep('视频引擎', () => installCli(false))
+    else if (before.cli.update_available) await runStep('视频引擎', () => installCli(true))
+    if (!before.ffmpeg.ok && before.canInstall.ffmpeg) await runStep('FFmpeg', installFfmpeg)
+    if (!before.browser.ok && before.canInstall.browser) await runStep('浏览器组件', installBrowser)
+    if (before.ocr && before.ocr.supported && !before.ocr.ok && before.canInstall.ocr) {
+      await runStep('OCR', installOcr)
+    }
+    const after = await setupStatus()
+    const missing = []
+    if (!after.python.ok) missing.push('Python')
+    if (!after.cli.ok) missing.push('视频引擎')
+    if (!after.ffmpeg.ok) missing.push('FFmpeg')
+    if (after.browser && !after.browser.ok) missing.push('浏览器组件')
+    if (after.ocr && after.ocr.supported && !after.ocr.ok) missing.push('OCR')
+    if (failed.length) {
+      const names = failed.map((item) => item.key + '：' + ((item.error && (item.error.message || item.error.code)) || '失败'))
+      return {
+        ok: false,
+        error: { code: 'E_SETUP_PARTIAL', message: '部分依赖安装失败', remedy: names.join('；') },
+        output: outputs.join('\n\n'),
+        status: after,
+      }
+    }
+    if (missing.length) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_SETUP_MANUAL',
+          message: '还有依赖需要手动安装：' + missing.join('、'),
+          remedy: 'Python/FFmpeg 等系统依赖无法在页面内安装，请按环境检查里的提示处理。',
+        },
+        output: outputs.join('\n\n'),
+        status: after,
+      }
+    }
+    stopWorker()
+    return { ok: true, output: outputs.join('\n\n'), status: after }
   }
 
   function findExecutable(root, name, depth = 0) {
@@ -1621,6 +1792,8 @@ export function apply(ctx, config) {
           if (action === 'install-cli') return sendJson(res, 200, await withInstallLock('install-cli', installCli))
           if (action === 'install-ffmpeg') return sendJson(res, 200, await withInstallLock('install-ffmpeg', installFfmpeg))
           if (action === 'install-ocr') return sendJson(res, 200, await withInstallLock('install-ocr', installOcr))
+          if (action === 'install-browser') return sendJson(res, 200, await withInstallLock('install-browser', installBrowser))
+          if (action === 'install-all') return sendJson(res, 200, await withInstallLock('install-all', installAll))
           if (action === 'update-cli') return sendJson(res, 200, await withInstallLock('update-cli', () => installCli(true)))
           return sendJson(res, 400, { error: 'unknown action' })
         } catch (e) {
@@ -3090,6 +3263,9 @@ function guardWrite(req, res) {
   __test.timeoutPayload = timeoutPayload
   __test.setupStatus = setupStatus
   __test.installCli = installCli
+  __test.installBrowser = installBrowser
+  __test.installAll = installAll
+  __test.detectBrowser = detectBrowser
   __test.installFfmpeg = installFfmpeg
   __test.managedToolEnv = managedToolEnv
   __test.readManagedTools = readManagedTools
