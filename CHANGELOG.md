@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## 0.3.1 (2026-11-20)
 
 - **Cache expiry frees media; it no longer deletes knowledge.** The default
   policy (7 days) used to purge the whole record: transcript, OCR index, evidence
