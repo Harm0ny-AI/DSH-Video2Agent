@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+- **Cache expiry frees media; it no longer deletes knowledge.** The default
+  policy (7 days) used to purge the whole record: transcript, OCR index, evidence
+  and collection membership included, so a cache setting silently emptied the
+  library. Expiry now deletes only the downloaded media and cached frames; text
+  search keeps working, `overview` reports `media_released`, and anything that
+  needs pixels says the media must be fetched again (a local file is the user's
+  own and is never touched). Deleting the record itself is the separate, explicit
+  `gc --auto --purge`.
+- **A replaced source file is refused, and evidence is snapshotted.** The record
+  now stores the source size/mtime/hash at ingest; if the file changed, evidence
+  and windowed OCR raise E_SOURCE_CHANGED instead of cutting frames out of a file
+  the analysis never saw. Evidence bundle ids are content-addressed, so a later
+  read of the same range can no longer overwrite an older citation.
+- **Time-window search filters before ranking.** `start_ms`/`end_ms` used to be
+  applied to the top result pool; a window hit ranked just below the pool was
+  reported as a miss. Segments and OCR rows now filter by the window in SQL,
+  before the limit, including the literal fallback.
+- **OCR index writes are atomic.** A frame status and its OCR tracks now commit
+  in one transaction. An interrupted pass no longer leaves a frame marked read
+  with no searchable text; a failure leaves it unread so a retry can redo it.
+- **Cancelling an ingest no longer leaves the queue lock behind.** A cancel that
+  arrived right after the lock was acquired raised before the cleanup block, so
+  the next ingest waited the full 180-second stale window.
+- **The pip mirror keeps TLS verification.** The fallback to the Tsinghua mirror
+  passed `--trusted-host`, which turned a certificate problem into a silent
+  downgrade to unauthenticated package downloads.
+
+- **Douyin keyword search, without a browser.** `find` now searches Bilibili and
+  Douyin by default; `scope:"bilibili"` / `scope:"douyin"` restrict it
+  (CLI: `discover --platform all|bilibili|douyin`). Results are paginated up to
+  three pages / 50 items, and filters keep fetching until they have enough or run
+  out. Successful searches are cached for five minutes; a verify/risk block sets
+  a ten-minute cooldown instead of hammering Douyin. It uses the saved Douyin login cookie and a
+  vendored Apache-2.0 a_bogus signer to call Douyin's signed web search endpoint,
+  then returns the same candidate shape as Bilibili. No Playwright, no TikHub, no
+  third-party search key. Missing login, risk pages and non-zero status codes are
+  reported explicitly instead of returning a fake empty result.
+- **A Douyin risk check is no longer shown as "no results".** When Douyin wants a
+  slider check it answers HTTP 200 with status_code 0, an empty data list and
+  `search_nil_info.search_nil_type="verify_check"`; that was classified as
+  NO_RESULTS (seen live on 2026-11-20 after a burst of searches), so a blocked
+  search looked like a harmless empty one. It now raises E_DOUYIN_VERIFY with a
+  verify/re-login remedy; a genuinely empty search still reports NO_RESULTS, and
+  real results still win over a stray nil marker.
+
 ## 0.3.0 (2026-11-18)
 
 - **TUN + fake-ip proxies no longer break remote ingest.** Clash Verge/mihomo TUN

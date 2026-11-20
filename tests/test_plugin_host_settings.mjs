@@ -91,6 +91,12 @@ assert.match(routingSection.text(), /recording/, 'UI/recording path missing')
 assert.deepEqual(__test.commandArgs({ command: 'find', query: '一' }),
   ['discover', '一', '--limit', '8', '--no-covers', '--json'],
   'Bilibili find must stay single-query')
+assert.deepEqual(__test.commandArgs({ command: 'find', query: '蓝莓', scope: 'douyin' }),
+  ['discover', '蓝莓', '--limit', '8', '--platform', 'douyin', '--no-covers', '--json'],
+  'Douyin find must select the Douyin discover platform')
+assert.deepEqual(__test.commandArgs({ command: 'find', query: '一', scope: 'bilibili' }),
+  ['discover', '一', '--limit', '8', '--platform', 'bilibili', '--no-covers', '--json'],
+  'An explicit Bilibili find must not silently search both platforms')
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'ocr-index' }), false, 'admin ocr-index must not run in the read-only worker')
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'export' }), false)
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'account' }), false)
@@ -256,6 +262,11 @@ assert.ok(registeredTool, 'video2agent tool should be registered')
 // Token-budget regression: the fixed surface must stay small. Measured on
 // 2026-11-10: schema description 1,224 chars, 52 params, SKILL.md 8,479 chars.
 // A return of per-command prose fails here.
+const pluginIndexSrc = fs.readFileSync(path.join(here, '..', 'packages', 'dsh-video2agent', 'index.js'), 'utf8')
+// pip installs fall back to a mirror, but must keep TLS certificate checks: the
+// old --trusted-host flag disabled them for the mirror host.
+assert.ok(!pluginIndexSrc.includes('--trusted-host'), 'pip install must keep certificate verification on')
+assert.ok(pluginIndexSrc.includes('pypi.tuna.tsinghua.edu.cn'), 'the mirror fallback must stay available')
 const skillText = fs.readFileSync(path.join(here, '..', 'skills', 'video2agent', 'SKILL.md'), 'utf8')
 assert.ok(skillText.length < 8500, `SKILL.md grew to ${skillText.length} chars; keep the router lean`)
 // A video-native question (new season tier list) is the product's reason to
@@ -1066,6 +1077,19 @@ assert.equal(started.jobs[0].reason, '最相关')
 const reused = await startShortlistJobs(selected, fakeRun)
 assert.equal(calls.length, 1, 'a retried shortlist must not spawn the batch twice')
 assert.equal(reused.reused, true)
+// A Douyin shortlist must not be rewritten to a Bilibili URL.
+resetShortlistStarts()
+const dyCalls = []
+const dyRun = async (args) => {
+  dyCalls.push(args)
+  return { code: 0, out: JSON.stringify({ ok: true, job_id: 'job_dy', state: 'running' }), err: '' }
+}
+const dyStarted = await startShortlistJobs([
+  { video_id: '7619596768929484075', platform: 'douyin', checked: true, title: '蓝莓' },
+], dyRun, 'sess-douyin')
+assert.equal(dyStarted.jobs.length, 1)
+assert.equal(dyCalls[0][1], 'https://www.douyin.com/video/7619596768929484075',
+  'a Douyin candidate must start its Douyin URL, not a Bilibili URL')
 // A batch of two must issue two single-use tokens: the CLI deletes confirm.json
 // on the first accepted ingest, so a shared token would fail the second video.
 resetShortlistStarts()

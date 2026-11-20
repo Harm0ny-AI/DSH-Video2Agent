@@ -619,12 +619,21 @@ def analyze(
                     # tell which indexed video was reused.
                     db.update_job(job_id, video_id=vid, duration_ms=existing.get("duration_ms") or duration)
                 return overview(cfg, vid)
+        try:
+            source_stat = os.stat(str(resolved["path"]))
+            source_size, source_mtime_ns = int(source_stat.st_size), int(source_stat.st_mtime_ns)
+        except OSError:
+            source_size, source_mtime_ns = None, None
         db.upsert_video({
             "id": vid,
             "source_kind": resolved["kind"],
             "source_uri": resolved["uri"],
             "source_path": resolved["path"],
             "sha256": resolved.get("sha256"),
+            "source_size": source_size,
+            "source_mtime_ns": source_mtime_ns,
+            # A re-ingest restores the media, so the release marker must clear.
+            "media_released_at": None,
             "title": resolved.get("title") or Path(resolved["path"]).stem,
             "duration_ms": duration,
             "width": info.get("width"),
@@ -1578,6 +1587,8 @@ def overview(cfg: Config, video_id: str) -> dict[str, Any]:
         "visual_map": visual_known > 0,
         "frames": frames_present,
         "media": bool(video.get("source_path") and Path(str(video["source_path"])).exists()),
+        # Media was reclaimed by the cache policy; the text index is still here.
+        "media_released": bool(video.get("media_released_at")),
     }
     if visual and visual_known == 0:
         visual_warning = True
@@ -1626,6 +1637,13 @@ def overview(cfg: Config, video_id: str) -> dict[str, Any]:
             "画面文字尚未建立索引：默认按需识别，搜索画面文字前要先读取那一刻。",
             severity="info",
             remedy="先运行 video2agent ocr-index <视频 ID> --dry-run 看预计帧数和耗时，再运行 video2agent ocr-index <视频 ID>。",
+        ))
+    if video.get("media_released_at") and "MEDIA_RELEASED" not in {str((w or {}).get("code") or "") for w in warnings}:
+        warnings.append(_warn(
+            "MEDIA_RELEASED",
+            "原片和抽帧已按缓存策略清理；转写和画面文字仍可搜索。",
+            severity="info",
+            remedy="要看原片或取帧时，重新 ingest 一次即可恢复。",
         ))
     if visual_warning:
         warnings.append(_warn(
@@ -1998,7 +2016,8 @@ def _literal_all(text: str, terms: list[str]) -> bool:
     return True
 
 
-def _literal_hits(db: Database, video_ids: list[str], query: str, limit: int) -> list[dict[str, Any]]:
+def _literal_hits(db: Database, video_ids: list[str], query: str, limit: int,
+                  *, start_ms: int | None = None, end_ms: int | None = None) -> list[dict[str, Any]]:
     """Last-resort literal match for queries FTS cannot tokenise.
 
     Covers single CJK characters ("秩", "表") and space-separated shorthand
@@ -2012,11 +2031,19 @@ def _literal_hits(db: Database, video_ids: list[str], query: str, limit: int) ->
     out: list[dict[str, Any]] = []
     for vid in video_ids:
         for seg in db.get_segments(vid, limit=3000):
+            if start_ms is not None and int(seg.get("end_ms") or 0) < int(start_ms):
+                continue
+            if end_ms is not None and int(seg.get("start_ms") or 0) > int(end_ms):
+                continue
             if _literal_all(seg.get("text") or "", terms):
                 row = _exact_result(db, seg, query, "segment")
                 row.update({"score": score, "why": "逐词回退匹配：按字面包含（FTS 没有对应词元）"})
                 out.append(row)
         for tr in db.get_ocr_tracks(vid, limit=1500):
+            if start_ms is not None and int(tr.get("end_ms") or 0) < int(start_ms):
+                continue
+            if end_ms is not None and int(tr.get("start_ms") or 0) > int(end_ms):
+                continue
             if _literal_all(tr.get("text") or "", terms):
                 row = _exact_result(db, tr, query, "ocr")
                 row.update({"score": score, "why": "逐词回退匹配：按字面包含（FTS 没有对应词元）"})
@@ -2248,7 +2275,9 @@ def search(cfg: Config, query: str, *, video_id: str | None = None, collection: 
                 warnings.extend(capped)
         visual_index = _visual_index_for_search(db, video_id, targets)
         if not match and at_ms is None:
-            literal = _filter_modalities(_literal_hits(db, targets, raw_content, max(limit, 1)), modalities)
+            literal = _filter_modalities(_literal_hits(
+                db, targets, raw_content, max(limit, 1), start_ms=start_ms, end_ms=end_ms,
+            ), modalities)
             if start_ms is not None:
                 literal = [r for r in literal if r["end_ms"] >= start_ms]
             if end_ms is not None:
@@ -2320,12 +2349,14 @@ def search(cfg: Config, query: str, *, video_id: str | None = None, collection: 
             scoped = None if video_ids else list(targets)
             for vid in (video_ids or [None]):
                 if modalities is None or "transcript" in modalities:
-                    for r in db.search_segments(match, vid, limit=pool, video_ids=scoped):
+                    for r in db.search_segments(match, vid, limit=pool, video_ids=scoped,
+                                                  start_ms=start_ms, end_ms=end_ms):
                         if target_set is not None and str(r.get("video_id") or "") not in target_set:
                             continue
                         results.append(_segment_result(db, r, content_query, "transcript", visual_types, wanted, units, aliases))
                 if modalities is None or "ocr" in modalities:
-                    for r in db.search_ocr(match, vid, limit=pool, video_ids=scoped):
+                    for r in db.search_ocr(match, vid, limit=pool, video_ids=scoped,
+                                               start_ms=start_ms, end_ms=end_ms):
                         if target_set is not None and str(r.get("video_id") or "") not in target_set:
                             continue
                         results.append(_ocr_result(db, r, content_query, visual_types, wanted, units, aliases))
@@ -2393,7 +2424,7 @@ def search(cfg: Config, query: str, *, video_id: str | None = None, collection: 
         if not results and at_ms is None and _should_literal_fallback(raw_content):
             # Single CJK char ("秩"/"表") or short shorthand ("Q K V"): the
             # index has no 1-char token, so fall back to a literal all-terms match.
-            literal = _literal_hits(db, targets, raw_content, limit)
+            literal = _literal_hits(db, targets, raw_content, limit, start_ms=start_ms, end_ms=end_ms)
             if literal:
                 results = literal
                 warnings.append({"code": "LITERAL_FALLBACK",
@@ -2594,6 +2625,7 @@ def ocr_index(cfg: Config, video_id: str, *, dry_run: bool = False,
     started = time.perf_counter()
     indexed = empty = failed = 0
     tracks: list[dict[str, Any]] = []
+    reads: list[dict[str, Any]] = []
     with Database(cfg.db_path) as db:
         anchors = {int(a) for a in db.get_ocr_anchors(video_id)}
         for frame in to_read:
@@ -2602,20 +2634,25 @@ def ocr_index(cfg: Config, video_id: str, *, dry_run: bool = False,
                 boxes = ocr_image(str(frame["path"]), config_path=local_config)
             except OcrFailed:
                 failed += 1
-                db.set_frame_ocr(video_id, pts, ocr_status="failed", text_coverage=None)
+                reads.append({"pts_ms": pts, "ocr_status": "failed",
+                              "text_coverage": None, "has_text": None, "tracks": []})
                 continue
             status = "ok" if boxes else "empty"
             coverage = text_coverage_for(str(frame["path"]), boxes)
-            db.set_frame_ocr(video_id, pts, ocr_status=status, text_coverage=coverage,
-                             has_text=bool(boxes))
+            frame_tracks = build_ocr_tracks([{"pts_ms": pts, "ocr": boxes}]) if boxes else []
+            reads.append({"pts_ms": pts, "ocr_status": status,
+                          "text_coverage": coverage, "has_text": bool(boxes),
+                          "tracks": frame_tracks})
             if boxes:
                 indexed += 1
-                tracks.extend(build_ocr_tracks([{"pts_ms": pts, "ocr": boxes}]))
+                tracks.extend(frame_tracks)
             else:
                 empty += 1
             anchors.add(pts)
-        if tracks:
-            db.insert_ocr_tracks(video_id, tracks)
+        if reads:
+            # Frame status and OCR rows commit together. If this fails, every
+            # frame stays unread and a retry can safely redo the pass.
+            db.apply_ocr_reads(video_id, reads)
         if anchors:
             db.set_ocr_anchors(video_id, sorted(anchors))
         elapsed = time.perf_counter() - started
@@ -3586,6 +3623,33 @@ def ocr_window(cfg: Config, video_id: str, *, start_ms: int, end_ms: int,
     return payload
 
 
+def _evidence_snapshot_id(video: dict[str, Any], video_id: str, *, at_ms: int | None,
+                           start: int, end: int, payload: dict[str, Any]) -> str:
+    """Content-addressed bundle id, so a citation is a snapshot and not a slot.
+
+    The id used to be video + range only, written with INSERT OR REPLACE: asking
+    the same range again (after a re-ingest or a new OCR read) silently replaced
+    yesterday's evidence, and an old citation then resolved to new content. The
+    id now includes the source version and the evidence itself, so identical
+    answers collapse and changed answers coexist.
+    """
+    basis = {
+        "video": video_id,
+        "at_ms": None if at_ms is None else int(at_ms),
+        "start": int(start),
+        "end": int(end),
+        "source": [video.get("sha256"), video.get("source_size"), video.get("source_mtime_ns")],
+        "frames": [int(x) for x in (payload.get("image_frame_ms") or [])],
+        "ocr": [[int(r.get("start_ms") or 0), str(r.get("text") or "")[:160]]
+                for r in (payload.get("ocr") or [])],
+        "transcript": [[int(t.get("start_ms") or 0), str(t.get("text") or "")[:120]]
+                       for t in (payload.get("transcript") or [])],
+        "visual": [[int(v.get("start_ms") or 0), str(v.get("label") or "")]
+                   for v in (payload.get("visual") or [])],
+    }
+    return stable_id("ev", json.dumps(basis, sort_keys=True, ensure_ascii=False), length=20)
+
+
 def evidence(cfg: Config, *, video_id: str, at_ms: int | None = None, start_ms: int | None = None,
              end_ms: int | None = None, evidence_id: str | None = None, image_budget: int = 2,
              detail: str = "read", ocr_tiles: bool = False) -> dict[str, Any]:
@@ -3899,7 +3963,29 @@ def evidence(cfg: Config, *, video_id: str, at_ms: int | None = None, start_ms: 
                 ocr = [r for r in around if abs(int(r["start_ms"]) - int(target_ms)) <= OCR_SAME_FRAME_MS]
                 ocr_frame_ms = int(target_ms)
         present = [f for f in near if Path(str(f.get("path") or "")).exists()]
-        if len(present) != len(near):
+        extracted_on_demand = False
+        if image_budget > 0 and not present and at_ms is not None:
+            # The frame cache can be gone while the media is still here (a local
+            # source survives a cache release, and a partial gc can drop files).
+            # Cut the requested moment from the media instead of answering a
+            # picture request with no picture.
+            extracted, extract_error = _extract_evidence_frame(cfg, video, video_id, int(at_ms))
+            if extracted:
+                present = [{"path": extracted, "pts_ms": int(at_ms)}]
+                extracted_on_demand = True
+                ocr_warnings.append(_warn(
+                    "FRAME_EXTRACTED_ON_DEMAND",
+                    f"{format_timecode(at_ms)} 的抽帧缓存不在，已按请求时刻从原片重新抽取。",
+                    severity="info",
+                ))
+            elif extract_error:
+                ocr_warnings.append(_warn(
+                    "FRAME_EXTRACT_FAILED",
+                    f"无法为 {format_timecode(at_ms)} 抽取画面：{extract_error}",
+                    severity="warning",
+                    remedy="检查源文件是否可读；缓存清理过的视频可重新 ingest 恢复。",
+                ))
+        if len(present) != len(near) and not extracted_on_demand:
             ocr_warnings.append(_warn(
                 "FRAME_MISSING",
                 f"{len(near) - len(present)} 张抽帧文件已不存在，已从结果中去掉（未用其他时刻顶替）",
@@ -3943,7 +4029,8 @@ def evidence(cfg: Config, *, video_id: str, at_ms: int | None = None, start_ms: 
             "schema_version": "1.0",
             "video_id": video_id,
             "title": video.get("title"),
-            "evidence_id": evidence_id or stable_id("ev", video_id, at_ms, start, end, "bundle"),
+            # Filled in once the rest of the bundle is known (content-addressed).
+            "evidence_id": None,
             "range": {"start_ms": start, "end_ms": end, "timecode": format_timecode(start)},
             # Say what was asked for versus what the media can actually give, so a
             # snapped citation is visible instead of looking exact.
@@ -4005,6 +4092,8 @@ def evidence(cfg: Config, *, video_id: str, at_ms: int | None = None, start_ms: 
             "detail": detail,
             "warnings": _evidence_warnings(db, video, ocr_warnings),
         }
+        payload["evidence_id"] = _evidence_snapshot_id(
+            video, video_id, at_ms=at_ms, start=start, end=end, payload=payload)
         # "ok:true" with no text, no picture and no visual segment is not evidence.
         # It used to carry a citation to the range start, so a caller could quote a
         # moment that returned nothing.
@@ -4042,16 +4131,51 @@ def _require_media(video: dict[str, Any]) -> None:
     """A record can be ready while its media file (and every frame) is gone.
 
     Saying "move --at inside the range" then sends the user the wrong way; the only
-    fix is to ingest the source again.
+    fix is to ingest the source again. The check also refuses a source that was
+    replaced after indexing: old transcript/OCR rows describe the old file, and
+    slicing a frame out of a different file would cite a picture the analysis
+    never saw.
     """
     source = str(video.get("source_path") or "")
-    if not source or source.startswith("http") or Path(source).exists():
+    if not source or source.startswith("http"):
         return
-    raise Video2AgentError(
-        "E_MEDIA_MISSING",
-        f"源文件不在了：{source}",
-        "重新 ingest 这个视频（--force）；只剩库文件时无法再取帧。",
-    )
+    path = Path(source)
+    if not path.exists():
+        if video.get("media_released_at"):
+            raise Video2AgentError(
+                "E_MEDIA_MISSING",
+                f"原片已按缓存策略清理：{source}",
+                "转写和画面文字仍可搜索；要看原片或取帧，重新 ingest 一次即可恢复。",
+            )
+        raise Video2AgentError(
+            "E_MEDIA_MISSING",
+            f"源文件不在了：{source}",
+            "重新 ingest 这个视频（--force）；只剩库文件时无法再取帧。",
+        )
+    try:
+        stat = path.stat()
+    except OSError:
+        return
+    stored_size = video.get("source_size")
+    stored_mtime = video.get("source_mtime_ns")
+    changed = stored_size is not None and int(stat.st_size) != int(stored_size)
+    if not changed and stored_mtime is not None and int(stat.st_mtime_ns) != int(stored_mtime):
+        # Same size but a new mtime is usually a touch/rewrite: only the content
+        # hash can tell. Hashing happens only on that rare path.
+        stored_hash = str(video.get("sha256") or "")
+        if stored_hash:
+            from .util import sha256_file
+
+            try:
+                changed = sha256_file(path) != stored_hash
+            except OSError:
+                changed = False
+    if changed:
+        raise Video2AgentError(
+            "E_SOURCE_CHANGED",
+            "源文件在入库后被替换了，旧索引对不上现在的画面",
+            "重新 ingest 这个视频（--force），用新文件重建索引；旧时间码的帧不能再引用。",
+        )
 
 
 def _existing_images(paths: list[str]) -> list[str]:

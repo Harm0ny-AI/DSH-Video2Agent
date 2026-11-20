@@ -106,6 +106,51 @@ class CliTests(unittest.TestCase):
             self.assertEqual(ev["media_end_ms"], overview["duration_ms"])
             self.assertLessEqual(ev["range"]["start_ms"], ev["range"]["end_ms"], "range must not invert")
 
+            # Cache expiry frees media but must not empty the library. Age the
+            # record, let the auto policy run, then prove the text is still here
+            # and the media claim is honest.
+            from video2agent.db import Database
+
+            with Database(home / "library.db") as db:
+                db.conn.execute("UPDATE videos SET updated_at=?, created_at=? WHERE id=?",
+                                ["2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", vid])
+                db.conn.commit()
+            (home / "ui-settings.json").parent.mkdir(parents=True, exist_ok=True)
+            (home / "ui-settings.json").write_text(
+                json.dumps({"cacheExpire": True, "cacheDays": 1, "cacheLimitEnabled": False}),
+                encoding="utf-8")
+            p = run_cli(["gc", "--auto", "--json"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            released = [e for e in json.loads(p.stdout)["evicted"] if e.get("video_id") == vid]
+            self.assertTrue(released, "the aged media must be released")
+            p = run_cli(["list", "--json"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn(vid, [v["id"] for v in json.loads(p.stdout)["videos"]],
+                          "cache expiry deleted the library record")
+            p = run_cli(["search", "表格", "--video", vid, "--json"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertTrue(json.loads(p.stdout)["results"], "released media lost the searchable text")
+            p = run_cli(["overview", vid, "--json"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            released_overview = json.loads(p.stdout)
+            caps = released_overview["capabilities"]
+            self.assertTrue(caps["media"], "a local file is the user's own and must stay put")
+            self.assertFalse(caps.get("media_released"))
+            self.assertFalse((home / "derived" / vid).exists(), "frame cache must be freed")
+            # Frames can still be cut from the user's own source on demand.
+            p = run_cli(["evidence", vid, "--at", "2.5", "--images", "1", "--json"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertTrue(json.loads(p.stdout)["images"])
+            # Deleting knowledge is a separate, explicit act: --purge removes the
+            # record that a release deliberately kept.
+            p = run_cli(["gc", "--auto", "--purge", "--json"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            purged = [e for e in json.loads(p.stdout)["evicted"] if e.get("video_id") == vid]
+            self.assertTrue(purged, "an explicit purge must delete the released record")
+            p = run_cli(["list", "--json"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertNotIn(vid, [v["id"] for v in json.loads(p.stdout)["videos"]])
+
 
 if __name__ == "__main__":
     unittest.main()

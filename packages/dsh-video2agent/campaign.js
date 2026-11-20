@@ -178,12 +178,16 @@ export function createCampaignManager({ home, startShortlistJobs, readJobSidecar
     const items = selected.map((candidate) => ({
       candidate_id: candidate.candidate_id || '',
       video_id: String(candidate.video_id || ''),
+      platform: String(candidate.platform || 'bilibili'),
+      url: candidate.url ? String(candidate.url) : '',
       title: String(candidate.title || ''),
       uploader: String(candidate.uploader || ''),
       views: Number(candidate.stats && candidate.stats.play) || 0,
       duration_ms: Number(candidate.duration_ms) || 0,
       cover_url: candidate.cover_url || '',
-      source: 'https://www.bilibili.com/video/' + candidate.video_id,
+      source: candidate.url || (candidate.platform === 'douyin'
+        ? 'https://www.douyin.com/video/' + candidate.video_id
+        : 'https://www.bilibili.com/video/' + candidate.video_id),
       reason: candidate.reason || '',
       primary: candidate.primary === true,
       state: 'queued',

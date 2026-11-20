@@ -14,7 +14,8 @@ licenses remain in force.
 | OpenCV | Apache-2.0 | Frame signals / lines |
 | NumPy | BSD-3-Clause | Numeric arrays |
 | Pillow | HPND | Frames / contact sheets |
-| requests | Apache-2.0 | Bilibili API |
+| requests | Apache-2.0 | Bilibili API / Douyin signed search |
+| A-Bogus signer (Douyin_TikTok_Download_API) | Apache-2.0 | Vendored in `src/video2agent/_abogus.py` + `_sm3.py`; Douyin search signing |
 | onnxruntime | MIT | RapidOCR inference |
 | huggingface-hub | Apache-2.0 | Model download helper |
 | FFmpeg | LGPL/GPL depending on build | Not bundled by default |

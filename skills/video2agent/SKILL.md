@@ -22,8 +22,8 @@ seeing it.
 
 A question need not be "about a video" to be best answered by one: a game's
 new-season tier list or loadout (新赛季枪械排行、配装), a product review, a
-recipe, a route, a breaking visual topic. Call `find` on Bilibili (or search the
-library) before answering from memory. Never present a stale season as current:
+recipe, a route, a breaking visual topic. Call `find` on Bilibili/Douyin (or
+search the library) before answering from memory. Never present a stale season as current:
 check the upload date and patch in the title, and say when the video predates it.
 
 ## Call it directly
@@ -35,15 +35,14 @@ to reach the tool; the card may stay blank.
 
 ## Answer in chat; export only when asked
 
-A video answer belongs in chat. Do not create or export a note, Markdown file,
-knowledge pack, transcript file, or temporary artifact unless the user asks for
-that file. A file is not a substitute.
+A video answer belongs in chat. Do not create or export a file unless the user
+asks for it.
 
 ## The eight commands
 
 | command | returns | use when |
 |---|---|---|
-| `find` | Bilibili candidates (title/uploader/duration/reason) | looking for a video; `scope:"library"` searches indexed videos; `url` resolves one Bilibili/Douyin link |
+| `find` | Bilibili + Douyin candidates | find a video; both by default, `scope:"bilibili"`/`"douyin"` restrict, library search; `url` resolves one link |
 | `ingest` | job id(s) | index a path/URL; `video_ids` starts the selected shortlist; `job_id` polls; `campaign_id` advances a campaign |
 | `outline` | one-call index: transcript/OCR lines, keyframes, cuts, coverage (`detail:"digest"`), metadata (`overview`), visual map | first look at a video |
 | `read` | compact timestamped transcript, or a 2-10 video comparison | text answer or comparison |
@@ -56,8 +55,9 @@ that file. A file is not a substitute.
 
 ### 1. Find
 
-`find` with `query`; filter with `uploader`, `after`, `before`. The reply is for
-you, not a table: read the metadata and call `ingest` with the ids you actually
+`find` with `query`; Bilibili + Douyin by default, `scope:"bilibili"`/`"douyin"` to restrict
+(Douyin needs login). Filter with `uploader`, `after`, `before`.
+The reply is for you, not a table: read the metadata and call `ingest` with the ids you actually
 recommend; everything you will analyze goes in `default_selected` (only those
 start, `video_ids` merely lists candidates) plus `primary`. Over `processLimit`
 → `campaign:true`.

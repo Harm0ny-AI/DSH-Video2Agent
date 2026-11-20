@@ -66,8 +66,8 @@ export const Config = Schema
     accentColor: Schema.string().pattern(/^#[0-9a-fA-F]{6}$/).default('#0a84ff').description('Accent colour for Video2Agent surfaces (#rrggbb).'),
     processLimit: Schema.natural().min(1).max(10).default(10).description('Maximum videos the card may process in one run (1-10).'),
     cacheTtlMs: Schema.natural().min(60000).default(86400000).description('How long a link preview is reused.'),
-    cacheExpire: Schema.boolean().default(true).description('Delete cached videos (media, frames, transcript and index) after the cache age.'),
-    cacheDays: Schema.natural().min(1).max(365).default(7).description('Cache age in days before the whole entry is deleted.'),
+    cacheExpire: Schema.boolean().default(true).description('Free the media and frame files of old videos after the cache age; transcript and on-screen text stay searchable.'),
+    cacheDays: Schema.natural().min(1).max(365).default(7).description('Cache age in days before a video\'s media is freed.'),
     cacheLimitEnabled: Schema.boolean().default(false).description('Evict the oldest cache entries when the cache exceeds a size cap.'),
     cacheLimitGb: Schema.natural().min(1).max(20).default(20).description('Cache size cap in GB (1-20); only used when the cap is enabled.'),
   })
@@ -181,13 +181,13 @@ const WORKER_COMMANDS = new Set(['search', 'overview', 'transcript', 'compare', 
 // must never be re-run by the worker-failure fallback.
 const ADMIN_WRITE_ACTIONS = new Set(['ocr-index', 'export', 'account', 'douyin'])
 
-// Hard routing: public practical questions try one Bilibili find before web
-// search. It is registered only after the tool exists, owned by this plugin's
+// Hard routing: public practical questions try one Bilibili/Douyin find before
+// web search. It is registered only after the tool exists, owned by this plugin's
 // context, and its text is empty while the plugin's surfaces are disabled, so
 // disabling or removing the plugin leaves no routing rule behind.
 const HARD_ROUTING_PROMPT = `## Video2Agent — check video before a web search
 
-Before you run a web search (web_search, or answering from memory), first call video2agent find once with a concrete query. If the user named a specific site/source, follow that; if the user gave a Bilibili link/video, process that video directly.
+Before you run a web search (web_search, or answering from memory), first call video2agent find once with a concrete query. If the user named a specific site/source, follow that; if the user gave a Bilibili or Douyin link/video, process that video directly. find searches Bilibili and Douyin by default; a saved Douyin login is required for Douyin results. Use scope:"bilibili" or scope:"douyin" to restrict, and a Douyin URL still resolves directly.
 
 When the candidates come back, judge them on title, uploader, duration, view count and match with the question. Pick by quality, not by position; do not take the first N; if the candidates are weak, pick fewer or none instead of filling the batch with poor videos.
 
@@ -663,6 +663,8 @@ function commandArgs(args) {
   if (command === 'discover') {
     if (!args.query || badPositional(args.query)) return null
     const discover = ['discover', String(args.query), '--limit', String(clampInt(args.limit, 8, 1, 50))]
+    if (args.scope === 'douyin') discover.push('--platform', 'douyin')
+    else if (args.scope === 'bilibili') discover.push('--platform', 'bilibili')
     // Narrowing a broad search is how "this creator's last three videos" works;
     // the filters go before --json so the flag order stays conventional.
     if (args.uploader) discover.push('--uploader', String(args.uploader))
@@ -1377,7 +1379,10 @@ export function apply(ctx, config) {
     let mirrorNote = ''
     if (r.code !== 0) {
       mirrorNote = '\n默认 PyPI 源安装失败，改用清华镜像重试…\n'
-      r = await pipInstall(['video2agent'], ['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple', '--trusted-host', 'pypi.tuna.tsinghua.edu.cn'])
+      // Mirror only: keep TLS certificate verification on. The old trusted-host
+      // flag disabled it for the mirror, which turns a certificate problem into
+      // a silent downgrade to unauthenticated package downloads.
+      r = await pipInstall(['video2agent'], ['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'])
     }
     const coreOutput = (mirrorNote + ((String(r.out || '') + '\n' + String(r.err || '')).trim())).slice(-6000)
     const pythonLabel = [python.command, ...python.prefix].join(' ')
@@ -1449,7 +1454,7 @@ export function apply(ctx, config) {
     let note = ''
     if (r.code !== 0) {
       note = '默认 PyPI 源安装失败，改用清华镜像重试…\n'
-      r = await pipOcr(['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple', '--trusted-host', 'pypi.tuna.tsinghua.edu.cn'])
+      r = await pipOcr(['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'])
     }
     const output = (note + ((String(r.out || '') + '\n' + String(r.err || '')).trim())).slice(-6000)
     const status = await setupStatus()
@@ -3012,7 +3017,10 @@ function guardWrite(req, res) {
     const jobs = []
     const failed = []
     for (const candidate of toStart) {
-      const source = `https://www.bilibili.com/video/${candidate.video_id}`
+      const source = candidate.url || candidate.source
+        || (candidate.platform === 'douyin'
+          ? `https://www.douyin.com/video/${candidate.video_id}`
+          : `https://www.bilibili.com/video/${candidate.video_id}`)
       // The CLI token is single-use (the first accepted ingest deletes
       // confirm.json), so each video needs its own token. One batch-wide token
       // started the first video and failed the second with E_CONFIRM_FIRST.
@@ -3215,6 +3223,8 @@ function guardWrite(req, res) {
       return {
         candidate_id: String(candidate.candidate_id || ''),
         video_id: String(candidate.video_id || ''),
+        platform: String(candidate.platform || 'bilibili'),
+        url: candidate.url ? String(candidate.url) : '',
         title: String(candidate.title || ''),
         uploader: String(candidate.uploader || ''),
         duration_ms: Number(candidate.duration_ms) || 0,
@@ -3379,9 +3389,9 @@ function guardWrite(req, res) {
       'Video and screen-recording perception + retrieval for agents. Use it for UI motion/QA, '
       + 'animations, tutorials, demos, and timestamp/frame questions, even when the user never says '
       + '"video". Also use it when a question is best answered by fresh video — game season/patch tier '
-      + 'lists, loadouts, reviews, recipes, travel, breaking visual topics — and search Bilibili with find. '
+      + 'lists, loadouts, reviews, recipes, travel, breaking visual topics — and search Bilibili + Douyin with find. '
       + 'Not for a static screenshot, pure audio, or a live stream. Pick one command: '
-      + 'find (Bilibili search; scope:library searches the indexed library; a url resolves title/cover/duration), '
+      + 'find (Bilibili + Douyin search by default; scope bilibili/douyin restricts, scope:library searches the library; a url resolves title/cover/duration), '
       + 'ingest (index a path/URL; video_ids starts a shortlist and returns job ids; job_id polls; campaign_id advances a campaign), '
       + 'outline (detail:digest is the one-call index with transcript/OCR/keyframes/cuts; overview; map), '
       + 'read (transcript with timestamps; compare packs 2-10 videos), '
@@ -3398,12 +3408,12 @@ function guardWrite(req, res) {
         command: {
           type: 'string',
           enum: ['find', 'ingest', 'outline', 'read', 'evidence', 'frames', 'perceive', 'admin'],
-          description: 'What to do. find: Bilibili search, library search (scope library), or resolve a URL. ingest: index a path/URL, start a shortlist (video_ids), poll a job (job_id) or a campaign (campaign_id). outline: one-call index (detail digest), overview, or map. read: transcript or compare. evidence: a timestamp plus its text. frames: pixels. perceive: motion numbers. admin: list/export/ocr-index/account (Bilibili)/douyin (Douyin account)/doctor.',
+          description: 'What to do. find: Bilibili + Douyin search by default, library search (scope library), or resolve a URL. ingest: index a path/URL, start a shortlist (video_ids), poll a job (job_id) or a campaign (campaign_id). outline: one-call index (detail digest), overview, or map. read: transcript or compare. evidence: a timestamp plus its text. frames: pixels. perceive: motion numbers. admin: list/export/ocr-index/account (Bilibili)/douyin (Douyin account)/doctor.',
         },
         scope: {
           type: 'string',
-          enum: ['bilibili', 'library', 'transcript', 'compare'],
-          description: 'find: bilibili (default) or library. read: transcript (default) or compare.',
+          enum: ['all', 'bilibili', 'douyin', 'library', 'transcript', 'compare'],
+          description: 'find: all (default; Bilibili + Douyin), bilibili, douyin, or library. read: transcript (default) or compare.',
         },
         detail: {
           type: 'string',

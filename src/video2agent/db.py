@@ -10,7 +10,7 @@ from uuid import uuid4
 from .text import tokens_for_search
 from .util import now_iso, pid_alive, stable_id
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = r"""
 PRAGMA journal_mode=WAL;
@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS videos (
   analysis_version TEXT NOT NULL DEFAULT '1',
   meta_json TEXT,
   warnings_json TEXT,
+  source_size INTEGER,
+  source_mtime_ns INTEGER,
+  media_released_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -180,7 +183,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state, created_at);
 VIDEO_FIELDS = [
     "id", "source_kind", "source_uri", "source_path", "sha256", "title", "duration_ms",
     "width", "height", "fps", "language", "platform", "status", "analysis_version",
-    "meta_json", "warnings_json", "created_at", "updated_at",
+    "meta_json", "warnings_json", "source_size", "source_mtime_ns",
+    "media_released_at", "created_at", "updated_at",
 ]
 
 
@@ -238,6 +242,8 @@ class Database:
             "videos": {
                 "meta_json": "TEXT", "warnings_json": "TEXT", "analysis_version": "TEXT NOT NULL DEFAULT '1'",
                 "status": "TEXT NOT NULL DEFAULT 'new'", "updated_at": "TEXT",
+                "source_size": "INTEGER", "source_mtime_ns": "INTEGER",
+                "media_released_at": "TEXT",
             },
             "jobs": {
                 "options_json": "TEXT", "video_id": "TEXT", "error_code": "TEXT", "error_message": "TEXT",
@@ -361,6 +367,19 @@ class Database:
         self.conn.execute(f"UPDATE videos SET {sets} WHERE id=?", [*fields.values(), video_id])
         if _refresh_fts:
             self._refresh_video_fts(video_id)
+        self.conn.commit()
+
+    def set_media_released(self, video_id: str, released_at: str | None,
+                           warnings_json: str) -> None:
+        """Record that cache files were freed, without refreshing updated_at.
+
+        Expiry is planned from updated_at, so bumping it here made a just-released
+        record look new: it could never be purged or revisited by the policy again.
+        """
+        self.conn.execute(
+            "UPDATE videos SET media_released_at=?, warnings_json=? WHERE id=?",
+            [released_at, warnings_json, video_id],
+        )
         self.conn.commit()
 
     def create_job(self, kind: str, source: str, video_id: str | None = None, options: dict[str, Any] | None = None) -> str:
@@ -613,6 +632,47 @@ class Database:
             r["meta"] = json.loads(r.pop("meta_json") or "{}")
         return rows
 
+    def apply_ocr_reads(self, video_id: str, reads: list[dict[str, Any]]) -> int:
+        """Commit frame status and OCR rows in one transaction.
+
+        A crash between "frame marked read" and "OCR rows inserted" used to leave
+        an index that looked complete but had no searchable text. The caller
+        collects every read first; this is the only write point.
+        """
+        inserted = 0
+        try:
+            for read in reads:
+                pts_ms = int(read.get("pts_ms", 0))
+                sql = "UPDATE frames SET ocr_status=?, text_coverage=?"
+                params: list[Any] = [read.get("ocr_status"), read.get("text_coverage")]
+                if read.get("has_text") is not None:
+                    sql += ", has_text=?"
+                    params.append(1 if read.get("has_text") else 0)
+                sql += " WHERE video_id=? AND pts_ms=?"
+                params.extend([video_id, pts_ms])
+                self.conn.execute(sql, params)
+                for track in read.get("tracks") or []:
+                    cur = self.conn.execute(
+                        "INSERT INTO ocr_tracks (video_id,text,start_ms,end_ms,bbox_json,confidence,stability,change_type) VALUES (?,?,?,?,?,?,?,?)",
+                        [
+                            video_id, track.get("text", ""), int(track.get("start_ms", 0)), int(track.get("end_ms", 0)),
+                            json.dumps(track.get("bbox"), ensure_ascii=False) if track.get("bbox") else None,
+                            track.get("confidence"), track.get("stability"), track.get("change_type", "appear"),
+                        ],
+                    )
+                    tokens = track.get("tokens") or ""
+                    if tokens:
+                        self.conn.execute(
+                            "INSERT INTO ocr_fts (tokens,track_id,video_id) VALUES (?,?,?)",
+                            [tokens, cur.lastrowid, video_id],
+                        )
+                    inserted += 1
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return inserted
+
     def set_frame_ocr(self, video_id: str, pts_ms: int, *, ocr_status: str,
                       text_coverage: float | None, has_text: bool | None = None) -> None:
         """Record an on-demand or explicit index read on the frame row."""
@@ -689,7 +749,8 @@ class Database:
         return rows
 
     def search_segments(self, match_query: str, video_id: str | None = None, limit: int = 20,
-                        video_ids: list[str] | None = None) -> list[dict[str, Any]]:
+                        video_ids: list[str] | None = None,
+                        start_ms: int | None = None, end_ms: int | None = None) -> list[dict[str, Any]]:
         sql = ("SELECT s.*, bm25(segment_fts) AS rank FROM segment_fts "
                "JOIN segments s ON s.id=segment_fts.segment_id WHERE segment_fts MATCH ?")
         params: list[Any] = [match_query]
@@ -701,6 +762,14 @@ class Database:
             # the pool and hid real hits (rank 250 of 251).
             sql += " AND segment_fts.video_id IN (%s)" % ",".join("?" * len(video_ids))
             params.extend(video_ids)
+        if start_ms is not None:
+            # Window filters belong before LIMIT: applying them to the top pool
+            # threw away in-window hits that ranked just below the cap.
+            sql += " AND s.end_ms>=?"
+            params.append(int(start_ms))
+        if end_ms is not None:
+            sql += " AND s.start_ms<=?"
+            params.append(int(end_ms))
         sql += " ORDER BY rank LIMIT ?"
         params.append(limit)
         rows = self.all(sql, params)
@@ -709,7 +778,8 @@ class Database:
         return rows
 
     def search_ocr(self, match_query: str, video_id: str | None = None, limit: int = 20,
-                   video_ids: list[str] | None = None) -> list[dict[str, Any]]:
+                   video_ids: list[str] | None = None,
+                   start_ms: int | None = None, end_ms: int | None = None) -> list[dict[str, Any]]:
         sql = ("SELECT o.*, bm25(ocr_fts) AS rank FROM ocr_fts "
                "JOIN ocr_tracks o ON o.id=ocr_fts.track_id WHERE ocr_fts MATCH ?")
         params: list[Any] = [match_query]
@@ -719,6 +789,12 @@ class Database:
         elif video_ids:
             sql += " AND ocr_fts.video_id IN (%s)" % ",".join("?" * len(video_ids))
             params.extend(video_ids)
+        if start_ms is not None:
+            sql += " AND o.end_ms>=?"
+            params.append(int(start_ms))
+        if end_ms is not None:
+            sql += " AND o.start_ms<=?"
+            params.append(int(end_ms))
         sql += " ORDER BY rank LIMIT ?"
         params.append(limit)
         rows = self.all(sql, params)

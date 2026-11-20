@@ -264,3 +264,88 @@ def discover_bilibili(query: str, cfg: Config, *, limit: int = 8, covers: bool =
     return {"query": query, "platform": "bilibili", "candidates": [], "cover_sheet": None,
             "filters": {"uploader": uploader, "after": after, "before": before, "matched": 0, "dropped": 0},
             "warnings": [{"code": "NO_RESULTS", "message": "No results"}]}
+
+
+def discover_all(query: str, cfg: Config, *, limit: int = 8, covers: bool = True,
+                 uploader: str | None = None, after: str | None = None,
+                 before: str | None = None) -> dict[str, Any]:
+    """Search Bilibili and Douyin, keeping one platform's failure partial.
+
+    The default find is deliberately both platforms. A missing Douyin login or a
+    risk page must not hide usable Bilibili results; every platform failure is a
+    warning attached to the merged payload instead. Both failing is a real error.
+    """
+    target = max(1, min(int(limit), 50))
+    results: dict[str, dict[str, Any]] = {}
+    errors: dict[str, str] = {}
+    try:
+        bili = discover_bilibili(
+            query, cfg, limit=target, covers=covers,
+            uploader=uploader, after=after, before=before,
+        )
+        results["bilibili"] = bili
+    except Exception as exc:  # noqa: BLE001 - one platform must not take down the other
+        errors["bilibili"] = str(getattr(exc, "message", None) or exc)
+    try:
+        from .douyin_search import discover_douyin
+
+        douyin = discover_douyin(
+            query, cfg, limit=target, covers=False,
+            uploader=uploader, after=after, before=before,
+        )
+        results["douyin"] = douyin
+    except Exception as exc:  # noqa: BLE001 - same partial-failure rule
+        errors["douyin"] = str(getattr(exc, "message", None) or exc)
+    if not results:
+        detail = "; ".join(f"{name}: {message}" for name, message in errors.items())
+        raise Video2AgentError(
+            "E_SEARCH",
+            f"Bilibili 和抖音搜索都失败：{detail}",
+            "检查网络；抖音需要登录，先在设置页扫码登录。",
+        )
+    bili_candidates = list((results.get("bilibili") or {}).get("candidates") or [])
+    douyin_candidates = list((results.get("douyin") or {}).get("candidates") or [])
+    merged: list[dict[str, Any]] = []
+    for index in range(max(len(bili_candidates), len(douyin_candidates))):
+        if index < len(bili_candidates):
+            merged.append(bili_candidates[index])
+        if index < len(douyin_candidates):
+            merged.append(douyin_candidates[index])
+    selected = merged[:target]
+    found = {"bilibili": len(bili_candidates), "douyin": len(douyin_candidates)}
+    platforms = {
+        "bilibili": sum(1 for candidate in selected if candidate.get("platform") == "bilibili"),
+        "douyin": sum(1 for candidate in selected if candidate.get("platform") == "douyin"),
+    }
+    warnings: list[dict[str, Any]] = []
+    for name, message in errors.items():
+        warnings.append({
+            "code": "PLATFORM_FAILED",
+            "platform": name,
+            "message": f"{'Bilibili' if name == 'bilibili' else '抖音'}搜索失败：{message}",
+            "remedy": "另一个平台的结果仍可使用；抖音需要先登录。",
+        })
+    for name, result in results.items():
+        for warning in result.get("warnings") or []:
+            if warning.get("code") in ("NO_RESULTS", "LIMIT_CAPPED", "COVERS_UNSUPPORTED"):
+                continue
+            warnings.append({**warning, "platform": name})
+    if not merged:
+        warnings.append({"code": "NO_RESULTS", "message": "No results"})
+    filters = {
+        "uploader": uploader or None,
+        "after": after or None,
+        "before": before or None,
+        "bilibili": (results.get("bilibili") or {}).get("filters"),
+        "douyin": (results.get("douyin") or {}).get("filters"),
+    }
+    return {
+        "query": query,
+        "platform": "all",
+        "platforms": platforms,
+        "found": found,
+        "candidates": selected,
+        "cover_sheet": (results.get("bilibili") or {}).get("cover_sheet"),
+        "filters": filters,
+        "warnings": warnings,
+    }

@@ -65,10 +65,10 @@ try:
     from .storage import (
         cache_policy,
         cached_usage,
-        evict_video,
         plan_cache_purge,
         plan_evictions,
         purge_video,
+        release_media,
     )
 except Exception as _exc:  # pragma: no cover - exercised by the missing-dep test
     _DEP_ERROR = _exc
@@ -82,7 +82,7 @@ except Exception as _exc:  # pragma: no cover - exercised by the missing-dep tes
     ocr_index = None  # type: ignore[assignment]
     ocr_window = None  # type: ignore[assignment]
     resolve_info = search = search_queries = visual_map = None  # type: ignore[assignment]
-    cache_policy = cached_usage = evict_video = plan_cache_purge = plan_evictions = purge_video = None  # type: ignore[assignment]
+    cache_policy = cached_usage = plan_cache_purge = plan_evictions = purge_video = release_media = None  # type: ignore[assignment]
 
 
 def _require_deps() -> None:
@@ -441,7 +441,9 @@ def _dir_size(path: Path) -> int:
 
 
 def _print_discover(data: dict[str, Any]) -> None:
-    print(f"Bilibili · {data.get('query')} · {len(data.get('candidates') or [])} candidates")
+    platform = data.get("platform")
+    label = "Bilibili + 抖音" if platform == "all" else ("抖音" if platform == "douyin" else "Bilibili")
+    print(f"{label} · {data.get('query')} · {len(data.get('candidates') or [])} candidates")
     for i, c in enumerate(data.get("candidates") or [], 1):
         dur = format_duration(c.get("duration_ms")) if c.get("duration_ms") else "?"
         print(f"{i:>2}. {c.get('title')}  ({dur})  {c.get('uploader') or ''}")
@@ -557,8 +559,10 @@ def _make_parser() -> argparse.ArgumentParser:
     bag.add_argument("--status", action="store_true", help="Show whether a login is saved")
     bag.add_argument("--clear", action="store_true", help="Forget the saved login")
 
-    d = cmd("discover", "Find candidate videos on Bilibili")
+    d = cmd("discover", "Find candidate videos on Bilibili or Douyin")
     d.add_argument("query")
+    d.add_argument("--platform", choices=["all", "bilibili", "douyin"], default="all",
+                   help="Search source (default all: Bilibili + Douyin)")
     d.add_argument("--limit", type=int, default=8)
     d.add_argument("--no-covers", action="store_true")
     d.add_argument("--out", default=None, help="Save JSON result")
@@ -727,8 +731,9 @@ def _make_parser() -> argparse.ArgumentParser:
     cmd("stats", "Show DB and disk usage")
     gc = cmd("gc", "Clean temp files, old covers, and optionally cached URL media")
     gc.add_argument("--dry-run", action="store_true")
-    gc.add_argument("--auto", action="store_true", help="Apply the cache policy from settings (expiry and/or capacity cap)")
-    gc.add_argument("--sources", action="store_true", help="Evict cached URL sources/derived data older than the retention window")
+    gc.add_argument("--auto", action="store_true", help="Apply the cache policy from settings (frees media, keeps the index)")
+    gc.add_argument("--purge", action="store_true", help="Delete the selected records completely, including transcript and index (default: free media only)")
+    gc.add_argument("--sources", action="store_true", help="Free cached URL media older than the retention window (index kept)")
     gc.add_argument("--older-than-days", type=int, default=None)
     gc.add_argument("--max-gb", type=float, default=None, help="Evict oldest cached URL videos until media+derived is under this size")
     gc.add_argument("--keep-logs-days", type=int, default=None,
@@ -1021,9 +1026,6 @@ def _ingest_slot(cfg: Any, job_id: str, *, timeout_s: int = 1800, stale_s: int =
             continue
         os.write(fd, f"{os.getpid()} {job_id}".encode("ascii"))
         os.close(fd)
-        if _cancel_marker(cfg, job_id).exists():
-            _mark_canceled(cfg, job_id)
-            raise Video2AgentError("E_CANCELED", "任务已取消", "重新开始即可。")
         break
     stop = threading.Event()
 
@@ -1037,6 +1039,13 @@ def _ingest_slot(cfg: Any, job_id: str, *, timeout_s: int = 1800, stale_s: int =
     beat = threading.Thread(target=_heartbeat, name="vp-ingest-lock", daemon=True)
     beat.start()
     try:
+        # Cancelled in the window between acquiring the lock and starting work:
+        # raise inside the try so the lock is released. Raising before it left
+        # .ingest.lock behind and the next ingest waited the full 180s stale
+        # window for a job that never started.
+        if _cancel_marker(cfg, job_id).exists():
+            _mark_canceled(cfg, job_id)
+            raise Video2AgentError("E_CANCELED", "任务已取消", "重新开始即可。")
         yield
     finally:
         stop.set()
@@ -1533,10 +1542,21 @@ def main(argv: list[str] | None = None) -> int:
             _emit(data, as_json)
             return 0
         if args.command == "discover":
-            from .discover import discover_bilibili
+            if args.platform == "douyin":
+                from .douyin_search import discover_douyin
 
-            data = discover_bilibili(args.query, cfg, limit=args.limit, covers=not args.no_covers,
-                                     uploader=args.uploader, after=args.after, before=args.before)
+                data = discover_douyin(args.query, cfg, limit=args.limit, covers=not args.no_covers,
+                                       uploader=args.uploader, after=args.after, before=args.before)
+            elif args.platform == "bilibili":
+                from .discover import discover_bilibili
+
+                data = discover_bilibili(args.query, cfg, limit=args.limit, covers=not args.no_covers,
+                                         uploader=args.uploader, after=args.after, before=args.before)
+            else:
+                from .discover import discover_all
+
+                data = discover_all(args.query, cfg, limit=args.limit, covers=not args.no_covers,
+                                    uploader=args.uploader, after=args.after, before=args.before)
             # Remember what was offered. Ingest refuses a video from this list until the
             # user chooses (card confirm passes --confirm) — otherwise nothing stops a
             # caller, including a shell command, from indexing the top hit silently.
@@ -2028,13 +2048,18 @@ def main(argv: list[str] | None = None) -> int:
                 retention_days = policy["days"] if policy["expire"] else None
                 max_gb = policy["limit_gb"] if policy["limit_enabled"] else None
                 with Database(cfg.db_path) as db:
-                    plan = plan_cache_purge(cfg, db, older_than_days=retention_days, max_gb=max_gb)
+                    plan = plan_cache_purge(cfg, db, older_than_days=retention_days, max_gb=max_gb,
+                                            include_empty=bool(args.purge))
                     for item in plan:
                         if args.dry_run:
                             evicted.append(item)
                             freed = int(item.get("bytes") or 0)
                         else:
-                            result = purge_video(cfg, db, item["video_id"], reason=item.get("reason", "expiry"))
+                            # Expiry frees disk, not knowledge: the transcript and
+                            # OCR index must stay searchable. --purge is the
+                            # explicit opt-in to delete the record itself.
+                            act = purge_video if args.purge else release_media
+                            result = act(cfg, db, item["video_id"], reason=item.get("reason", "expiry"))
                             evicted.append(result)
                             freed = int(result.get("bytes") or 0) if not result.get("error") else 0
                         removed_bytes += freed
@@ -2050,7 +2075,10 @@ def main(argv: list[str] | None = None) -> int:
                             evicted.append(item)
                             freed = int(item.get("bytes") or 0)
                         else:
-                            result = evict_video(cfg, db, item["video_id"], dry_run=False, reason=item.get("reason", "retention"))
+                            # Same rule as expiry: freeing cache never deletes the
+                            # transcript/OCR index unless --purge was asked for.
+                            act = purge_video if args.purge else release_media
+                            result = act(cfg, db, item["video_id"], reason=item.get("reason", "retention"))
                             evicted.append(result)
                             # files_busy kept the row; nothing was actually freed.
                             freed = int(result.get("bytes") or 0) if not result.get("error") else 0
