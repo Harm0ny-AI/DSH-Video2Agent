@@ -1342,11 +1342,15 @@ def _run_douyin(args: Any, cfg: Any) -> dict[str, Any]:
     action = str(getattr(args, "action", "") or "")
     cookies = cfg.home / "cookies" / "douyin.txt"
     if action == "status":
+        from .douyin_search import login_status
+
+        state = login_status(cfg)
         return {
             "ok": True,
             "platform": "douyin",
-            "logged_in": cookies.is_file(),
-            "cookie_path": str(cookies),
+            "logged_in": state["logged_in"],
+            "reason": state["reason"],
+            "cookie_path": state["cookie_path"],
         }
     if action == "videos":
         target = getattr(args, "url", None) or "https://www.douyin.com/user/self"

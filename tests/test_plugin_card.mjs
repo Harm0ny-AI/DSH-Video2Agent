@@ -424,6 +424,9 @@ if (!deep(bundleSettings.component({ view: 'page' })).includes('单次处理上�
   if (!(settingsText.match(/data-vp-bili/g) || []).length) throw new Error('Bilibili login block markup missing')
   if (!settingsText.includes('抖音登录')) throw new Error('settings page missing the Douyin login block')
   if (!(settingsText.match(/data-vp-douyin/g) || []).length) throw new Error('Douyin login block markup missing')
+  if (!settingsText.includes('抖音搜索')) throw new Error('Douyin search toggle missing')
+  if (!(settingsText.match(/data-vp-douyin-search/g) || []).length) throw new Error('Douyin search toggle markup missing')
+  if (!settingsText.includes('风控严格') || !settingsText.includes('完成')) throw new Error('Douyin search risk helper text missing')
   if (!settingsText.includes('单次处理上限')) throw new Error('process limit setting missing')
   if (!(settingsText.match(/data-vp-process-limit/g) || []).length) throw new Error('process limit input missing')
 }

@@ -182,16 +182,28 @@ def login_status(cfg: Config) -> dict[str, Any]:
     if not path.is_file():
         return {"logged_in": False, "uid": ""}
     uid = ""
+    has_sessdata = False
+    expired = False
+    now = int(time.time())
     try:
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             if line.startswith("#") or not line.strip():
                 continue
             parts = line.split("\t")
-            if len(parts) >= 7 and parts[5] == "DedeUserID":
+            if len(parts) < 7:
+                continue
+            if parts[5] == "DedeUserID":
                 uid = parts[6]
+            if parts[5] == "SESSDATA" and parts[6]:
+                has_sessdata = True
+                try:
+                    if int(parts[4]) > 0 and int(parts[4]) <= now:
+                        expired = True
+                except ValueError:
+                    pass
     except OSError:
         return {"logged_in": False, "uid": ""}
-    return {"logged_in": True, "uid": uid}
+    return {"logged_in": has_sessdata and not expired, "uid": uid}
 
 
 def clear_login(cfg: Config) -> dict[str, Any]:

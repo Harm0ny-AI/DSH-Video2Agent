@@ -79,7 +79,7 @@ After Bilibili QR login your agent can read your favorites, history and folders 
 
 The same library is an agent’s video source: the `video2agent` tool plus `/video` lets an agent check the video library before answering and cite exact timecodes and frames. Search Bilibili by keyword, uploader or date; Douyin links and local files share the same index—index once, then search, compare and organize from that library. You ask about your favorites; the agent answers with evidence you can trace back to the source frame.
 
-Douyin search needs a saved login; `find` searches Bilibili + Douyin by default and `scope` restricts it.
+Douyin search is off by default: `find` searches Bilibili only unless the user explicitly names Douyin or the Douyin search setting is enabled. When enabled, a verification must be completed in the Chrome window.
 
 ### 3. Ask one video anything
 
@@ -123,7 +123,7 @@ pip install video2agent
 dsh plugin --profile web add dsh-video2agent
 ```
 
-To try 0.3.2 now, or to work on the source, use the clone route below.
+To try 0.3.3 now, or to work on the source, use the clone route below.
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent

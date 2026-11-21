@@ -115,6 +115,12 @@ class LoginStoreTests(unittest.TestCase):
         self.assertTrue(cleared["cleared"])
         self.assertFalse(bili_auth.login_status(self.cfg)["logged_in"])
 
+    def test_status_without_sessdata_is_not_logged_in(self):
+        path = bili_auth.login_path(self.cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t777\n", encoding="utf-8")
+        self.assertFalse(bili_auth.login_status(self.cfg)["logged_in"])
+
     def test_save_without_sessdata_is_refused(self):
         from video2agent.util import Video2AgentError
 

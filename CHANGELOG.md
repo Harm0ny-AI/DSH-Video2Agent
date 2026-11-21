@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.3 (2026-11-21)
+
+- **Environment status is a capability check, not a file check.** Playwright now
+  only reads green when Chrome/Edge or a Playwright Chromium is actually
+  available; a signed-in Douyin card now requires a live `sessionid` cookie, not
+  just the cookie file; direct CLI and `doctor` resolve FFmpeg through the
+  managed path or the current WinGet package when PATH is stale.
+- **FFmpeg detection follows WinGet updates.** When PATH still points at an old
+  `ffmpeg-8.x` directory after a WinGet package update, the environment card now
+  locates `Gyan.FFmpeg` under the WinGet package directory, verifies ffprobe, and
+  records the path for the CLI. This prevents a false red "FFmpeg 未安装" while
+  ffmpeg 9.0.2 is installed.
+- **Douyin search is opt-in.** `find` now searches Bilibili only by default.
+  Douyin is searched only when the user explicitly names the Douyin platform
+  (`scope:"douyin"`) or enables the new **抖音搜索** setting. The setting is off
+  by default; the helper text warns that Douyin search is strictly risk-controlled
+  and that a verification must be completed in the Chrome window.
+
 ## 0.3.2 (2026-11-21)
 
 - **No forced Douyin cooldown.** The client no longer writes a ten-minute local

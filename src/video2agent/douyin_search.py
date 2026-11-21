@@ -29,6 +29,32 @@ _PAGE_SIZE = 20
 _MAX_RESULTS = 50
 
 
+_LOGIN_COOKIE_NAMES = ("sessionid", "sessionid_ss")
+
+
+def login_status(cfg: Config) -> dict[str, Any]:
+    """File + session-cookie presence + expiry; never a network call.
+
+    The Host settings card uses the same rule, so a stale cookie cannot show
+    green in the UI and red in the CLI.
+    """
+    path = Path(cfg.home) / "cookies" / "douyin.txt"
+    if not path.is_file():
+        return {"logged_in": False, "reason": "missing", "cookie_path": str(path)}
+    jar = MozillaCookieJar(str(path))
+    try:
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except Exception:
+        return {"logged_in": False, "reason": "unreadable", "cookie_path": str(path)}
+    login = [c for c in jar if "douyin.com" in c.domain and c.name in _LOGIN_COOKIE_NAMES and c.value]
+    if not login:
+        return {"logged_in": False, "reason": "missing_session", "cookie_path": str(path)}
+    now = time.time()
+    if all(c.expires is not None and c.expires > 0 and c.expires <= now for c in login):
+        return {"logged_in": False, "reason": "expired", "cookie_path": str(path)}
+    return {"logged_in": True, "reason": "cookie", "cookie_path": str(path)}
+
+
 def _cookies(cfg: Config) -> tuple[str, dict[str, str]]:
     path = Path(cfg.home) / "cookies" / "douyin.txt"
     if not path.is_file():
@@ -50,11 +76,14 @@ def _cookies(cfg: Config) -> tuple[str, dict[str, str]]:
     for cookie in jar:
         if "douyin.com" in cookie.domain and cookie.value:
             values[cookie.name] = cookie.value
-    if not values:
+    state = login_status(cfg)
+    if not state["logged_in"]:
+        reason = state.get("reason")
+        message = "抖音登录已过期" if reason == "expired" else "抖音登录状态为空"
         raise Video2AgentError(
             "E_DOUYIN_LOGIN",
-            "抖音登录状态为空",
-            "先在设置页扫码登录抖音，或运行 video2agent douyin login。",
+            message,
+            "重新运行 video2agent douyin login，或在设置页扫码登录抖音。",
         )
     return "; ".join(f"{key}={value}" for key, value in values.items()), values
 

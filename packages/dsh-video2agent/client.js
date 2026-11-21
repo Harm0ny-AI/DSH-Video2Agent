@@ -3018,6 +3018,14 @@ window.__ModuleLoader__.load({
           h('span', {}, '显示处理卡片'),
           h('input', { type: 'checkbox', checked: !!draft.enabled, onChange: (e) => updateUi({ enabled: e.target.checked }) })
         ),
+        h('div', { 'data-vp-settings-row': '', 'data-vp-douyin-search': '', style: { flexDirection: 'column', alignItems: 'stretch', gap: '6px' } },
+          h('label', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', cursor: 'pointer' } },
+            h('span', {}, '抖音搜索'),
+            h('input', { type: 'checkbox', checked: draft.douyinSearch === true, onChange: (e) => updateUi({ douyinSearch: e.target.checked }) })
+          ),
+          h('div', { 'data-vp-muted': '', style: { fontSize: '11px' } },
+            '默认关闭。抖音平台搜索风控严格；开启后若遇到验证，需要你在 Chrome 窗口完成。')
+        ),
         h('label', { 'data-vp-settings-row': '' },
           h('span', {}, '主题色'),
           h('div', { 'data-vp-swatches': '' },

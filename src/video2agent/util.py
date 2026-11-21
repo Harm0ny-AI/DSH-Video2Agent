@@ -227,8 +227,59 @@ def read_json(path: str | Path, default: Any = None) -> Any:
         return default
 
 
+def _video2agent_home() -> Path:
+    raw = os.environ.get("VIDEO2AGENT_HOME")
+    return Path(raw) if raw else Path.home() / ".video2agent"
+
+
+def _managed_tool_path(name: str) -> str | None:
+    if name not in FFMPEG_TOOLS:
+        return None
+    try:
+        data = json.loads((_video2agent_home() / "tools" / "ffmpeg.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    value = data.get(name) if isinstance(data, dict) else None
+    return str(value) if value and Path(str(value)).is_file() else None
+
+
+def _winget_tool_path(name: str) -> str | None:
+    if sys.platform != "win32" or name not in FFMPEG_TOOLS:
+        return None
+    root = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    packages = root / "Microsoft" / "WinGet" / "Packages"
+    if not packages.is_dir():
+        return None
+    wanted = name + ".exe"
+    try:
+        candidates = sorted(
+            (p for p in packages.iterdir() if "ffmpeg" in p.name.lower()),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    for package in candidates:
+        for path in package.rglob(wanted):
+            if path.is_file():
+                return str(path)
+    return None
+
+
 def which(name: str) -> str | None:
+    if name in FFMPEG_TOOLS:
+        managed = _managed_tool_path(name)
+        if managed:
+            return managed
+        found = shutil.which(name)
+        if found:
+            return found
+        # WinGet upgrades can leave a stale PATH entry (ffmpeg-8.x) while the
+        # current package lives under WinGet/Packages/Gyan.FFmpeg-*/bin.
+        return _winget_tool_path(name)
     return shutil.which(name)
+
+
 
 
 FFMPEG_TOOLS = ("ffmpeg", "ffprobe")

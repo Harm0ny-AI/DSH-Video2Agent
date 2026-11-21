@@ -63,6 +63,7 @@ function compareVersions(a, b) {
 export const Config = Schema
   ? Schema.object({
     enabled: Schema.boolean().default(true).description('Show the Video2Agent batch table above the composer.'),
+douyinSearch: Schema.boolean().default(false).description('Enable Douyin keyword search by default. Off means find searches Bilibili only unless the user explicitly asks for Douyin.'),
     accentColor: Schema.string().pattern(/^#[0-9a-fA-F]{6}$/).default('#0a84ff').description('Accent colour for Video2Agent surfaces (#rrggbb).'),
     processLimit: Schema.natural().min(1).max(10).default(10).description('Maximum videos the card may process in one run (1-10).'),
     cacheTtlMs: Schema.natural().min(60000).default(86400000).description('How long a link preview is reused.'),
@@ -196,7 +197,7 @@ const ADMIN_WRITE_ACTIONS = new Set(['ocr-index', 'export', 'account', 'douyin']
 // disabling or removing the plugin leaves no routing rule behind.
 const HARD_ROUTING_PROMPT = `## Video2Agent — check video before a web search
 
-Before you run a web search (web_search, or answering from memory), first call video2agent find once with a concrete query. If the user named a specific site/source, follow that; if the user gave a Bilibili or Douyin link/video, process that video directly. find searches Bilibili and Douyin by default; a saved Douyin login is required for Douyin results. Use scope:"bilibili" or scope:"douyin" to restrict, and a Douyin URL still resolves directly.
+Before you run a web search (web_search, or answering from memory), first call video2agent find once with a concrete query. If the user named a specific site/source, follow that; if the user gave a Bilibili or Douyin link/video, process that video directly. find searches Bilibili by default. Douyin search is opt-in: use scope:"douyin" whenever the user explicitly asks for Douyin or a Douyin creator; a no-scope find includes Douyin only when the user has enabled the Douyin search setting. A saved Douyin login is required for Douyin results, and a Douyin URL still resolves directly.
 
 If the question names a Douyin creator or asks for their videos, and find reports that Douyin login, verification or risk control is required, say so and stop for a login/check; do not silently replace it with a web search. Web search usually cannot see a small Douyin creator.
 
@@ -435,6 +436,7 @@ function sanitizeUiSettings(raw) {
   }
   return {
     enabled: source.enabled !== false,
+    douyinSearch: source.douyinSearch === true,
     cacheTtlMs: number(source.cacheTtlMs, 24 * 60 * 60 * 1000, 60 * 1000, 30 * 24 * 60 * 60 * 1000),
     cacheExpire: source.cacheExpire !== false,
     cacheDays: number(source.cacheDays, 7, 1, 365),
@@ -676,6 +678,8 @@ function commandArgs(args) {
     const discover = ['discover', String(args.query), '--limit', String(clampInt(args.limit, 8, 1, 50))]
     if (args.scope === 'douyin') discover.push('--platform', 'douyin')
     else if (args.scope === 'bilibili') discover.push('--platform', 'bilibili')
+    else if (args.scope === 'all') discover.push('--platform', 'all')
+    else discover.push('--platform', readMergedSettings().douyinSearch === true ? 'all' : 'bilibili')
     // Narrowing a broad search is how "this creator's last three videos" works;
     // the filters go before --json so the flag order stays conventional.
     if (args.uploader) discover.push('--uploader', String(args.uploader))
@@ -1242,13 +1246,79 @@ export function apply(ctx, config) {
     return { ok: false, version: '', command: '', prefix: [], tooOld: false }
   }
 
+  function findWingetFfmpeg() {
+    if (process.platform !== 'win32') return null
+    const root = path.join(process.env.LOCALAPPDATA || os.homedir(), 'Microsoft', 'WinGet', 'Packages')
+    let packages = []
+    try {
+      packages = fs.readdirSync(root)
+        .filter((name) => /ffmpeg/i.test(name))
+        .sort()
+        .reverse()
+    } catch { return null }
+    const walk = (dir, depth, out) => {
+      if (depth > 7 || out.length) return
+      let entries = []
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const entry of entries) {
+        if (out.length) return
+        const full = path.join(dir, entry.name)
+        if (entry.isFile() && entry.name.toLowerCase() === 'ffmpeg.exe') out.push(full)
+        else if (entry.isDirectory() && !/cache|temp/i.test(entry.name)) walk(full, depth + 1, out)
+      }
+    }
+    for (const name of packages) {
+      const found = []
+      walk(path.join(root, name), 0, found)
+      if (found.length) {
+        const ffmpeg = found[0]
+        const probe = path.join(path.dirname(ffmpeg), 'ffprobe.exe')
+        return { ffmpeg, ffprobe: fs.existsSync(probe) ? probe : '' }
+      }
+    }
+    return null
+  }
+
   async function detectFfmpeg() {
     const managed = readManagedTools()
+    const envFfmpeg = String(process.env.FFMPEG_BIN || '').trim()
+    const envProbe = String(process.env.FFPROBE_BIN || '').trim()
     const managedFfmpeg = managed.ffmpeg && fs.existsSync(managed.ffmpeg) ? managed.ffmpeg : ''
     const managedProbe = managed.ffprobe && fs.existsSync(managed.ffprobe) ? managed.ffprobe : ''
-    const ffmpeg = await runCommand(managedFfmpeg || 'ffmpeg', ['-version'], 20000)
+    // FFMPEG_BIN/FFPROBE_BIN are the documented manual override; the card must use
+    // the same precedence as the CLI instead of contradicting `doctor`.
+    if (envFfmpeg && !fs.existsSync(envFfmpeg)) {
+      return { ok: false, detail: 'FFMPEG_BIN 指向不存在的文件', managed: false }
+    }
+    if (envProbe && !fs.existsSync(envProbe)) {
+      return { ok: false, detail: 'FFPROBE_BIN 指向不存在的文件', managed: false }
+    }
+    let ffmpegPath = envFfmpeg || managedFfmpeg || 'ffmpeg'
+    let ffprobePath = envProbe || managedProbe || 'ffprobe'
+    let source = envFfmpeg || envProbe ? 'env' : (managedFfmpeg ? 'managed' : 'path')
+    let ffmpeg = await runCommand(ffmpegPath, ['-version'], 20000)
+    if (ffmpeg.code !== 0) {
+      // winget updates can leave a stale PATH entry (e.g. ffmpeg-8.1.1/bin)
+      // while the actual package is under WinGet/Packages/Gyan.FFmpeg-*.
+      const found = findWingetFfmpeg()
+      if (found) {
+        ffmpegPath = found.ffmpeg
+        ffprobePath = found.ffprobe || path.join(path.dirname(found.ffmpeg), 'ffprobe.exe')
+        source = 'winget'
+        saveManagedFfmpeg(ffmpegPath, ffprobePath, source)
+        ffmpeg = await runCommand(ffmpegPath, ['-version'], 20000)
+      }
+    }
     if (ffmpeg.code !== 0) return { ok: false, detail: '未安装', managed: false }
-    const ffprobe = await runCommand(managedProbe || 'ffprobe', ['-version'], 20000)
+    let ffprobe = await runCommand(ffprobePath, ['-version'], 20000)
+    if (ffprobe.code !== 0 && source !== 'env' && !managedProbe) {
+      const found = findWingetFfmpeg()
+      if (found && found.ffprobe) {
+        ffprobePath = found.ffprobe
+        saveManagedFfmpeg(ffmpegPath, ffprobePath, 'winget')
+        ffprobe = await runCommand(ffprobePath, ['-version'], 20000)
+      }
+    }
     const first = String(ffmpeg.out || '').split('\n')[0] || ''
     const ffprobeOk = ffprobe.code === 0
     return {
@@ -1256,10 +1326,10 @@ export function apply(ctx, config) {
       // Say which one is missing: "ffmpeg found, ffprobe missing" is a different
       // fix (same package) from "nothing installed".
       detail: ffprobeOk
-        ? (managedFfmpeg ? '插件安装 · ' : '') + first.slice(0, 120)
+        ? (source === 'managed' || source === 'winget' ? '插件发现 · ' : (source === 'env' ? '环境变量 · ' : '')) + first.slice(0, 120)
         : 'ffmpeg 已找到，但 ffprobe 缺失',
-      managed: !!managedFfmpeg,
-      path: managedFfmpeg,
+      managed: source === 'managed' || source === 'winget',
+      path: ffmpegPath,
     }
   }
 
@@ -1321,6 +1391,41 @@ export function apply(ctx, config) {
     }
   }
 
+  async function detectPlaywrightBrowser(interpreter) {
+    // A Python package alone is not usable. Prefer the user's Chrome/Edge, then
+    // ask Playwright itself for the Chromium executable it expects. The directory
+    // scan is only a fallback for an old CLI that cannot answer the probe; it
+    // never treats headless_shell as a visible-window runtime.
+    const roots = [
+      process.env.PLAYWRIGHT_BROWSERS_PATH,
+      path.join(process.env.LOCALAPPDATA || '', 'ms-playwright'),
+      path.join(os.homedir(), '.cache', 'ms-playwright'),
+      path.join(os.homedir(), 'Library', 'Caches', 'ms-playwright'),
+    ].filter((root) => root && fs.existsSync(root))
+    if (interpreter) {
+      const code = 'from playwright.sync_api import sync_playwright\np = sync_playwright().start()\ntry:\n    print(p.chromium.executable_path)\nfinally:\n    p.stop()'
+      const probe = await runCommand(interpreter, ['-c', code], 20000)
+      const executable = String(probe.out || '').trim().split('\n').pop() || ''
+      if (probe.code === 0 && executable && fs.existsSync(executable)) return true
+    }
+    const names = process.platform === 'win32'
+      ? ['chrome-win/chrome.exe']
+      : process.platform === 'darwin'
+        ? ['chrome-mac/Chromium.app/Contents/MacOS/Chromium']
+        : ['chrome-linux/chrome', 'chrome-linux64/chrome']
+    for (const root of roots) {
+      let entries = []
+      try { entries = fs.readdirSync(root, { withFileTypes: true }) } catch { continue }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || !/^chromium/i.test(entry.name)) continue
+        for (const suffix of names) {
+          try { if (fs.existsSync(path.join(root, entry.name, suffix))) return true } catch {}
+        }
+      }
+    }
+    return false
+  }
+
   async function detectBrowser(python, cli) {
     // Ask the CLI itself first. The CLI may be a console script from another
     // interpreter (here: anaconda 3.12) while `py -3` on PATH is a Windows Store
@@ -1332,10 +1437,15 @@ export function apply(ctx, config) {
         const data = JSON.parse(String(doctor.out || '').trim() || '{}')
         const check = (data.checks || []).find((item) => item && item.name === 'browser')
         if (check && typeof check.ok === 'boolean') {
+          let runtime = check.ok
+          const interpreter = data.python && data.python.executable ? String(data.python.executable) : (python && python.command ? String(python.command) : '')
+          if (runtime) runtime = (await detectSystemBrowser()) || (await detectPlaywrightBrowser(interpreter))
           return {
-            ok: check.ok,
+            ok: check.ok && runtime,
             supported: true,
-            detail: String(check.detail || (check.ok ? '已安装' : '未安装')),
+            detail: check.ok
+              ? (runtime ? String(check.detail || '已安装') : 'Playwright 已装，但没有可启动的浏览器')
+              : String(check.detail || '未安装'),
             version: (String(check.detail || '').match(/(\d+\.\d+\.\d+)/) || [])[1] || '',
             interpreter: data.python && data.python.executable ? String(data.python.executable) : '',
             python_version: data.python && data.python.version ? String(data.python.version) : '',
@@ -1553,7 +1663,7 @@ export function apply(ctx, config) {
       try { if (fs.existsSync(candidate)) return true } catch {}
     }
     if (process.platform !== 'win32' && process.platform !== 'darwin') {
-      for (const command of ['google-chrome', 'chromium', 'chromium-browser', 'microsoft-edge']) {
+      for (const command of ['google-chrome', 'microsoft-edge']) {
         const probe = await runCommand(command, ['--version'], 15000)
         if (probe.code === 0) return true
       }
@@ -1863,7 +1973,7 @@ export function apply(ctx, config) {
             const raw = readRawUiSettings()
             const clean = sanitizeUiSettings({ ...raw, ...incoming })
             const next = { ...raw }
-            for (const key of ['enabled', 'cacheTtlMs', 'cacheExpire', 'cacheDays', 'cacheLimitEnabled', 'cacheLimitGb', 'processLimit', 'accentColor', 'cookiesPath']) {
+            for (const key of ['enabled', 'douyinSearch', 'cacheTtlMs', 'cacheExpire', 'cacheDays', 'cacheLimitEnabled', 'cacheLimitGb', 'processLimit', 'accentColor', 'cookiesPath']) {
               if (key in incoming || key in raw) next[key] = clean[key]
             }
             writeUiSettings(next)
@@ -2331,14 +2441,30 @@ export function apply(ctx, config) {
     const readAccount = () => {
       try { return JSON.parse(fs.readFileSync(accountPath(), 'utf8')) } catch { return null }
     }
-    const loggedIn = () => { try { return fs.existsSync(cookiePath()) } catch { return false } }
+    const loginCookiePresent = () => {
+      try {
+        const raw = fs.readFileSync(cookiePath(), 'utf8')
+        const now = Math.floor(Date.now() / 1000)
+        for (let line of raw.split(/\r?\n/)) {
+          if (line.startsWith('#HttpOnly_')) line = line.slice('#HttpOnly_'.length)
+          else if (!line || line.startsWith('#')) continue
+          const parts = line.split('\t')
+          if (parts.length < 7) continue
+          const name = parts[5]
+          const expires = Number(parts[4]) || 0
+          if ((name === 'sessionid' || name === 'sessionid_ss') && (expires <= 0 || expires > now)) return true
+        }
+      } catch {}
+      return false
+    }
+    const loggedIn = () => loginCookiePresent()
     const snapshot = () => {
       const current = DOUYIN_LOGIN_STATE
       if (current && current.state === 'waiting') {
         return { ok: true, state: 'waiting', stage: readStage(), logged_in: loggedIn(), started_at: current.startedAt }
       }
       if (current && current.state === 'ready') {
-        return { ok: true, state: 'ready', logged_in: true, account: current.account || readAccount() }
+        return { ok: true, state: 'ready', logged_in: loggedIn(), account: current.account || readAccount() }
       }
       if (current && current.state === 'failed') {
         return { ok: true, state: 'failed', logged_in: loggedIn(), error: current.error || '登录失败' }
@@ -3300,6 +3426,7 @@ function guardWrite(req, res) {
   __test.installFfmpeg = installFfmpeg
   __test.managedToolEnv = managedToolEnv
   __test.readManagedTools = readManagedTools
+  __test.detectFfmpeg = detectFfmpeg
   __test.detectCli = detectCli
   __test.saveManagedCli = saveManagedCli
   __test.cliCommand = cliCommand
@@ -3598,7 +3725,7 @@ function guardWrite(req, res) {
       + '"video". Also use it when a question is best answered by fresh video — game season/patch tier '
       + 'lists, loadouts, reviews, recipes, travel, breaking visual topics — and search Bilibili + Douyin with find. '
       + 'Not for a static screenshot, pure audio, or a live stream. Pick one command: '
-      + 'find (Bilibili + Douyin search by default; scope bilibili/douyin restricts, scope:library searches the library; a url resolves title/cover/duration), '
+      + 'find (Bilibili by default; scope:"douyin" for Douyin, or when the Douyin search setting is enabled; scope:library searches the library; a url resolves title/cover/duration), '
       + 'ingest (index a path/URL; video_ids starts a shortlist and returns job ids; job_id polls; campaign_id advances a campaign), '
       + 'outline (detail:digest is the one-call index with transcript/OCR/keyframes/cuts; overview; map), '
       + 'read (transcript with timestamps; compare packs 2-10 videos), '
@@ -3615,12 +3742,12 @@ function guardWrite(req, res) {
         command: {
           type: 'string',
           enum: ['find', 'ingest', 'outline', 'read', 'evidence', 'frames', 'perceive', 'admin'],
-          description: 'What to do. find: Bilibili + Douyin search by default, library search (scope library), or resolve a URL. ingest: index a path/URL, start a shortlist (video_ids), poll a job (job_id) or a campaign (campaign_id). outline: one-call index (detail digest), overview, or map. read: transcript or compare. evidence: a timestamp plus its text. frames: pixels. perceive: motion numbers. admin: list/export/ocr-index/account (Bilibili)/douyin (Douyin account)/doctor.',
+          description: 'What to do. find: Bilibili search by default; Douyin only with scope:"douyin" or when the Douyin search setting is enabled; library search (scope library), or resolve a URL. ingest: index a path/URL, start a shortlist (video_ids), poll a job (job_id) or a campaign (campaign_id). outline: one-call index (detail digest), overview, or map. read: transcript or compare. evidence: a timestamp plus its text. frames: pixels. perceive: motion numbers. admin: list/export/ocr-index/account (Bilibili)/douyin (Douyin account)/doctor.',
         },
         scope: {
           type: 'string',
           enum: ['all', 'bilibili', 'douyin', 'library', 'transcript', 'compare'],
-          description: 'find: all (default; Bilibili + Douyin), bilibili, douyin, or library. read: transcript (default) or compare.',
+          description: 'find: omit for the configured default (Bilibili unless the Douyin search setting is on), bilibili, douyin (only when the user explicitly asks for Douyin), all (both), or library. read: transcript (default) or compare.',
         },
         detail: {
           type: 'string',

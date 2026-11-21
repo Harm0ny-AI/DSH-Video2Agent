@@ -42,7 +42,7 @@ asks for it.
 
 | command | returns | use when |
 |---|---|---|
-| `find` | Bilibili + Douyin candidates | find a video; both by default, `scope:"bilibili"`/`"douyin"` restrict, library search; `url` resolves one link |
+| `find` | Bilibili candidates (Douyin opt-in) | find a video; Douyin with `scope:"douyin"` or the setting; library search; `url` resolves one link |
 | `ingest` | job id(s) | index a path/URL; `video_ids` starts the selected shortlist; `job_id` polls; `campaign_id` advances a campaign |
 | `outline` | one-call index: transcript/OCR lines, keyframes, cuts, coverage (`detail:"digest"`), metadata (`overview`), visual map | first look at a video |
 | `read` | compact timestamped transcript, or a 2-10 video comparison | text answer or comparison |
@@ -55,8 +55,8 @@ asks for it.
 
 ### 1. Find
 
-`find` with `query`; Bilibili + Douyin by default, `scope:"bilibili"`/`"douyin"` to restrict
-(Douyin needs login; if it asks, say so, don't web-search.) Filter by uploader/date.
+`find` with `query`; Bilibili by default. Use `scope:"douyin"` when the user asks for Douyin
+or Douyin creator (login needed; if challenged, say so, don't web-search). Filter by uploader/date.
 The reply is for you, not a table: read the metadata and call `ingest` with the ids you actually
 recommend; everything you will analyze goes in `default_selected` (only those
 start, `video_ids` merely lists candidates) plus `primary`. Over `processLimit`

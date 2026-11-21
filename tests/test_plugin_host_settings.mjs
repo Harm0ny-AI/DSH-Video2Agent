@@ -46,6 +46,19 @@ assert.ok(routes.has('/api/video2agent/setup'), 'env-check/setup route missing')
 assert.ok(routes.has('/api/video2agent/douyin-login/status'), 'Douyin login status route missing')
 assert.ok(routes.has('/api/video2agent/douyin-login/start'), 'Douyin login start route missing')
 assert.ok(routes.has('/api/video2agent/douyin-login/clear'), 'Douyin login clear route missing')
+process.env.FFMPEG_BIN = path.join(home, 'missing-ffmpeg.exe')
+const badEnvFfmpeg = await __test.detectFfmpeg()
+assert.equal(badEnvFfmpeg.ok, false, 'a bad FFMPEG_BIN must not be silently ignored')
+assert.match(badEnvFfmpeg.detail, /FFMPEG_BIN/, 'the bad override must be named')
+delete process.env.FFMPEG_BIN
+const douyinCookieFile = path.join(home, 'cookies', 'douyin.txt')
+fs.mkdirSync(path.dirname(douyinCookieFile), { recursive: true })
+fs.writeFileSync(douyinCookieFile, '.douyin.com\tTRUE\t/\tFALSE\t' + (Math.floor(Date.now() / 1000) - 60) + '\tsessionid\texpired\n')
+const expiredLogin = await call('GET', undefined, { path: '/api/video2agent/douyin-login/status' })
+assert.equal(JSON.parse(expiredLogin.body).logged_in, false, 'an expired Douyin session cookie must not show as logged in')
+fs.writeFileSync(douyinCookieFile, '.douyin.com\tTRUE\t/\tFALSE\t' + (Math.floor(Date.now() / 1000) + 3600) + '\tsessionid\tfresh\n')
+const freshLogin = await call('GET', undefined, { path: '/api/video2agent/douyin-login/status' })
+assert.equal(JSON.parse(freshLogin.body).logged_in, true, 'a live Douyin session cookie must show as logged in')
 
 function call(method, body, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -91,14 +104,22 @@ assert.match(routingSection.text(), /recording/, 'UI/recording path missing')
 assert.match(routingSection.text(), /Douyin creator/, 'a creator question must still use find')
 assert.match(routingSection.text(), /do not silently replace it with a web search/, 'a Douyin login failure must not silently fall back to web search')
 assert.deepEqual(__test.commandArgs({ command: 'find', query: '一' }),
-  ['discover', '一', '--limit', '8', '--no-covers', '--json'],
-  'Bilibili find must stay single-query')
+  ['discover', '一', '--limit', '8', '--platform', 'bilibili', '--no-covers', '--json'],
+  'Douyin search is off by default, so find must be Bilibili-only')
 assert.deepEqual(__test.commandArgs({ command: 'find', query: '蓝莓', scope: 'douyin' }),
   ['discover', '蓝莓', '--limit', '8', '--platform', 'douyin', '--no-covers', '--json'],
   'Douyin find must select the Douyin discover platform')
 assert.deepEqual(__test.commandArgs({ command: 'find', query: '一', scope: 'bilibili' }),
   ['discover', '一', '--limit', '8', '--platform', 'bilibili', '--no-covers', '--json'],
   'An explicit Bilibili find must not silently search both platforms')
+assert.deepEqual(__test.commandArgs({ command: 'find', query: '一', scope: 'all' }),
+  ['discover', '一', '--limit', '8', '--platform', 'all', '--no-covers', '--json'],
+  'An explicit all-platform find must search both even while the default is off')
+fs.writeFileSync(path.join(home, 'ui-settings.json'), JSON.stringify({ douyinSearch: true }))
+assert.deepEqual(__test.commandArgs({ command: 'find', query: '一' }),
+  ['discover', '一', '--limit', '8', '--platform', 'all', '--no-covers', '--json'],
+  'the Douyin search toggle must let a default find search both platforms')
+fs.writeFileSync(path.join(home, 'ui-settings.json'), '{}')
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'ocr-index' }), false, 'admin ocr-index must not run in the read-only worker')
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'export' }), false)
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'account' }), false)
@@ -117,8 +138,8 @@ assert.equal(__test.workerEligible({ command: 'find' }), true)
 assert.notEqual(__test.discoveryLastPath('session-a'), __test.discoveryLastPath('session-b'), 'discovery candidates must be per session')
 assert.equal(__test.discoveryLastPath('session-a'), __test.discoveryLastPath('session-a'))
 assert.deepEqual(__test.commandArgs({ command: 'find', query: '一' }),
-  ['discover', '一', '--limit', '8', '--no-covers', '--json'],
-  'a single-query find must stay unchanged')
+  ['discover', '一', '--limit', '8', '--platform', 'bilibili', '--no-covers', '--json'],
+  'a single-query find must stay Bilibili-only while Douyin search is off')
 
 const cancelMissing = await call('POST', JSON.stringify({ job_id: 'job_missing_xyz' }), { path: '/api/video2agent/jobs/cancel' })
 assert.equal(cancelMissing.status, 404, 'cancel must not create a marker for a missing job')
@@ -192,6 +213,7 @@ const noHost = await call('GET', undefined, { headers: { host: '' } })
 assert.equal(noHost.status, 403, 'a request without Host must not read settings')
 assert.deepEqual(JSON.parse(initial.body), {
   enabled: true,
+  douyinSearch: false,
   cacheTtlMs: 86400000,
   cacheExpire: true,
   cacheDays: 7,
@@ -213,6 +235,7 @@ const saved = await call('POST', JSON.stringify({ enabled: false, cacheTtlMs: 36
 assert.equal(saved.status, 200)
 assert.deepEqual(JSON.parse(saved.body), {
   enabled: false,
+  douyinSearch: false,
   cacheTtlMs: 3600000,
   cacheExpire: true,
   cacheDays: 7,
@@ -222,6 +245,10 @@ assert.deepEqual(JSON.parse(saved.body), {
   cookiesPath: '',
   processLimit: 10,
 })
+const douyinOn = await call('POST', JSON.stringify({ douyinSearch: true }))
+assert.equal(JSON.parse(douyinOn.body).douyinSearch, true, 'the Douyin search toggle must persist')
+const douyinOff = await call('POST', JSON.stringify({ douyinSearch: false }))
+assert.equal(JSON.parse(douyinOff.body).douyinSearch, false, 'the Douyin search toggle must turn off')
 const rawSaved = JSON.parse(fs.readFileSync(path.join(home, 'ui-settings.json'), 'utf8'))
 assert.equal(rawSaved.cacheTtlMs, 3600000)
 assert.equal(routingSection.text(), '', 'a disabled plugin (enabled:false) must publish no routing rule')

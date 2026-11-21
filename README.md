@@ -79,7 +79,7 @@ B 站扫码登录后，Agent 能读你的收藏夹、历史、文件夹（只读
 
 同一份视频库，也是 Agent 的信息源：`video2agent` 工具 + `/video` 命令，让 Agent 回答前先查视频库，引用具体时间码和画面。B 站按关键词、UP 主、发布时间找片；抖音链接、本地文件走同一套索引；一次入库，之后搜索、对比、整理都直接查这份内容。你问的是收藏夹，Agent 拿到的是能回原片核对的证据。
 
-抖音搜索需要已登录账号；`find` 默认 B 站 + 抖音，可用 `scope` 限定单平台。
+抖音搜索默认关闭；`find` 默认只搜 B 站，只有用户明确指定抖音平台，或开启设置里的「抖音搜索」后才搜索。开启后遇到验证，需要你在 Chrome 窗口完成。
 
 ### 3. 一条视频，问到底
 
@@ -125,7 +125,7 @@ pip install video2agent
 dsh plugin --profile web add dsh-video2agent
 ```
 
-想先试 0.3.2，或者参与开发，走下面的源码方式。
+想先试 0.3.3，或者参与开发，走下面的源码方式。
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent

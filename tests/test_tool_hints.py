@@ -47,7 +47,9 @@ class InstallHintTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "E_TOOL_MISSING")
 
     def test_require_tool_names_the_ffmpeg_install_command(self):
-        with patch("video2agent.util.shutil.which", return_value=None):
+        with patch("video2agent.util.shutil.which", return_value=None), \
+                patch("video2agent.util._managed_tool_path", return_value=None), \
+                patch("video2agent.util._winget_tool_path", return_value=None):
             with patch("video2agent.util.sys.platform", "win32"):
                 with self.assertRaises(Video2AgentError) as ctx:
                     require_tool("ffmpeg")
