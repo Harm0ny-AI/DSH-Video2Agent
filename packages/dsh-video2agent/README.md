@@ -31,13 +31,11 @@ dsh plugin --profile web add dsh-video2agent   # npm
 
 Requires Python 3.11+ and FFmpeg. The plugin settings page has an **环境检查**
 card that reports what is missing, installs each item, and offers one
-**一键安装缺少项** action for CLI, FFmpeg, the optional browser component
-(Douyin login) and OCR.
+**一键安装缺少项** action for CLI, FFmpeg, the optional Playwright extra and OCR.
 
 Local on-screen-text OCR is an optional extra (Python 3.11/3.12 —
 `rapidocr-onnxruntime` has no 3.13 wheel yet). Core search, transcription and
-evidence work without it; cloud OCR does not need it. The browser component is
-also optional: it is only needed for Douyin login/account reads.
+evidence work without it; cloud OCR does not need it. Playwright is also optional: it is only needed for Douyin login/account reads.
 
 The cloud API key is stored per platform: DPAPI on Windows, the login Keychain
 on macOS, and a 0600 file under `$VIDEO2AGENT_HOME/secrets/` on Linux. A

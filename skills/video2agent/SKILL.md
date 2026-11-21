@@ -56,7 +56,7 @@ asks for it.
 ### 1. Find
 
 `find` with `query`; Bilibili + Douyin by default, `scope:"bilibili"`/`"douyin"` to restrict
-(Douyin needs login). Filter with `uploader`, `after`, `before`.
+(Douyin needs login; if it asks, say so, don't web-search.) Filter by uploader/date.
 The reply is for you, not a table: read the metadata and call `ingest` with the ids you actually
 recommend; everything you will analyze goes in `default_selected` (only those
 start, `video_ids` merely lists candidates) plus `primary`. Over `processLimit`

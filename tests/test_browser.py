@@ -141,6 +141,52 @@ class BrowserTargetTests(unittest.TestCase):
 
 
 
+class BrowserHandoffTests(unittest.TestCase):
+    def test_waits_for_user_and_returns_candidates(self):
+        class Page:
+            def wait_for_timeout(self, ms):
+                pass
+
+        candidate = {"video_id": "1"}
+        calls = iter([[],[candidate], [candidate]])
+        result = browser._wait_for_handoff(Page(), lambda: next(calls), lambda: True, 2)
+        self.assertEqual(result, [candidate])
+
+    def test_closed_window_is_a_clear_verify_error(self):
+        class Page:
+            def wait_for_timeout(self, ms):
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        with self.assertRaises(Video2AgentError) as ctx:
+            browser._wait_for_handoff(Page(), lambda: [], lambda: True, 5)
+        self.assertEqual(ctx.exception.code, "E_DOUYIN_VERIFY")
+        self.assertIn("窗口已关闭", ctx.exception.message)
+
+    def test_timeout_is_a_clear_verify_error(self):
+        class Page:
+            def wait_for_timeout(self, ms):
+                pass
+
+        with self.assertRaises(Video2AgentError) as ctx:
+            browser._wait_for_handoff(Page(), lambda: [], lambda: True, 1)
+        self.assertEqual(ctx.exception.code, "E_DOUYIN_VERIFY")
+        self.assertIn("没有完成", ctx.exception.message)
+
+
+class BrowserSearchParseTests(unittest.TestCase):
+    def test_result_card_parses_duration_title_and_uploader(self):
+        card = browser._search_card({
+            "id": "7619596768929484075",
+            "cardText": "05:36\n605\n大学生必须知道的职业小知识 #求职 #大学生\n@哈莫林（创业版）\n1年前",
+            "img": "https://example.com/cover.jpg",
+        })
+        self.assertEqual(card["video_id"], "7619596768929484075")
+        self.assertEqual(card["duration_ms"], 336000)
+        self.assertEqual(card["uploader"], "哈莫林（创业版）")
+        self.assertIn("职业小知识", card["title"])
+        self.assertEqual(card["cover_url"], "https://example.com/cover.jpg")
+
+
 class BrowserVerificationTests(unittest.TestCase):
     """Douyin's slider page must not be mistaken for the login QR."""
 

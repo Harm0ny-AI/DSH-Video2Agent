@@ -24,7 +24,6 @@ _UA = (
 )
 _SEARCH_URL = "https://www.douyin.com/aweme/v1/web/general/search/single/"
 _CACHE_TTL = 5 * 60
-_COOLDOWN_TTL = 10 * 60
 _MAX_PAGES = 3
 _PAGE_SIZE = 20
 _MAX_RESULTS = 50
@@ -83,10 +82,6 @@ def _cache_path(cfg: Config) -> Path:
     return Path(cfg.home) / "cache" / "douyin-search-cache.json"
 
 
-def _cooldown_path(cfg: Config) -> Path:
-    return Path(cfg.home) / "cache" / "douyin-search-cooldown.json"
-
-
 def _cache_key(query: str, target: int, uploader: str | None, after: str | None, before: str | None) -> str:
     raw = json.dumps([query, target, uploader, after, before], ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -125,22 +120,6 @@ def _cache_put(cfg: Config, key: str, result: dict[str, Any]) -> None:
         ordered = sorted(clean.items(), key=lambda item: float(item[1].get("at") or 0), reverse=True)[:50]
         clean = dict(ordered)
     _write_json(_cache_path(cfg), clean)
-
-
-def _cooldown_until(cfg: Config) -> float | None:
-    data = _read_json(_cooldown_path(cfg))
-    try:
-        until = float(data.get("until") or 0)
-    except (TypeError, ValueError):
-        return None
-    return until if until > time.time() else None
-
-
-def _set_cooldown(cfg: Config, reason: str) -> None:
-    _write_json(_cooldown_path(cfg), {
-        "until": time.time() + _COOLDOWN_TTL,
-        "reason": reason[:200],
-    })
 
 
 def _cover(info: dict[str, Any]) -> str:
@@ -308,6 +287,60 @@ def _fetch_page(
     return data
 
 
+def _browser_result(
+    query: str,
+    cfg: Config,
+    *,
+    target: int,
+    uploader: str | None,
+    after: str | None,
+    before: str | None,
+    cache_key: str,
+) -> dict[str, Any]:
+    """Use the logged-in real browser when signed HTTP is challenged."""
+    from .browser import search_videos
+
+    candidates = search_videos(
+        query,
+        cookie_path=Path(cfg.home) / "cookies" / "douyin.txt",
+        limit=target,
+    )
+    kept, report = apply_filters(candidates, uploader=uploader, after=after, before=before)
+    warnings: list[dict[str, Any]] = [{
+        "code": "DOUYIN_BROWSER_FALLBACK",
+        "severity": "info",
+        "message": "签名搜索被风控，已改用登录浏览器取结果。",
+    }]
+    result: dict[str, Any] = {
+        "query": query,
+        "platform": "douyin",
+        "candidates": kept[:target],
+        "cover_sheet": None,
+        "filters": report,
+        "warnings": warnings,
+        "found": len(candidates),
+        "returned": len(kept[:target]),
+        "pages": 1,
+        "has_more": False,
+    }
+    if len(candidates) < target:
+        warnings.append({
+            "code": "BROWSER_LIMIT_CAPPED",
+            "message": f"浏览器只取到 {len(candidates)} 条（请求 {target} 条）",
+            "remedy": "缩小关键词，或稍后用更具体的关键词再搜。",
+        })
+    if candidates and not kept:
+        warnings.append({
+            "code": "FILTER_EMPTY",
+            "message": f"搜索到 {len(candidates)} 条，但没有一条满足 uploader/after/before 条件",
+            "remedy": "放宽日期范围，或去掉 uploader。",
+        })
+    if not candidates:
+        warnings.append({"code": "NO_RESULTS", "message": "No results"})
+    _cache_put(cfg, cache_key, result)
+    return result
+
+
 def discover_douyin(
     query: str,
     cfg: Config,
@@ -321,9 +354,10 @@ def discover_douyin(
     """Search Douyin through the signed web API, without a browser.
 
     The search is paginated for up to three pages so filters are not limited to
-    page one. A successful result is cached for five minutes; a risk block stops
-    further searches for ten minutes. Douyin refuses keyword search to a guest,
-    so the saved login cookie is required.
+    page one. A successful result is cached for five minutes. There is no forced
+    cooldown: a verify/risk block is surfaced immediately so the user can finish
+    the check or log in and retry. Douyin refuses keyword search to a guest, so
+    the saved login cookie is required.
     """
     query = (query or "").strip()
     if not query:
@@ -338,14 +372,6 @@ def discover_douyin(
     if cached is not None:
         cached["cached"] = True
         return cached
-    cooldown = _cooldown_until(cfg)
-    if cooldown is not None:
-        until = datetime.fromtimestamp(cooldown).strftime("%H:%M")
-        raise Video2AgentError(
-            "E_DOUYIN_COOLDOWN",
-            f"抖音搜索刚被风控，冷却到 {until}",
-            "先等冷却结束；不要在冷却期连续重试。",
-        )
     cookie_header, cookies = _cookies(cfg)
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -359,8 +385,6 @@ def discover_douyin(
         try:
             data = _fetch_page(query, cookie_header, cookies, offset=offset, search_id=search_id)
         except Video2AgentError as exc:
-            if exc.code in ("E_DOUYIN_VERIFY", "E_DOUYIN_RISK"):
-                _set_cooldown(cfg, exc.message)
             if candidates and exc.code in ("E_DOUYIN_VERIFY", "E_DOUYIN_RISK"):
                 warnings.append({
                     "code": "PAGINATION_INTERRUPTED",
@@ -369,13 +393,20 @@ def discover_douyin(
                 })
                 interrupted = True
                 break
+            if not candidates and exc.code in ("E_DOUYIN_VERIFY", "E_DOUYIN_RISK"):
+                try:
+                    return _browser_result(
+                        query, cfg, target=target, uploader=uploader,
+                        after=after, before=before, cache_key=key,
+                    )
+                except Video2AgentError:
+                    raise exc
             raise
         pages += 1
         items = data.get("data") or []
         nil = data.get("search_nil_info") or {}
         nil_type = str(nil.get("search_nil_type") or nil.get("search_nil_item") or "")
         if not items and nil_type == "verify_check":
-            _set_cooldown(cfg, "抖音搜索要求人机验证（滑块）")
             if candidates:
                 warnings.append({
                     "code": "PAGINATION_INTERRUPTED",
@@ -384,11 +415,18 @@ def discover_douyin(
                 })
                 interrupted = True
                 break
-            raise Video2AgentError(
+            verify_error = Video2AgentError(
                 "E_DOUYIN_VERIFY",
                 "抖音搜索要求人机验证（滑块），这次搜索被风控拦截",
-                "在浏览器里打开一次抖音搜索并完成验证，或在设置页重新登录抖音后再试；不要连续重试。",
+                "在浏览器里完成一次抖音搜索验证，或在设置页重新登录抖音，然后立即重试。",
             )
+            try:
+                return _browser_result(
+                    query, cfg, target=target, uploader=uploader,
+                    after=after, before=before, cache_key=key,
+                )
+            except Video2AgentError:
+                raise verify_error
         for item in items:
             if not isinstance(item, dict):
                 continue

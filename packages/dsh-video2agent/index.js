@@ -198,6 +198,8 @@ const HARD_ROUTING_PROMPT = `## Video2Agent — check video before a web search
 
 Before you run a web search (web_search, or answering from memory), first call video2agent find once with a concrete query. If the user named a specific site/source, follow that; if the user gave a Bilibili or Douyin link/video, process that video directly. find searches Bilibili and Douyin by default; a saved Douyin login is required for Douyin results. Use scope:"bilibili" or scope:"douyin" to restrict, and a Douyin URL still resolves directly.
 
+If the question names a Douyin creator or asks for their videos, and find reports that Douyin login, verification or risk control is required, say so and stop for a login/check; do not silently replace it with a web search. Web search usually cannot see a small Douyin creator.
+
 When the candidates come back, judge them on title, uploader, duration, view count and match with the question. Pick by quality, not by position; do not take the first N; if the candidates are weak, pick fewer or none instead of filling the batch with poor videos.
 
 If the relevant candidates are not enough, call find again with a different search term and select from the new results too; stop when you have enough to answer the question. If the video side stays thin, stop the video search, fall back to web search or your own knowledge, and say the video side had nothing.
@@ -1299,12 +1301,13 @@ export function apply(ctx, config) {
             supported: true,
             detail: ocr.available ? ('已安装' + (engine ? '（' + engine + '）' : '')) : '未安装',
             engine,
+            version: String(ocr.version || ''),
           }
         }
       } catch {}
     }
     const detail = !python.ok ? '需要 CLI 或 Python' : '可选'
-    if (!python.ok) return { ok: false, supported, detail, engine: '' }
+    if (!python.ok) return { ok: false, supported, detail, engine: '', version: '' }
     const probe = await runCommand(python.command, [
       ...python.prefix, '-c',
       "import importlib.util as u; print('rapidocr' if u.find_spec('rapidocr') else ('legacy' if u.find_spec('rapidocr_onnxruntime') else ''))",
@@ -1319,13 +1322,31 @@ export function apply(ctx, config) {
   }
 
   async function detectBrowser(python, cli) {
-    // The browser is an optional Python extra. Probe the interpreter that runs the
-    // CLI, not a different "python" on PATH; a successful pip install in another
-    // environment is exactly how the settings card used to keep reporting the
-    // dependency as missing.
+    // Ask the CLI itself first. The CLI may be a console script from another
+    // interpreter (here: anaconda 3.12) while `py -3` on PATH is a Windows Store
+    // Python 3.11 without Playwright. Probing "python" then reported a false
+    // "未安装" even though the CLI's environment had the package.
+    if (cli && cli.ok) {
+      const doctor = await runCli(['doctor', '--json'], 30000)
+      try {
+        const data = JSON.parse(String(doctor.out || '').trim() || '{}')
+        const check = (data.checks || []).find((item) => item && item.name === 'browser')
+        if (check && typeof check.ok === 'boolean') {
+          return {
+            ok: check.ok,
+            supported: true,
+            detail: String(check.detail || (check.ok ? '已安装' : '未安装')),
+            version: (String(check.detail || '').match(/(\d+\.\d+\.\d+)/) || [])[1] || '',
+            interpreter: data.python && data.python.executable ? String(data.python.executable) : '',
+            python_version: data.python && data.python.version ? String(data.python.version) : '',
+          }
+        }
+      } catch {}
+    }
+    // No usable CLI doctor (or an older CLI): probe the actual interpreter.
     const interpreter = cliInterpreter() || (python.ok ? python : null)
     if (!interpreter) {
-      return { ok: false, supported: !!(python.ok || cli.ok), detail: '需要 CLI 或 Python' }
+      return { ok: false, supported: !!(python.ok || cli.ok), detail: '需要 CLI 或 Python', interpreter: '', version: '' }
     }
     const probe = await runCommand(interpreter.command, [
       ...(interpreter.prefix || []), '-c',
@@ -1336,6 +1357,9 @@ export function apply(ctx, config) {
       ok,
       supported: true,
       detail: ok ? '已安装' : '未安装',
+      version: '',
+      interpreter: interpreter.command,
+      python_version: python.version || '',
     }
   }
 
@@ -1348,6 +1372,11 @@ export function apply(ctx, config) {
     const ffmpeg = await detectFfmpeg()
     const ocr = await detectOcr(python, cli)
     const browser = await detectBrowser(python, cli)
+    // The CLI may run under a different interpreter than the first `python` on
+    // PATH. Show the engine's real interpreter so the card is not self-contradictory.
+    const runtimePython = browser.interpreter
+      ? { ok: true, command: browser.interpreter, prefix: [], version: browser.python_version || python.version, tooOld: false }
+      : python
     const ffmpegHint = process.platform === 'win32'
       ? 'winget install Gyan.FFmpeg'
       : process.platform === 'darwin' ? 'brew install ffmpeg' : 'sudo apt install ffmpeg'
@@ -1355,7 +1384,7 @@ export function apply(ctx, config) {
       ok: true,
       platform: process.platform,
       home: v2aHomePath(),
-      python: { ok: python.ok, detail: python.version ? 'Python ' + python.version : '未找到', tooOld: !!python.tooOld },
+      python: { ok: runtimePython.ok, detail: runtimePython.version ? 'Python ' + runtimePython.version : '未找到', tooOld: !!runtimePython.tooOld },
       cli: {
         ok: cliOk,
         detail: cliOk ? (cli.detail || '已安装') : '未安装',
@@ -1370,18 +1399,18 @@ export function apply(ctx, config) {
         python: '安装 Python 3.11+：https://www.python.org/downloads/（Windows 可 winget install Python.Python.3.12）',
         cli: 'pip install video2agent',
         ffmpeg: ffmpegHint,
-        browser: 'pip install "video2agent[browser]"（扫码登录所需的浏览器组件）',
+        browser: 'pip install "video2agent[browser]"（Playwright，用于抖音登录/账号读取）',
       },
-      ocr: { ok: ocr.ok, supported: ocr.supported, detail: ocr.detail, engine: ocr.engine },
-      browser: { ok: browser.ok, supported: browser.supported, detail: browser.detail },
+      ocr: { ok: ocr.ok, supported: ocr.supported, detail: ocr.detail, engine: ocr.engine, version: ocr.version || '' },
+      browser: { ok: browser.ok, supported: browser.supported, detail: browser.detail, version: browser.version || '', interpreter: browser.interpreter || "" },
       // Linux installs FFmpeg with sudo, which the plugin cannot run; offer the
       // command instead of a button that always fails.
       canInstall: {
-        cli: python.ok && !cliOk,
-        updateCli: python.ok && cliOutdated,
+        cli: runtimePython.ok && !cliOk,
+        updateCli: runtimePython.ok && cliOutdated,
         ffmpeg: process.platform !== 'linux' && !ffmpeg.ok,
         ocr: (python.ok || cliOk) && ocr.supported && !ocr.ok,
-        browser: (python.ok || !!cliInterpreter()) && browser.supported && !browser.ok,
+        browser: (runtimePython.ok || !!cliInterpreter()) && browser.supported && !browser.ok,
       },
     }
   }
@@ -1535,7 +1564,9 @@ export function apply(ctx, config) {
   async function installBrowser() {
     const before = await setupStatus()
     if (before.browser && before.browser.ok) return { ok: true, already: true, output: '', status: before }
-    const interpreter = cliInterpreter() || await detectPython()
+    const interpreter = (before.browser && before.browser.interpreter)
+      ? { command: before.browser.interpreter, prefix: [] }
+      : (cliInterpreter() || await detectPython())
     if (!interpreter || !interpreter.command) {
       return {
         ok: false,

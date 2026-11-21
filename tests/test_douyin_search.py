@@ -59,7 +59,8 @@ class DouyinSearchTest(unittest.TestCase):
         # an empty list and search_nil_info.search_nil_type="verify_check". The
         # old code called that NO_RESULTS, so a real block looked like a harmless
         # empty search.
-        with self.assertRaises(Video2AgentError) as ctx:
+        with patch("video2agent.browser.search_videos", side_effect=Video2AgentError("E_DOUYIN_VERIFY", "需要验证", "稍后重试")), \
+                self.assertRaises(Video2AgentError) as ctx:
             self._search_with_body({
                 "status_code": 0,
                 "data": [],
@@ -131,7 +132,7 @@ class DouyinSearchTest(unittest.TestCase):
         self.assertEqual(one["candidates"], two["candidates"])
         self.assertTrue(two.get("cached"))
 
-    def test_verify_sets_cooldown(self):
+    def test_verify_is_retryable_without_cooldown(self):
         verify = MagicMock(status_code=200)
         verify.json.return_value = {
             "status_code": 0,
@@ -143,14 +144,48 @@ class DouyinSearchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             cfg = load_config(Path(td))
             with patch("video2agent.douyin_search._cookies", return_value=("s=1", {"UIFID": "u"})), \
-                    patch("video2agent.douyin_search.requests.get", return_value=verify):
+                    patch("video2agent.douyin_search.requests.get", return_value=verify), \
+                    patch("video2agent.browser.search_videos", side_effect=Video2AgentError("E_DOUYIN_VERIFY", "需要验证", "稍后重试")):
                 with self.assertRaises(Video2AgentError) as ctx:
                     discover_douyin("蓝莓", cfg, limit=3)
             self.assertEqual(ctx.exception.code, "E_DOUYIN_VERIFY")
-            with patch("video2agent.douyin_search.requests.get", return_value=success):
-                with self.assertRaises(Video2AgentError) as ctx2:
-                    discover_douyin("蓝莓", cfg, limit=3)
-            self.assertEqual(ctx2.exception.code, "E_DOUYIN_COOLDOWN")
+            with patch("video2agent.douyin_search._cookies", return_value=("s=1", {"UIFID": "u"})), \
+                    patch("video2agent.douyin_search.requests.get", return_value=success):
+                two = discover_douyin("蓝莓", cfg, limit=3)
+            self.assertEqual(two["candidates"], [])
+            self.assertEqual(two["warnings"][0]["code"], "NO_RESULTS")
+
+    def test_verify_falls_back_to_logged_in_browser(self):
+        verify = MagicMock(status_code=200)
+        verify.json.return_value = {
+            "status_code": 0,
+            "data": [],
+            "search_nil_info": {"search_nil_type": "verify_check"},
+        }
+        candidate = {
+            "candidate_id": "douyin_7619596768929484075",
+            "platform": "douyin",
+            "video_id": "7619596768929484075",
+            "url": "https://www.douyin.com/video/7619596768929484075",
+            "title": "蓝莓",
+            "cover_url": "",
+            "duration_ms": 30000,
+            "uploader": "科普作者",
+            "uploader_id": None,
+            "published_at": None,
+            "published_ts": None,
+            "description": "蓝莓",
+            "tags": "",
+            "stats": {},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            cfg = load_config(Path(td))
+            with patch("video2agent.douyin_search._cookies", return_value=("s=1", {"UIFID": "u"})), \
+                    patch("video2agent.douyin_search.requests.get", return_value=verify), \
+                    patch("video2agent.browser.search_videos", return_value=[candidate]):
+                result = discover_douyin("蓝莓", cfg, limit=3)
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["warnings"][0]["code"], "DOUYIN_BROWSER_FALLBACK")
 
     def test_abogus_is_well_formed(self):
         value = ABogus(

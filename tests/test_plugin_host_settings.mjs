@@ -88,6 +88,8 @@ assert.match(routingSection.text(), /check video before a web search/, 'routing 
 assert.match(routingSection.text(), /with a concrete query/, 'single-query rule missing')
 assert.match(routingSection.text(), /different search term/, 'search-again rule missing')
 assert.match(routingSection.text(), /recording/, 'UI/recording path missing')
+assert.match(routingSection.text(), /Douyin creator/, 'a creator question must still use find')
+assert.match(routingSection.text(), /do not silently replace it with a web search/, 'a Douyin login failure must not silently fall back to web search')
 assert.deepEqual(__test.commandArgs({ command: 'find', query: '一' }),
   ['discover', '一', '--limit', '8', '--no-covers', '--json'],
   'Bilibili find must stay single-query')

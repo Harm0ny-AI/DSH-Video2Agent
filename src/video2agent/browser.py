@@ -10,10 +10,12 @@ person would see. It is optional: install the extra with
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .util import Video2AgentError
 
@@ -86,10 +88,16 @@ def _launch(playwright, *, headless: bool = True, offscreen: bool = False):
     last: Exception | None = None
     for channel in ("chrome", "msedge", None):
         try:
+            # Playwright adds --enable-automation by default; drop that flag for
+            # the user's real Chrome/Edge. We still do not bypass any challenge.
+            launch_args = {
+                "headless": headless,
+                "args": list(args),
+                "ignore_default_args": ["--enable-automation"],
+            }
             if channel:
-                return playwright.chromium.launch(
-                    channel=channel, headless=headless, args=list(args))
-            return playwright.chromium.launch(headless=headless, args=list(args))
+                return playwright.chromium.launch(channel=channel, **launch_args)
+            return playwright.chromium.launch(**launch_args)
         except Exception as exc:  # noqa: BLE001 - try the next channel
             last = exc
     raise Video2AgentError(
@@ -227,6 +235,277 @@ def _validate_profile(result: dict[str, Any], *, is_self: bool) -> dict[str, Any
             "检查主页链接，或稍后重试；需要登录的页面请先 douyin login。",
         )
     return result
+
+
+_SEARCH_CARD_RE = re.compile(r"^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})$")
+
+
+def _search_duration_ms(text: str) -> int | None:
+    match = _SEARCH_CARD_RE.match(text.strip())
+    if not match:
+        return None
+    hours = int(match.group(1) or 0)
+    return ((hours * 60 + int(match.group(2))) * 60 + int(match.group(3))) * 1000
+
+
+def _search_card(row: dict[str, Any]) -> dict[str, Any] | None:
+    video_id = str(row.get("id") or "").strip()
+    if not video_id.isdigit():
+        return None
+    lines = [line.strip() for line in str(row.get("cardText") or "").splitlines() if line.strip()]
+    duration_ms = None
+    for line in lines:
+        duration_ms = _search_duration_ms(line)
+        if duration_ms is not None:
+            break
+    uploader = ""
+    uploader_index = -1
+    for index, line in enumerate(lines):
+        if line.startswith("@"):
+            uploader = line[1:].strip()
+            uploader_index = index
+            break
+    title = ""
+    stop = uploader_index if uploader_index >= 0 else len(lines)
+    for line in reversed(lines[:stop]):
+        if _search_duration_ms(line) is not None:
+            continue
+        if line.isdigit() or line in ("合集", "图文") or line.endswith("前"):
+            continue
+        title = line
+        break
+    if not title:
+        return None
+    cover = str(row.get("img") or "").strip()
+    return {
+        "candidate_id": f"douyin_{video_id}",
+        "platform": "douyin",
+        "video_id": video_id,
+        "url": f"https://www.douyin.com/video/{video_id}",
+        "title": title[:200],
+        "cover_url": cover,
+        "duration_ms": duration_ms,
+        "uploader": uploader,
+        "uploader_id": None,
+        "published_at": None,
+        "published_ts": None,
+        "description": title[:300],
+        "tags": "",
+        "stats": {},
+    }
+
+
+def _api_candidate(info: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(info, dict):
+        return None
+    video_id = str(info.get("aweme_id") or "").strip()
+    if not video_id.isdigit():
+        return None
+    author = info.get("author") or {}
+    video = info.get("video") or {}
+    stats = info.get("statistics") or {}
+    title = str(info.get("desc") or "").strip() or f"抖音视频 {video_id}"
+    cover = ""
+    for key in ("cover", "origin_cover", "dynamic_cover"):
+        block = video.get(key) or {}
+        urls = block.get("url_list") or []
+        if urls:
+            cover = str(urls[0])
+            if cover.startswith("//"):
+                cover = "https:" + cover
+            break
+    return {
+        "candidate_id": f"douyin_{video_id}",
+        "platform": "douyin",
+        "video_id": video_id,
+        "url": f"https://www.douyin.com/video/{video_id}",
+        "title": title[:200],
+        "cover_url": cover,
+        "duration_ms": int(video.get("duration") or 0) or None,
+        "uploader": str(author.get("nickname") or ""),
+        "uploader_id": str(author.get("uid") or author.get("sec_uid") or "") or None,
+        "published_at": None,
+        "published_ts": None,
+        "description": title[:300],
+        "tags": "",
+        "stats": {
+            key: stats.get(key)
+            for key in ("play_count", "digg_count", "comment_count", "share_count")
+            if stats.get(key) is not None
+        },
+    }
+
+
+def _is_closed_browser_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return "targetclosed" in name or "target page" in text or "has been closed" in text or "context or browser" in text
+
+
+def _wait_for_handoff(page: Any, collect: Any, page_has_verify: Any, timeout_s: int) -> list[dict[str, Any]]:
+    """Wait for a human to finish the browser check, then return parsed cards."""
+    deadline = time.monotonic() + max(1, int(timeout_s))
+    while time.monotonic() < deadline:
+        try:
+            page.wait_for_timeout(2000)
+        except Exception as exc:
+            if _is_closed_browser_error(exc):
+                raise Video2AgentError(
+                    "E_DOUYIN_VERIFY",
+                    "验证窗口已关闭，这次搜索没有完成",
+                    "重新发起搜索，并在打开的 Chrome 窗口完成验证。",
+                ) from exc
+            raise
+        candidates = collect()
+        if candidates:
+            page.wait_for_timeout(1500)
+            candidates = collect()
+            return candidates
+        if not page_has_verify():
+            # The page may still be loading the post-verification response.
+            page.wait_for_timeout(3000)
+            candidates = collect()
+            if candidates:
+                return candidates
+    raise Video2AgentError(
+        "E_DOUYIN_VERIFY",
+        "抖音搜索需要人机验证，但这次没有完成",
+        "请在打开的 Chrome 窗口完成验证后重试；不会自动绕过验证。",
+    )
+
+
+def search_videos(query: str, *, cookie_path: str | Path | None = None,
+                  limit: int = 8, wait_ms: int = 9000,
+                  verify_timeout_s: int = 180) -> list[dict[str, Any]]:
+    """Search Douyin with the logged-in real browser.
+
+    This is used when the signed endpoint asks for verification. The browser is
+    visible so a person can complete the check; the function waits for the page's
+    own search response, then returns the cards. It never clicks or solves the
+    slider itself. The caller must have a stored login cookie.
+    """
+    store = Path(cookie_path) if cookie_path else None
+    if store is None or not store.is_file():
+        raise Video2AgentError(
+            "E_DOUYIN_LOGIN",
+            "抖音搜索需要登录",
+            "先在设置页扫码登录抖音，再重试。",
+        )
+    sync_playwright = _playwright()
+    url = "https://www.douyin.com/search/" + quote(str(query)) + "?type=video"
+    responses: list[Any] = []
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    verify_seen = False
+
+    def collect() -> list[dict[str, Any]]:
+        nonlocal verify_seen
+        found: list[dict[str, Any]] = []
+        for response in responses:
+            try:
+                if "/general/search/" not in response.url:
+                    continue
+                text = response.text()
+            except Exception:
+                continue
+            start = text.find("{")
+            if start < 0:
+                continue
+            try:
+                data, _ = json.JSONDecoder().raw_decode(text[start:])
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            nil = data.get("search_nil_info") or {}
+            if str(nil.get("search_nil_type") or nil.get("search_nil_item") or "") == "verify_check":
+                verify_seen = True
+            for item in data.get("data") or []:
+                if not isinstance(item, dict):
+                    continue
+                candidate = _api_candidate(item.get("aweme_info") or item)
+                if candidate and candidate["video_id"] not in seen:
+                    seen.add(candidate["video_id"])
+                    found.append(candidate)
+        return found
+
+    def page_has_verify() -> bool:
+        try:
+            body = page.inner_text("body")
+            return any(marker in body for marker in _VERIFY_MARKERS) or "验证码中间页" in page.title()
+        except Exception:
+            return False
+
+    with sync_playwright() as playwright:
+        browser_instance = _launch(playwright, headless=False)
+        try:
+            context = browser_instance.new_context(
+                viewport={"width": 1280, "height": 900}, locale="zh-CN",
+            )
+            cookies = _read_netscape(store)
+            if cookies:
+                context.add_cookies([{
+                    "name": c["name"], "value": c["value"], "domain": c["domain"],
+                    "path": c["path"], "expires": c["expires"] or -1, "secure": c["secure"],
+                } for c in cookies])
+            page = context.new_page()
+            page.on("response", lambda response: responses.append(response) if "/general/search/" in response.url else None)
+            # Use the main Douyin search route. Do not start from /jingxuan:
+            # that is the "抖音精选" PC shell, not the main-site search the user asked for.
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(wait_ms + random.randint(0, 700))
+            candidates = collect()
+            if not candidates and (verify_seen or page_has_verify()):
+                # Hand the verification to the user in a normal, visible window.
+                # No click, drag, OCR or solver code is used here.
+                try:
+                    page.bring_to_front()
+                    cdp = context.new_cdp_session(page)
+                    window = cdp.send("Browser.getWindowForTarget")
+                    cdp.send("Browser.setWindowBounds", {
+                        "windowId": window.get("windowId"),
+                        "bounds": {"left": 120, "top": 90, "width": 1200, "height": 900, "windowState": "normal"},
+                    })
+                except Exception:
+                    pass
+                candidates = _wait_for_handoff(page, collect, page_has_verify, verify_timeout_s)
+                if not candidates:
+                    raise Video2AgentError(
+                        "E_DOUYIN_VERIFY",
+                        "抖音搜索需要人机验证，但这次没有完成",
+                        "请在打开的 Chrome 窗口完成验证后重试；不会自动绕过验证。",
+                    )
+            if not candidates:
+                # Last-resort DOM parse for pages that render links directly.
+                rows = page.evaluate(r"""() => {
+                  const rows = [];
+                  const seen = new Set();
+                  for (const a of document.querySelectorAll('a[href*="/video/"]')) {
+                    const m = (a.href || '').match(/\/video\/(\d+)/);
+                    if (!m || seen.has(m[1])) continue;
+                    seen.add(m[1]);
+                    const card = a.closest('li') || a.closest('div[data-e2e]') || a.parentElement;
+                    rows.push({
+                      id: m[1],
+                      cardText: (card ? card.innerText : a.innerText || '').slice(0, 800),
+                      img: (card && card.querySelector('img')) ? (card.querySelector('img').getAttribute('src') || '') : '',
+                    });
+                    if (rows.length >= 100) break;
+                  }
+                  return rows;
+                }""")
+                for row in rows if isinstance(rows, list) else []:
+                    if not isinstance(row, dict):
+                        continue
+                    candidate = _search_card(row)
+                    if candidate and candidate["video_id"] not in seen:
+                        seen.add(candidate["video_id"])
+                        candidates.append(candidate)
+        finally:
+            browser_instance.close()
+    return candidates[:max(1, int(limit))]
+
+
 
 
 def profile(sec_uid_or_url: str, *, cookie_path: str | Path | None = None,

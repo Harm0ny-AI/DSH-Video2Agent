@@ -2060,10 +2060,10 @@ window.__ModuleLoader__.load({
         // Optional: browser automation (Douyin login) and local OCR. Both are
         // Python extras; the card can install them without a terminal.
         ...(data.cli && data.cli.ok && data.browser
-          ? [{ key: 'browser', label: '浏览器', item: data.browser, text: data.browser.ok ? '已装' : (data.browser.supported ? '未装' : '不支持') }]
+          ? [{ key: 'browser', label: 'Playwright', item: data.browser, text: data.browser.ok ? (data.browser.version || '已装') : (data.browser.supported ? '未装' : '不支持') }]
           : []),
         ...(data.cli && data.cli.ok && data.ocr
-          ? [{ key: 'ocr', label: 'OCR', item: data.ocr, text: data.ocr.ok ? '已装' : (data.ocr.supported ? '未装' : '不支持') }]
+          ? [{ key: 'ocr', label: 'OCR', item: data.ocr, text: data.ocr.ok ? (data.ocr.version || '已装') : (data.ocr.supported ? '未装' : '不支持') }]
           : []),
       ] : []
       const missing = items.filter((entry) => !(entry.item && entry.item.ok))
@@ -2072,8 +2072,14 @@ window.__ModuleLoader__.load({
       // build must offer an update button — otherwise the page cannot fix the
       // exact DPAPI error the user is looking at.
       const updateCli = !!(data && data.canInstall && data.canInstall.updateCli)
-      const canInstallSomething = !!(data && data.canInstall &&
-        ['cli', 'ffmpeg', 'browser', 'ocr'].some((key) => data.canInstall[key]))
+      const actionFor = (key) => key === 'cli' ? 'install-cli' : key === 'ffmpeg' ? 'install-ffmpeg'
+        : key === 'browser' ? 'install-browser' : key === 'ocr' ? 'install-ocr' : ''
+      const installableMissing = data
+        ? missing.filter((entry) => actionFor(entry.key) && data.canInstall && data.canInstall[entry.key])
+        : []
+      // One missing item gets one button. Two or more get per-item buttons plus
+      // the single "install all" action; the old card showed both even when only
+      // one item was missing, which made the primary action ambiguous.
       const chip = (entry) => {
         const ok = !!(entry.item && entry.item.ok)
         return h('span', { key: entry.key, 'data-vp-env-state': ok ? 'ok' : 'missing', 'data-vp-env-item': entry.key,
@@ -2114,15 +2120,14 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
               h('span', { style: { fontSize: '11px', color: 'var(--vp-muted,#63605a)' } }, '缺少依赖：'),
               missing.map((entry) => {
-                const action = entry.key === 'cli' ? 'install-cli' : entry.key === 'ffmpeg' ? 'install-ffmpeg'
-                  : entry.key === 'browser' ? 'install-browser' : entry.key === 'ocr' ? 'install-ocr' : ''
+                const action = actionFor(entry.key)
                 return action && data.canInstall && data.canInstall[entry.key]
                   ? h('button', { key: entry.key, 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => install(action),
                       style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' } },
                       busy === action ? '安装中…' : ('安装 ' + entry.label))
                   : h('span', { key: entry.key, style: { fontSize: '11px', color: '#b42318' } }, entry.label + ' 需要手动安装')
               }),
-              canInstallSomething
+              installableMissing.length >= 2
                 ? h('button', {
                     key: 'install-all',
                     'data-vp-bili-btn': '',
@@ -2976,11 +2981,11 @@ window.__ModuleLoader__.load({
             : null,
           douyin.state === 'failed' ? h('div', { 'data-vp-warn': 'err', role: 'alert', style: { marginTop: '8px' } },
             /playwright/i.test(douyin.error || '')
-              ? '缺少浏览器组件；请先在上方「环境检查」里安装浏览器组件。'
+              ? '缺少 Playwright；请先在上方「环境检查」里安装 Playwright。'
               : (douyin.error || '登录失败，请重试。')) : null,
           douyin.state === 'error' ? h('div', { 'data-vp-warn': 'err', role: 'alert', style: { marginTop: '8px' } },
             /playwright/i.test(douyin.error || '')
-              ? '缺少浏览器组件；请先在上方「环境检查」里安装浏览器组件。'
+              ? '缺少 Playwright；请先在上方「环境检查」里安装 Playwright。'
               : (douyin.error || '读取抖音登录状态失败，稍后再试。')) : null,
           h('div', { 'data-vp-douyin-actions': '' },
             h('button', { 'data-vp-douyin-btn': '', onClick: douyinStart, disabled: douyin.busy || (douyin.state === 'waiting' && !douyin.logged_in) },

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,13 @@ def _clean_model(model: str) -> str:
     return value
 
 
+def _package_version(name: str) -> str:
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return ""
+
+
 def status(cfg: Config, model: str | None = None) -> dict[str, Any]:
     selected = _clean_model(model or str(cfg.get("asr_model") or "small"))
     state = whisper_cache_state(selected)
@@ -87,6 +95,7 @@ def status(cfg: Config, model: str | None = None) -> dict[str, Any]:
             # rapidocr 3.x ships a pure-Python wheel (works on 3.13); the legacy
             # rapidocr-onnxruntime is kept as a fallback for existing installs.
             "engine_package": ocr_engine()[0],
+            "version": _package_version(ocr_engine()[0]),
             "model": "PP-OCRv6" if ocr_engine()[0] == "rapidocr" else "PP-OCRv4",
             "builtin": not bool(str(cfg.get("ocr_local_config") or "")),
             "selected": "custom" if str(cfg.get("ocr_local_config") or "") else "builtin",

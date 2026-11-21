@@ -1,11 +1,21 @@
 # Changelog
 
-## 0.3.2 (2026-11-20)
+## 0.3.2 (2026-11-21)
 
+- **No forced Douyin cooldown.** The client no longer writes a ten-minute local
+  lock after a verify/risk block. Verification is surfaced immediately; after the
+  user completes the check or logs in, they can retry at once. This does not
+  bypass Douyin's risk control; it stops the client from hiding the real state.
+- **Douyin signed-search fallback with human verification handoff.** When the
+  signed endpoint asks for verification, the client opens the logged-in Chrome/Edge
+  window on the main `www.douyin.com/search` route (not the 抖音精选 /jingxuan
+  shell), brings it to the front, and waits up to three minutes for the user to
+  complete the check. It reads the page's own search responses and continues
+  automatically; it never clicks or solves the slider. A timeout returns a clear
+  E_DOUYIN_VERIFY instead of a raw risk error.
 - **One-click environment setup, including the browser.** The settings
-  environment card now reports the optional Playwright browser extra and can
-  install it with the CLI, FFmpeg and OCR from one **一键安装缺少项** action. The
-  browser install uses the interpreter that runs the CLI, prefers the installed
+  environment card now reports the optional Playwright extra and can install it with the CLI, FFmpeg and OCR from one **一键安装缺少项** action. The
+  Playwright install uses the interpreter that runs the CLI, prefers the installed
   Chrome/Edge, and only downloads Chromium when neither is present. The Douyin
   login failure now points at the environment card instead of exposing the raw
   Playwright import error.

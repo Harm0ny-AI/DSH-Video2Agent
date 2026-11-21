@@ -167,6 +167,12 @@ def doctor(cfg: Config | None = None) -> dict[str, Any]:
         checks.append({"name": name, "ok": ok, "detail": detail, "remedy": remedy, "required": required})
 
     add("python", sys.version_info >= (3, 11), sys.version.split()[0], "Install Python 3.11 or newer.")
+    try:
+        from importlib import metadata as importlib_metadata
+        browser_version = importlib_metadata.version("playwright")
+    except Exception:  # noqa: BLE001 - optional package
+        browser_version = ""
+    add("browser", package_available("playwright"), ("playwright " + browser_version) if browser_version else "python package", 'pip install "video2agent[browser]"（抖音登录/账号读取）', required=False)
     for tool in ("ffmpeg", "ffprobe"):
         env_key = "FFMPEG_BIN" if tool == "ffmpeg" else "FFPROBE_BIN"
         override = os.environ.get(env_key)
@@ -291,6 +297,7 @@ def doctor(cfg: Config | None = None) -> dict[str, Any]:
         "optional_ok": optional_ok,
         "optional_total": optional_total,
         "checks": checks,
+        "python": {"version": sys.version.split()[0], "executable": sys.executable},
         "home": str(cfg.home),
         "disk": du,
     }
