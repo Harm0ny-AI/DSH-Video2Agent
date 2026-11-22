@@ -34,6 +34,32 @@ class BrowserProfileParseTests(unittest.TestCase):
         self.assertEqual(out["douyin_id"], "dypahrrmracl")
         self.assertEqual((out["follows"], out["fans"], out["likes"], out["works"]), (174, 127, 0, 0))
 
+    def test_api_profile_overrides_rounded_counts(self):
+        result = browser.parse_profile("哈莫林（创业版）的抖音", "粉丝\n1.4万\n获赞\n30.1万\n", "https://www.douyin.com/user/x")
+        merged = browser._merge_api_profile(result, {
+            "following_count": 61,
+            "follower_count": 14064,
+            "total_favorited": 301208,
+            "aweme_count": 27,
+            "favoriting_count": 1657,
+            "mix_count": 3,
+            "nickname": "哈莫林（创业版）",
+            "signature": "记录创业日常",
+            "city": "杭州",
+        })
+        self.assertEqual((merged["follows"], merged["fans"], merged["likes"], merged["works"]), (61, 14064, 301208, 27))
+        self.assertEqual(merged["favoriting_count"], 1657)
+        self.assertEqual(merged["signature"], "记录创业日常")
+        self.assertEqual(merged["city"], "杭州")
+
+    def test_parse_counts_with_wan_units(self):
+        text = "关注\n61\n粉丝\n1.4万\n获赞\n30.0万\n作品\n27\n"
+        out = browser.parse_profile("哈莫林（创业版）的抖音", text, "https://www.douyin.com/user/x")
+        self.assertEqual(out["follows"], 61)
+        self.assertEqual(out["fans"], 14000)
+        self.assertEqual(out["likes"], 300000)
+        self.assertEqual(out["works"], 27)
+
     def test_parse_missing_fields_is_empty(self):
         out = browser.parse_profile("", "nothing here", "https://example.com")
         self.assertEqual(out["nickname"], "")
@@ -45,6 +71,12 @@ class BrowserProfileParseTests(unittest.TestCase):
         self.assertEqual(browser.sec_uid_of(sec), sec)
         with self.assertRaises(Video2AgentError):
             browser.sec_uid_of("https://www.douyin.com/")
+
+    def test_numeric_uid_url_is_not_a_profile_url(self):
+        with self.assertRaises(Video2AgentError) as ctx:
+            browser._profile_target("https://www.douyin.com/user/2087338898891578")
+        self.assertEqual(ctx.exception.code, "E_DOUYIN_USER")
+        self.assertIn("sec_uid", ctx.exception.remedy or "")
 
 
 class BrowserCookieStoreTests(unittest.TestCase):

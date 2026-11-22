@@ -194,6 +194,7 @@ def _candidate(item: dict[str, Any]) -> dict[str, Any] | None:
         "duration_ms": int(video.get("duration") or 0) or None,
         "uploader": normalize_text(author.get("nickname") or ""),
         "uploader_id": str(author.get("uid") or author.get("sec_uid") or "") or None,
+        "uploader_sec_uid": str(author.get("sec_uid") or "") or None,
         "published_at": published_at,
         "published_ts": published_ts,
         "description": desc[:300],

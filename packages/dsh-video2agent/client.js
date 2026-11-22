@@ -4020,11 +4020,15 @@ window.__ModuleLoader__.load({
             // of leaving a spinner until the Host's status expires. Remember the
             // hidden status so the next turn cannot resurrect the same card; a
             // newer find has a newer at and shows normally.
-            const findOnly = !!next && (next.phase === 'searching' || next.phase === 'curating')
+            // Find-only lines and terminal no-result/error lines are turn state,
+            // not permanent chat content. Hiding them at turn end prevents the
+            // empty card from becoming a 10-minute resident and from appearing
+            // again when the user scrolls or returns to the session.
+            const transient = !!next && ['searching', 'curating', 'empty', 'error'].includes(next.phase)
             const hiddenAt = Number(HIDDEN_SEARCH_BY_SESSION.get(sid) || 0)
-            const hiddenStatus = findOnly && Number((next && next.at) || 0) <= hiddenAt
-            const dropFindOnly = findOnly && (!running || hiddenStatus)
-            const firstHide = findOnly && !running && !hiddenStatus
+            const hiddenStatus = transient && Number((next && next.at) || 0) <= hiddenAt
+            const dropTransient = transient && (!running || hiddenStatus)
+            const firstHide = transient && !running && !hiddenStatus
             if (firstHide && next) {
               HIDDEN_SEARCH_BY_SESSION.set(sid, Number(next.at || 0) || Date.now())
               // Clear the Host status as well: the in-page latch covers this tab,
@@ -4038,9 +4042,9 @@ window.__ModuleLoader__.load({
                 }).catch(() => {})
               } catch {}
             }
-            lastPhase = dropFindOnly ? null : next && next.phase
+            lastPhase = dropTransient ? null : next && next.phase
             if (alive) {
-              if (dropFindOnly) {
+              if (dropTransient) {
                 if (holdRef.current) { clearTimeout(holdRef.current); holdRef.current = null }
                 setStatus(null)
               } else if (next) {

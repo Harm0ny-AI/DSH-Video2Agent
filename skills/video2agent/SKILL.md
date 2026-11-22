@@ -57,10 +57,8 @@ asks for it.
 
 `find` with `query`; Bilibili by default. Use `scope:"douyin"` when the user asks for Douyin
 or Douyin creator (login needed; if challenged, say so, don't web-search). Filter by uploader/date.
-The reply is for you, not a table: read the metadata and call `ingest` with the ids you actually
-recommend; everything you will analyze goes in `default_selected` (only those
-start, `video_ids` merely lists candidates) plus `primary`. Over `processLimit`
-→ `campaign:true`.
+The reply is for you: ingest only the ids you recommend (`default_selected`;
+`video_ids` lists candidates) plus `primary`. Over `processLimit` → `campaign:true`.
 
 A pasted URL → `find` with `url` (title/cover/duration, no download), then
 `ingest` once the user wants it.
@@ -135,9 +133,9 @@ duplicate frames, flicker) as numbers.
 
 ### 6. Account and export
 
-`admin` `account` reads Bilibili favorites/history/folders; writes are CLI-only
-(`--confirm`; folders ≤20 chars, ≤100 videos per write).
-
+`admin` `account` reads Bilibili favorites/history/folders; writes are CLI-only.
+`admin` `douyin`: `admin_action:"douyin"`, `douyin_action:"profile|videos|me|status"`;
+`douyin_url` needs the `MS4wLjAB...` sec_uid from `find`'s `uploader_sec_uid`.
 `admin` with `admin_action:"export"` writes a knowledge pack only when asked.
 
 ## Hard rules

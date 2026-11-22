@@ -596,6 +596,46 @@ expect(narrowMedia.includes('[data-vp-queue-ring-wrap],[data-vp-queue-ring]{widt
   unmount(inst)
 }
 
+// A no-result/error line is turn state too: show it during the turn, hide it
+// at turn end, and never let the same status pop back in a later turn.
+{
+  let statusAt = clock.t
+  let clears = 0
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/discovery/clear')) {
+      clears += 1
+      return { ok: true, status: 200, json: async () => ({ ok: true, cleared: true }) }
+    }
+    if (url.includes('/api/video2agent/discovery/status')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, status: { phase: 'empty', query: '不存在', found: 0, at: statusAt } }),
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'search-empty', running: true } })
+  await flush()
+  await advance(100)
+  expect(textOf(inst.tree).includes('没有找到候选'), 'empty search card did not render during the turn')
+  inst.props = { session: { id: 'search-empty', running: false } }
+  inst.dirty = true
+  await flush()
+  await advance(100)
+  expect(textOf(inst.tree) === '', 'empty search card survived the turn end: ' + textOf(inst.tree))
+  expect(clears === 1, 'turn end did not clear the empty status: ' + clears)
+  inst.props = { session: { id: 'search-empty', running: true } }
+  inst.dirty = true
+  await flush()
+  await advance(100)
+  expect(textOf(inst.tree) === '', 'old empty status resurrected in the next turn')
+  statusAt = clock.t + 10
+  await advance(10200)
+  expect(textOf(inst.tree).includes('没有找到候选'), 'a newer empty status did not render')
+  unmount(inst)
+}
+
 // 4. A failed save keeps 保存失败 after the previous save's 1.2s timer.
 {
   let settingsPosts = 0

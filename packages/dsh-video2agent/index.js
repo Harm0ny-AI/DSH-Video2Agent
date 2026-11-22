@@ -284,7 +284,7 @@ let WORKER_QUEUE = Promise.resolve()
 function workerEligible(args) {
   const command = String((args && args.command) || '')
   if (!WORKER_COMMANDS.has(command)) return false
-  if (command === 'admin') return !ADMIN_WRITE_ACTIONS.has(String((args && args.admin_action) || ''))
+  if (command === 'admin') return !ADMIN_WRITE_ACTIONS.has(String((args && (args.admin_action || args.action)) || ''))
   return true
 }
 
@@ -665,7 +665,9 @@ function commandArgs(args) {
     if (Array.isArray(args.video_ids) || args.campaign_id) return null
   }
   if (command === 'admin') {
-    const action = String(args.admin_action || 'list')
+    // Accept `action` as an alias: real model calls used it, and with
+    // additionalProperties:false that silently fell back to the local list.
+    const action = String(args.admin_action || args.action || 'list')
     if (action === 'douyin') return douyinAccountArgs(args)
     const mapped = action === 'export' ? 'export'
       : (action === 'ocr-index' ? 'ocr-index' : (action === 'account' ? 'account' : (action === 'doctor' ? 'doctor' : 'list')))
@@ -2810,10 +2812,9 @@ export function apply(ctx, config) {
     try {
       const parsed = JSON.parse(fs.readFileSync(discoveryPaths().status, 'utf8'))
       if (!parsed || !parsed.phase) return null
-      // A stale "searching" line must not outlive a restart forever, but an
-      // empty/error result is actionable advice, not a transient spinner.
-      const terminal = parsed.phase === 'empty' || parsed.phase === 'error'
-      if (Date.now() - Number(parsed.at || 0) > (terminal ? 10 : 2) * 60 * 1000) return null
+      // Search status is turn-scoped. Never let a stale spinner or an old
+      // no-result/error line outlive a restart or reappear in a later turn.
+      if (Date.now() - Number(parsed.at || 0) > 2 * 60 * 1000) return null
       return parsed
     } catch {
       return null
@@ -3764,7 +3765,7 @@ function guardWrite(req, res) {
         admin_action: {
           type: 'string',
           enum: ['list', 'export', 'ocr-index', 'account', 'douyin', 'doctor'],
-          description: 'admin: list (default), export, ocr-index, account (Bilibili), douyin (Douyin account), or doctor.',
+          description: 'admin: list (default), export, ocr-index, account (Bilibili), douyin (Douyin account), or doctor. Use this exact field name (admin_action), not action.',
         },
         douyin_action: {
           type: 'string',

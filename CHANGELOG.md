@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.4 (2026-11-22)
+
+- **Douyin profile uses exact counters, not rounded text.** The page displays
+  `1.4万`/`30.1万`, but its own `/user/profile/other/` response carries
+  `14064`/`301208`. The profile reader now captures that response and merges
+  exact follows/fans/likes/works plus favorites, mixes and signature.
+- **Douyin profile counters keep their units.** `粉丝 1.4万` and `获赞 30.1万`
+  used to be parsed as 1 and 30 because the regex stopped at digits. Counters now
+  convert 万/亿/w, so the card matches the page.
+- **Douyin profile reads use the right identifier.** `find` candidates now include
+  `uploader_sec_uid`; `douyin profile`/`videos` need that `MS4wLjAB...` sec_uid,
+  not the numeric uid. A numeric `/user/<uid>` URL now says so instead of
+  returning an empty page. `admin` also accepts `action` as a defensive alias for
+  `admin_action`, so a model using the wrong field no longer silently falls back
+  to the local library list.
+- **Search status cards are turn-scoped.** The "没有找到候选" / "搜索失败"
+  card used to remain for ten minutes and could reappear when a later turn
+  mounted the composer. Empty/error lines now hide and clear at turn end, with a
+  short stale-status fallback in the Host; a genuinely newer search still shows.
+
 ## 0.3.3 (2026-11-21)
 
 - **Environment status is a capability check, not a file check.** Playwright now

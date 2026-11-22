@@ -127,6 +127,9 @@ assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'list' }), 
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'douyin' }), false, 'Douyin account reads must not run in the read-only worker')
 assert.deepEqual(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'me' }),
   ['douyin', 'me', '--json'], 'douyin me must map to the CLI')
+assert.deepEqual(__test.commandArgs({ command: 'admin', action: 'douyin', douyin_action: 'profile', douyin_url: 'https://www.douyin.com/user/MS4wLjABAAAAexample' }),
+  ['douyin', 'profile', '--url', 'https://www.douyin.com/user/MS4wLjABAAAAexample', '--json'],
+  'the action alias must not fall back to the local list')
 assert.deepEqual(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'videos', douyin_tab: 'favorites', limit: 5 }),
   ['douyin', 'videos', '--tab', 'favorites', '--limit', '5', '--json'], 'douyin favorites must map to --tab favorites')
 assert.deepEqual(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'profile', douyin_url: 'https://www.douyin.com/user/self' }),

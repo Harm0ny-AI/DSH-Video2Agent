@@ -123,7 +123,7 @@ pip install video2agent
 dsh plugin --profile web add dsh-video2agent
 ```
 
-To try 0.3.3 now, or to work on the source, use the clone route below.
+To try 0.3.4 now, or to work on the source, use the clone route below.
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent

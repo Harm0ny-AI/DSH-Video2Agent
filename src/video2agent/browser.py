@@ -24,12 +24,13 @@ HOME_URL = "https://www.douyin.com/"
 _SEC_RE = re.compile(r"MS4wLjAB[A-Za-z0-9_-]{10,}")
 # A live badge can sit between the counters ("关注\n174\n1人正在直播\n粉丝"),
 # so each counter is matched on its own instead of one rigid block.
-_FOLLOWS_RE = re.compile(r"关注\s*\n\s*(\d+)")
-_FANS_RE = re.compile(r"粉丝\s*\n\s*(\d+)")
-_LIKES_RE = re.compile(r"获赞\s*\n\s*(\d+)")
+_COUNT_RE = r"([\d,]+(?:\.\d+)?)\s*(万|亿|[wW])?"
+_FOLLOWS_RE = re.compile(r"关注\s*\n\s*" + _COUNT_RE)
+_FANS_RE = re.compile(r"粉丝\s*\n\s*" + _COUNT_RE)
+_LIKES_RE = re.compile(r"获赞\s*\n\s*" + _COUNT_RE)
 _DOUYIN_ID_RE = re.compile(r"抖音号[：:]\s*([0-9A-Za-z_-]+)")
 _IP_RE = re.compile(r"IP属地[：:]\s*([^\n\s]+)")
-_WORKS_RE = re.compile(r"作品\s*\n\s*(\d+)")
+_WORKS_RE = re.compile(r"作品\s*\n\s*" + _COUNT_RE)
 _LOGIN_COOKIES = ("sessionid", "sessionid_ss")
 
 # The visible tabs are role=tab headers; the data-e2e="user-*-tab" nodes are
@@ -119,6 +120,21 @@ def sec_uid_of(value: str) -> str:
     return match.group(0)
 
 
+def _parse_count(match: Any) -> int | None:
+    if not match:
+        return None
+    try:
+        number = float(match.group(1).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    unit = (match.group(2) or "").lower()
+    if unit in ("万", "w"):
+        number *= 10_000
+    elif unit == "亿":
+        number *= 100_000_000
+    return int(number)
+
+
 def parse_profile(title: str, text: str, url: str) -> dict[str, Any]:
     """Extract profile fields from the rendered page text (no JSON APIs)."""
     nickname = ""
@@ -137,10 +153,10 @@ def parse_profile(title: str, text: str, url: str) -> dict[str, Any]:
         "url": url,
         "nickname": nickname,
         "douyin_id": douyin_id.group(1) if douyin_id else "",
-        "follows": int(follows.group(1)) if follows else None,
-        "fans": int(fans.group(1)) if fans else None,
-        "likes": int(likes.group(1)) if likes else None,
-        "works": int(works.group(1)) if works else None,
+        "follows": _parse_count(follows),
+        "fans": _parse_count(fans),
+        "likes": _parse_count(likes),
+        "works": _parse_count(works),
         "ip_location": ip_location.group(1) if ip_location else "",
     }
 
@@ -213,6 +229,13 @@ def _profile_target(raw: str) -> tuple[str, bool]:
                 "E_DOUYIN_USER",
                 "这是抖音视频或其他页面，不是用户主页",
                 "使用 douyin.com/user/<sec_uid> 主页链接，或先 douyin login 再用 me。",
+            )
+        segment = path.split("/user/", 1)[1].strip("/").split("/", 1)[0]
+        if segment.isdigit():
+            raise Video2AgentError(
+                "E_DOUYIN_USER",
+                f"这是抖音 uid/{segment}，不是主页 sec_uid",
+                "用 find 结果里的 uploader_sec_uid 拼成 douyin.com/user/MS4wLjAB...，或直接传 sec_uid。",
             )
         return value, "/user/self" in path
     sec = sec_uid_of(value)
@@ -287,6 +310,7 @@ def _search_card(row: dict[str, Any]) -> dict[str, Any] | None:
         "duration_ms": duration_ms,
         "uploader": uploader,
         "uploader_id": None,
+        "uploader_sec_uid": None,
         "published_at": None,
         "published_ts": None,
         "description": title[:300],
@@ -324,6 +348,7 @@ def _api_candidate(info: dict[str, Any]) -> dict[str, Any] | None:
         "duration_ms": int(video.get("duration") or 0) or None,
         "uploader": str(author.get("nickname") or ""),
         "uploader_id": str(author.get("uid") or author.get("sec_uid") or "") or None,
+        "uploader_sec_uid": str(author.get("sec_uid") or "") or None,
         "published_at": None,
         "published_ts": None,
         "description": title[:300],
@@ -508,6 +533,42 @@ def search_videos(query: str, *, cookie_path: str | Path | None = None,
 
 
 
+def _merge_api_profile(result: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+    """Prefer exact counters from the page's own profile response.
+
+    The visible DOM prints 1.4万/30.1万; the JSON behind it carries 14064/301208.
+    """
+    if not isinstance(user, dict):
+        return result
+    mapping = {
+        "follows": "following_count",
+        "fans": "follower_count",
+        "likes": "total_favorited",
+        "works": "aweme_count",
+        "favoriting_count": "favoriting_count",
+        "mix_count": "mix_count",
+    }
+    for output_key, api_key in mapping.items():
+        value = user.get(api_key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            result[output_key] = int(value)
+    nickname = str(user.get("nickname") or "").strip()
+    if nickname:
+        result["nickname"] = nickname
+    signature = str(user.get("signature") or "").strip()
+    if signature:
+        result["signature"] = signature
+    for output_key, api_key in (("city", "city"), ("province", "province")):
+        value = str(user.get(api_key) or "").strip()
+        if value:
+            result[output_key] = value
+    if not result.get("douyin_id"):
+        douyin_id = str(user.get("unique_id") or user.get("short_id") or "").strip()
+        if douyin_id:
+            result["douyin_id"] = douyin_id
+    return result
+
+
 def profile(sec_uid_or_url: str, *, cookie_path: str | Path | None = None,
             wait_ms: int = 9000) -> dict[str, Any]:
     """Read a Douyin profile page through the browser; no JSON/signature needed."""
@@ -528,9 +589,25 @@ def profile(sec_uid_or_url: str, *, cookie_path: str | Path | None = None,
                         "path": c["path"], "expires": c["expires"] or -1, "secure": c["secure"],
                     } for c in cookies])
             page = context.new_page()
+            api_user: dict[str, Any] = {}
+
+            def capture(response: Any) -> None:
+                if "/aweme/v1/web/user/profile/other/" not in str(response.url):
+                    return
+                try:
+                    payload = response.json()
+                    if isinstance(payload, dict) and isinstance(payload.get("user"), dict):
+                        api_user.clear()
+                        api_user.update(payload["user"])
+                except Exception:
+                    return
+
+            page.on("response", capture)
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(wait_ms)
             result = parse_profile(page.title(), page.inner_text("body"), url)
+            if api_user:
+                result = _merge_api_profile(result, api_user)
             result["logged_in"] = any(
                 c.get("name") in _LOGIN_COOKIES for c in context.cookies()
             )
