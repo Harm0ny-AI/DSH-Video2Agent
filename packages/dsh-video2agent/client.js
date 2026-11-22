@@ -3137,6 +3137,9 @@ window.__ModuleLoader__.load({
 
     function displayTitleFor(job) {
       const raw = String(job && job.title || '').trim()
+      // A failed job can carry its raw source (a sec_uid/profile URL) as title.
+      // Never show that as the row title; the error line explains what happened.
+      if (/^MS4wLjAB[A-Za-z0-9_-]{20,}$/.test(raw) || /\/user\//.test(raw)) return '视频'
       if (raw && !/^BV[0-9A-Za-z]{10}$|^av\d+$/i.test(raw)) return raw
       return '视频'
     }
@@ -3839,7 +3842,7 @@ window.__ModuleLoader__.load({
         const activeRow = rows.find((job) => job && !terminal(job.state))
         const top = activeRow || rows.find((job) => job.primary) || rows[0]
         const topCover = coverFor(top)
-        const label = allTerminal ? (failed ? '未完成' : canceled ? '已取消' : '已完成') : '正在处理'
+        const label = allTerminal ? (failed ? '失败' : canceled ? '已取消' : '已完成') : '正在处理'
         return h('div', { 'data-vp-queue': '', 'data-vp-queue-collapsed': '', 'data-vp-queue-pill-job': String(top && top.job_id || ''), 'data-terminal': allTerminal ? 'true' : undefined },
           h('button', {
             type: 'button',
@@ -3886,7 +3889,7 @@ window.__ModuleLoader__.load({
       // 取消 is not 完成: a stopped video was never indexed, and a green
       // 已完成 header over a row that says 已取消 is the same lie the rest of
       // this file exists to avoid.
-      const headTitle = allTerminal ? (failed ? '未完成' : canceled ? '已取消' : '已完成') : ''
+      const headTitle = allTerminal ? (failed ? '失败' : canceled ? '已取消' : '已完成') : ''
       const headSub = ''
       // The progress ring belongs to the row that is actually processing. Picking
       // the first non-terminal row put it on a queued row whenever the running
@@ -3928,7 +3931,7 @@ window.__ModuleLoader__.load({
           // as the live card. Raw slugs (`ocr`, `sampling`, `transcribing`) are
           // implementation detail and never belong above the composer.
           const label = state === 'ready' ? '已完成'
-            : state === 'failed' ? '未完成'
+            : state === 'failed' ? '失败'
               : (state === 'canceled' || state === 'cancelled') ? '已取消'
                 : state === 'queued' ? '排队中'
                   : isCanceling ? '取消中'
@@ -3970,7 +3973,9 @@ window.__ModuleLoader__.load({
           h('div', { 'data-vp-queue-main': '' },
             h('div', { 'data-vp-queue-titleline': '' },
               h('span', { 'data-vp-queue-name': '', title: displayTitle }, displayTitle)),
-            metaLine(job) ? h('div', { 'data-vp-queue-meta': '' }, metaLine(job)) : null,
+            state === 'failed' && String(job.error_message || job.error_code || '').trim()
+              ? h('div', { 'data-vp-queue-meta': '', 'data-vp-queue-error': '' }, String(job.error_message || job.error_code).trim())
+              : (metaLine(job) ? h('div', { 'data-vp-queue-meta': '' }, metaLine(job)) : null),
           ),
           h('span', { 'data-vp-queue-tail': '' },
             h('span', { 'data-vp-queue-state': '' }, label),
@@ -4027,8 +4032,17 @@ window.__ModuleLoader__.load({
             const transient = !!next && ['searching', 'curating', 'empty', 'error'].includes(next.phase)
             const hiddenAt = Number(HIDDEN_SEARCH_BY_SESSION.get(sid) || 0)
             const hiddenStatus = transient && Number((next && next.at) || 0) <= hiddenAt
-            const dropTransient = transient && (!running || hiddenStatus)
-            const firstHide = transient && !running && !hiddenStatus
+            // A search line is progress, not a permanent state: after the CLI has
+            // returned (curating) a long model thinking block must not leave it
+            // on screen forever. searching gets a little longer for slow networks.
+            const age = next ? Date.now() - Number(next.at || 0) : 0
+            const staleBusy = !!next && (
+              (next.phase === 'curating' && age > 12000)
+              || (next.phase === 'searching' && age > 45000)
+              || (next.phase === 'starting' && age > 12000)
+            )
+            const dropTransient = transient && (!running || hiddenStatus || staleBusy)
+            const firstHide = transient && (!running || staleBusy) && !hiddenStatus
             if (firstHide && next) {
               HIDDEN_SEARCH_BY_SESSION.set(sid, Number(next.at || 0) || Date.now())
               // Clear the Host status as well: the in-page latch covers this tab,

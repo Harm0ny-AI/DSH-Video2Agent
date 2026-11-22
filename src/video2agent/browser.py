@@ -924,6 +924,68 @@ def _normalize_video_cards(cards: list[dict[str, Any]], limit: int) -> list[dict
     return out
 
 
+def _video_cards(page: Any, selector: str) -> dict[str, Any]:
+    result = page.evaluate(r"""(selector) => {
+      const list = document.querySelector(selector)
+      const anchors = list ? [...list.querySelectorAll('a[href*="/video/"]')] : []
+      const out = []
+      const seen = new Set()
+      for (const a of anchors) {
+        const m = String(a.getAttribute("href") || "").match(/video\/(\d{15,20})/)
+        if (!m || seen.has(m[1])) continue
+        seen.add(m[1])
+        const img = a.querySelector("img")
+        let text = (a.innerText || "").trim()
+        if (!text && img) text = String(img.getAttribute("alt") || "").trim()
+        if (!text) {
+          const card = a.closest("li") || a.parentElement
+          text = card ? (card.innerText || "").trim() : ""
+        }
+        out.push({ aweme_id: m[1], text })
+      }
+      return { cards: out, listText: list ? (list.innerText || "") : "", anchors: anchors.length }
+    }""", selector)
+    return result if isinstance(result, dict) else {}
+
+
+def _scroll_video_list(page: Any, selector: str) -> bool:
+    result = page.evaluate(r"""(selector) => {
+      const list = document.querySelector(selector)
+      if (!list) return false
+      let scroller = null
+      let node = list
+      while (node && node !== document.body && node !== document.documentElement) {
+        const style = getComputedStyle(node)
+        if (node.scrollHeight > node.clientHeight + 80 && /(auto|scroll)/.test(style.overflowY)) {
+          scroller = node
+          break
+        }
+        node = node.parentElement
+      }
+      if (scroller) {
+        const before = scroller.scrollTop
+        scroller.scrollTop = Math.min(scroller.scrollHeight, before + Math.max(420, scroller.clientHeight * 0.85))
+        return scroller.scrollTop > before
+      }
+      const before = window.scrollY
+      window.scrollBy(0, Math.max(520, window.innerHeight * 0.8))
+      return window.scrollY > before
+    }""", selector)
+    return bool(result)
+
+
+def _merge_video_dates(videos: list[dict[str, Any]], api_meta: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    for video in videos:
+        meta = api_meta.get(str(video.get("aweme_id") or ""))
+        if not meta:
+            continue
+        created = meta.get("create_time")
+        if isinstance(created, (int, float)) and created > 0:
+            video["published_ts"] = int(created)
+            video["published_at"] = time.strftime("%Y-%m-%d", time.localtime(created))
+    return videos
+
+
 def user_videos(profile: str, *, tab: str = "works", limit: int = 20,
                 cookie_path: str | Path | None = None, wait_ms: int = 9000) -> dict[str, Any]:
     """List a profile's works, liked videos or favorites through the rendered page."""
@@ -950,6 +1012,27 @@ def user_videos(profile: str, *, tab: str = "works", limit: int = 20,
                     "先运行 video2agent douyin login 扫码，再试一次。",
                 )
             page = context.new_page()
+            api_meta: dict[str, dict[str, Any]] = {}
+
+            def capture_post(response: Any) -> None:
+                if "/aweme/v1/web/aweme/post/" not in str(response.url):
+                    return
+                try:
+                    payload = response.json()
+                except Exception:
+                    return
+                items = payload.get("aweme_list") if isinstance(payload, dict) else None
+                if not items and isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+                    items = payload["data"].get("aweme_list")
+                for item in items or []:
+                    if not isinstance(item, dict):
+                        continue
+                    aweme_id = str(item.get("aweme_id") or "")
+                    created = item.get("create_time")
+                    if aweme_id and isinstance(created, (int, float)):
+                        api_meta[aweme_id] = {"create_time": created}
+
+            page.on("response", capture_post)
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(wait_ms)
             # The data-e2e="user-*-tab" nodes are hidden panes, not the clickable
@@ -973,30 +1056,42 @@ def user_videos(profile: str, *, tab: str = "works", limit: int = 20,
                         String(tab.className).includes('semi-tabs-tab-active'))
                     }""", label))
             selector = _VIDEO_TAB_LISTS[tab_name]
-            cards = page.evaluate(r"""(selector) => {
-              const list = document.querySelector(selector)
-              const anchors = list ? [...list.querySelectorAll('a[href*="/video/"]')] : []
-              const out = []
-              const seen = new Set()
-              for (const a of anchors) {
-                const m = String(a.getAttribute("href") || "").match(/video\/(\d{15,20})/)
-                if (!m || seen.has(m[1])) continue
-                seen.add(m[1])
-                const img = a.querySelector("img")
-                let text = (a.innerText || "").trim()
-                if (!text && img) text = String(img.getAttribute("alt") || "").trim()
-                if (!text) {
-                  const card = a.closest("li") || a.parentElement
-                  text = card ? (card.innerText || "").trim() : ""
-                }
-                out.push({ aweme_id: m[1], text })
-              }
-              return { cards: out, listText: list ? (list.innerText || "") : "", anchors: anchors.length }
-            }""", selector)
+            cards = _video_cards(page, selector)
+            collected = list(cards.get("cards") or [])
+            seen = {str(c.get("aweme_id") or "") for c in collected}
+            stagnant = 0
+            scrolls = 0
+            # The profile renders the first screen only. Douyin lazy-loads the
+            # rest on scroll, so stop at the requested limit or when two scrolls
+            # add nothing.
+            while len(collected) < max(1, int(limit)) and scrolls < 12:
+                if not _scroll_video_list(page, selector):
+                    stagnant += 1
+                page.wait_for_timeout(1400)
+                scrolls += 1
+                fresh = _video_cards(page, selector)
+                if fresh.get("listText"):
+                    cards["listText"] = fresh.get("listText")
+                added = 0
+                for card in fresh.get("cards") or []:
+                    aweme_id = str(card.get("aweme_id") or "")
+                    if aweme_id and aweme_id not in seen:
+                        seen.add(aweme_id)
+                        collected.append(card)
+                        added += 1
+                if added:
+                    stagnant = 0
+                else:
+                    stagnant += 1
+                    if stagnant >= 2:
+                        break
+            cards["cards"] = collected
+            cards["scrolls"] = scrolls
         finally:
             browser.close()
     cards_map = cards if isinstance(cards, dict) else {}
     videos = _normalize_video_cards(cards_map.get("cards") or [], limit)
+    videos = _merge_video_dates(videos, api_meta)
     payload: dict[str, Any] = {
         "ok": True,
         "platform": "douyin",

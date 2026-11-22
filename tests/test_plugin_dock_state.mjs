@@ -371,6 +371,59 @@ async function runBatch(sessionId, jobId, terminalState) {
   debug.__video2agentClearQueue(sid)
 }
 
+// A failed row created from a profile URL must show the failure, not a raw
+// sec_uid title or the old "未完成" label.
+{
+  const sid = 'failed-profile-row'
+  const sec = 'MS4wLjABAAAAWGxxWTIOzTE_0LszlZpM-7wDQtO4WuQ_HWKzO5sXooMCc4_KomVvNrB6V1EOE5-N'
+  debug.__video2agentSetQueue(sid, {
+    createdAt: Date.now(),
+    collapsed: false,
+    jobs: [
+      { job_id: 'job_bad_profile', video_id: sec, title: sec, source: 'https://www.douyin.com/user/' + sec, state: 'failed' },
+      { job_id: 'job_keep_running', video_id: 'BV1keeprun', title: '正在跑', state: 'running' },
+    ],
+    evidence: null,
+  })
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/queue')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          queue: {
+            session_id: sid,
+            started_at: Date.now(),
+            jobs: [
+              { job_id: 'job_bad_profile', video_id: sec, title: sec, source: 'https://www.douyin.com/user/' + sec, state: 'failed' },
+              { job_id: 'job_keep_running', video_id: 'BV1keeprun', title: '正在跑', state: 'running' },
+            ],
+          },
+        }),
+      }
+    }
+    if (url.includes('/api/video2agent/job?')) {
+      const id = new URL(String(url), 'http://localhost').searchParams.get('id')
+      if (id === 'job_bad_profile') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, job: { id, state: 'failed', error_message: '这是抖音用户主页，不是视频', video_id: null } }) }
+      }
+      return jobPayload(id, 'running')
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(table, { session: { id: sid, running: true } })
+  await flush()
+  await advance(2600)
+  const rowText = textOf(inst.tree)
+  expect(rowText.includes('失败'), 'failed row should say 失败: ' + rowText)
+  expect(rowText.includes('这是抖音用户主页'), 'failed row should show the error: ' + rowText)
+  expect(!rowText.includes('未完成'), 'failed row still says 未完成: ' + rowText)
+  expect(!rowText.includes(sec), 'failed row still exposes the raw sec_uid: ' + rowText)
+  unmount(inst)
+  debug.__video2agentClearQueue(sid)
+}
+
 // The progress ring must mark the row that is actually processing. It used to
 // be the first non-terminal row, so a queued row above the running one took the
 // ring while the table still said 正在处理 on another row (reported 2026-11-15).
@@ -593,6 +646,32 @@ expect(narrowMedia.includes('[data-vp-queue-ring-wrap],[data-vp-queue-ring]{widt
   statusAt = clock.t + 10
   await advance(2600)
   expect(textOf(inst.tree).includes('正在筛选'), 'a new find did not show the card: ' + textOf(inst.tree))
+  unmount(inst)
+}
+
+// A busy line older than its phase budget is stale even if the turn is still
+// running (long model thinking after the search returned).
+{
+  let statusAt = clock.t - 20000
+  let clears = 0
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/discovery/clear')) {
+      clears += 1
+      return { ok: true, status: 200, json: async () => ({ ok: true, cleared: true }) }
+    }
+    if (url.includes('/api/video2agent/discovery/status')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, status: { phase: 'curating', query: '显卡', at: statusAt } }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'search-stale', running: true } })
+  await flush()
+  await advance(100)
+  expect(textOf(inst.tree) === '', 'stale curating card survived long thinking: ' + textOf(inst.tree))
+  expect(clears === 1, 'stale busy status was not cleared: ' + clears)
+  statusAt = clock.t + 10
+  await advance(10200)
+  expect(textOf(inst.tree).includes('正在筛选'), 'a fresh busy status did not render')
   unmount(inst)
 }
 

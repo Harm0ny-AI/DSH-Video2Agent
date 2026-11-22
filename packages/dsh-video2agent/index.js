@@ -637,6 +637,16 @@ function douyinAccountArgs(args) {
   return out
 }
 
+function looksLikeDouyinProfile(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return false
+  if (/^MS4wLjAB[A-Za-z0-9_-]{20,}$/.test(raw)) return true
+  try {
+    const u = new URL(raw)
+    return /(^|\.)douyin\.com$/i.test(u.hostname) && /^\/user\//.test(u.pathname)
+  } catch { return false }
+}
+
 function commandArgs(args) {
   const command = String(args.command || '')
   // Eight model-facing verbs; the rest are internal CLI names. One implementation
@@ -3427,6 +3437,7 @@ function guardWrite(req, res) {
   __test.installFfmpeg = installFfmpeg
   __test.managedToolEnv = managedToolEnv
   __test.readManagedTools = readManagedTools
+  __test.looksLikeDouyinProfile = looksLikeDouyinProfile
   __test.detectFfmpeg = detectFfmpeg
   __test.detectCli = detectCli
   __test.saveManagedCli = saveManagedCli
@@ -3765,7 +3776,7 @@ function guardWrite(req, res) {
         admin_action: {
           type: 'string',
           enum: ['list', 'export', 'ocr-index', 'account', 'douyin', 'doctor'],
-          description: 'admin: list (default), export, ocr-index, account (Bilibili), douyin (Douyin account), or doctor. Use this exact field name (admin_action), not action.',
+          description: 'admin: list (default), export, ocr-index, account (Bilibili), douyin (Douyin account), or doctor. For a creator full-works timeline use admin_action:"douyin" + douyin_action:"videos" with the sec_uid. Use this exact field name (admin_action), not action.',
         },
         douyin_action: {
           type: 'string',
@@ -3914,6 +3925,14 @@ function guardWrite(req, res) {
       if (String(args.command || '') === 'campaign') return executeCampaign(args, sessionId)
       if (String(args.command || '') === 'shortlist') return executeShortlist(args, sessionId)
       if (String(args.command || '') === 'ingest' && args.campaign_id) return executeCampaign(args, sessionId)
+      if (String(args.command || '') === 'ingest' && looksLikeDouyinProfile(args.source)) {
+        const error = {
+          code: 'E_DOUYIN_USER',
+          message: '这是抖音用户主页，不是视频；请用 admin_action:"douyin" 读主页。',
+          remedy: '资料/作品列表用 admin_action:"douyin", douyin_action:"profile" 或 "videos"；单条视频再 ingest。',
+        }
+        return { ok: false, text: JSON.stringify({ ok: false, error }), error }
+      }
       if (String(args.command || '') === 'ingest' && Array.isArray(args.video_ids) && !args.source && !args.url) {
         return executeShortlist(args, sessionId)
       }

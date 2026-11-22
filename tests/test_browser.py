@@ -72,6 +72,12 @@ class BrowserProfileParseTests(unittest.TestCase):
         with self.assertRaises(Video2AgentError):
             browser.sec_uid_of("https://www.douyin.com/")
 
+    def test_merge_video_dates(self):
+        videos = [{"aweme_id": "7581372340978584870", "title": "x"}]
+        merged = browser._merge_video_dates(videos, {"7581372340978584870": {"create_time": 1765152000}})
+        self.assertEqual(merged[0]["published_ts"], 1765152000)
+        self.assertRegex(merged[0]["published_at"], r"^\d{4}-\d{2}-\d{2}$")
+
     def test_numeric_uid_url_is_not_a_profile_url(self):
         with self.assertRaises(Video2AgentError) as ctx:
             browser._profile_target("https://www.douyin.com/user/2087338898891578")

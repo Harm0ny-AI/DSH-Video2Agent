@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.5 (2026-11-22)
+
+- **Douyin account timelines are complete.** `douyin videos` now scrolls the
+  lazily loaded works list until the requested limit, so a 27-work profile returns
+  27 rows (live: 15s) and every row carries `published_at`/`published_ts` from the
+  page's own `aweme/post` response. That is enough to answer "when did this creator
+  last post" without CDP or a search engine.
+- **Failed queue rows say 失败 and show the error.** They no longer show raw
+  sec_uid/profile URLs as a title or a misleading "未完成" label.
+- **Long-running search cards expire.** A `curating` line no longer stays
+  forever while the model thinks; busy search lines now go stale after their
+  phase budget, clear the Host status, and a newer search still shows. This
+  fixes the card that remained until the next tool call or turn end.
+- **Profile URLs are not video sources.** Passing a `/user/...` URL or bare
+  `MS4wLjAB...` sec_uid to `ingest` now returns a clear E_DOUYIN_USER before a
+  failed job row can become the confusing "未完成" batch card.
+
 ## 0.3.4 (2026-11-22)
 
 - **Douyin profile uses exact counters, not rounded text.** The page displays

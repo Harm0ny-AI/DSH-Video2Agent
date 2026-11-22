@@ -127,6 +127,9 @@ assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'list' }), 
 assert.equal(__test.workerEligible({ command: 'admin', admin_action: 'douyin' }), false, 'Douyin account reads must not run in the read-only worker')
 assert.deepEqual(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'me' }),
   ['douyin', 'me', '--json'], 'douyin me must map to the CLI')
+assert.equal(__test.looksLikeDouyinProfile('https://www.douyin.com/user/MS4wLjABAAAAexample'), true, 'profile URL must be rejected as a video source')
+assert.equal(__test.looksLikeDouyinProfile('MS4wLjABAAAAexample'), false, 'short sec_uid should not count as a profile')
+assert.equal(__test.looksLikeDouyinProfile('https://www.douyin.com/video/7493633065932164367'), false, 'video URL must remain ingestable')
 assert.deepEqual(__test.commandArgs({ command: 'admin', action: 'douyin', douyin_action: 'profile', douyin_url: 'https://www.douyin.com/user/MS4wLjABAAAAexample' }),
   ['douyin', 'profile', '--url', 'https://www.douyin.com/user/MS4wLjABAAAAexample', '--json'],
   'the action alias must not fall back to the local list')
