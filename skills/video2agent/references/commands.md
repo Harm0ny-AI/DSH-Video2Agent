@@ -12,7 +12,7 @@ verbs onto them, so a script can use either.
 | `evidence` | `video_id`, `at`, `images`, `max_images`, `ocr_tiles` | `evidence` |
 | `frames` | `video_id`, `at` / `start`+`end`, `count`, `fps`, `max`, `mode`, `sheet`, `windows`, `crop`, `scale`; `view:"candidates"` / `"ocr"` | `frames` / `candidates` / `ocr-window` |
 | `perceive` | `video_id`, `start`, `end`, `fps`, `max_frames`, `brief` | `perceive` |
-| `admin` | `admin_action` (`list` \| `export` \| `ocr-index` \| `account` \| `douyin` \| `doctor`), `video_id`, `format`, `account_action`, `folder_id`, `days`; douyin: `douyin_action`, `douyin_url`, `douyin_tab`, `limit` | `list` / `export` / `ocr-index` / `account` / `douyin` / `doctor` |
+| `admin` | `admin_action` (`list` \| `export` \| `ocr-index` \| `account` \| `douyin` \| `doctor`), `video_id`, `format`, `account_action`, `folder_id`, `days`; douyin: `douyin_action`, `douyin_url`, `douyin_urls`, `douyin_tab`, `limit` | `list` / `export` / `ocr-index` / `account` / `douyin` / `doctor` |
 
 ## Flags worth remembering
 
@@ -24,6 +24,12 @@ verbs onto them, so a script can use either.
   window unless `start`/`end` is explicit.
 - `admin account` (Bilibili) and `admin douyin` (Douyin account) are read-only in
   the tool; writes are CLI-only (`--confirm`). `douyin_action` = `me` / `profile` /
-  `videos` / `status`; `douyin_tab` = `works` / `likes` / `favorites`.
+  `videos` / `status` / `profiles`; `douyin_tab` = `works` / `likes` / `favorites`.
+- `admin douyin` batch (optional): `douyin_action:"profiles"` + 1-10
+  `douyin_urls` (profile URLs or sec_uids) reads them in one browser session, one
+  page per person, ~12 s each. Results are per input (deduped by sec_uid):
+  successes carry profile fields, failures carry `error.code`; one bad identity
+  never aborts the batch. All-failed returns `E_DOUYIN_PROFILES` and still lists
+  every row. `find` Douyin candidates carry a trusted `profile_url`.
 - `export`: `format` = `md` / `html` / `json` / `knowledge`; redacts paths unless
   `--include-paths` (CLI).

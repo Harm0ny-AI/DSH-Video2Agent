@@ -88,6 +88,23 @@ class PerceptionFixtureTests(unittest.TestCase):
               "-f", "lavfi", "-i", "color=c=0xffa500:s=80x80:d=6:r=30",
               "-filter_complex", "[0:v][1:v]overlay=x='280+120*sin(2*PI*t/1)':y=140:enable='gte(t,2.5)'",
               "-pix_fmt", "yuv420p", str(cls.dir / "midloop.mp4")])
+        # A 3 s loop over 12 s: a windowed scan must still see >= 2 cycles,
+        # which only happens when the window's own frames are used.
+        _run([ff, *common,
+              "-f", "lavfi", "-i", "color=c=0x203040:s=640x360:d=12:r=30",
+              "-f", "lavfi", "-i", "color=c=0xffa500:s=80x80:d=12:r=30",
+              "-filter_complex", "[0:v][1:v]overlay=x='280+150*sin(2*PI*t/3)':y=140:shortest=1",
+              "-pix_fmt", "yuv420p", str(cls.dir / "loop3.mp4")])
+        # Static scene, hard cut at 3 s, then a box moving only at 4.8-5.4 s:
+        # the second shot's peak is a known source time inside the window.
+        _run([ff, *common,
+              "-f", "lavfi", "-i", "color=c=0x203040:s=640x360:d=3:r=30",
+              "-f", "lavfi", "-i", "smptebars=s=640x360:d=3:r=30",
+              "-f", "lavfi", "-i", "color=c=0xffa500:s=80x80:d=3:r=30",
+              "-filter_complex",
+              "[0:v][1:v]concat=n=2:v=1:a=0[b];"
+              "[b][2:v]overlay=x='40+90*t':y=140:enable='between(t,4.8,5.4)'",
+              "-pix_fmt", "yuv420p", str(cls.dir / "cutmove.mp4")])
         # Two known events at 2.1 s (colour swap) and 3.15 s (box appears),
         # deliberately off the grid a 6-frame uniform digest would sample.
         _run([ff, *common,
@@ -124,6 +141,10 @@ class PerceptionFixtureTests(unittest.TestCase):
     def clip(self, name: str, ms: int, fps: int = 15) -> dict:
         return _perceive_media(str(self.dir / name), end_ms=ms, fps=fps)
 
+    def window(self, name: str, start: int, end: int, fps: int = 15, **kw) -> dict:
+        return _perceive_media(str(self.dir / name), start_ms=start, end_ms=end,
+                               fps=fps, **kw)
+
     def test_hard_cuts_land_on_the_known_times(self) -> None:
         vpm = self.clip("cuts.mp4", 6000)
         starts = [s["start_ms"] for s in vpm["shots"]]
@@ -144,6 +165,79 @@ class PerceptionFixtureTests(unittest.TestCase):
         self.assertGreaterEqual(vpm["shot_count"], 24, "the fixture has 26 shots")
         self.assertEqual(len(vpm["cuts_ms"]), vpm["shot_count"] - 1, json.dumps(vpm["cuts_ms"]))
         self.assertFalse(vpm["cuts_truncated"])
+
+    def test_windowed_shots_and_cuts_keep_source_time(self) -> None:
+        # A window must move the scan, not relabel frame 0 as ms 0: its cut and
+        # shot times are the same coordinates a full scan reports.
+        full = self.clip("cuts.mp4", 6000)
+        win = self.window("cuts.mp4", 2000, 6000)
+        self.assertEqual([s["id"] for s in win["shots"]], ["s0", "s1"],
+                         json.dumps(win["shots"]))
+        starts = [s["start_ms"] for s in win["shots"]]
+        self.assertAlmostEqual(starts[0], 2000, delta=120)
+        self.assertAlmostEqual(starts[1], 4000, delta=120)
+        self.assertLess(starts[0], win["shots"][0]["end_ms"], "a shot must not be empty")
+        self.assertEqual(win["window"], {"start_ms": 2000, "end_ms": 6000})
+        self.assertEqual(win["duration_ms"], 4000)
+        self.assertEqual(win["moments"], [], "a cut is not a moment")
+        # The cut at 4 s is one source coordinate in both scans, so the window
+        # offset is applied once (not start+cut).
+        self.assertAlmostEqual(starts[1], [s["start_ms"] for s in full["shots"]][2], delta=120)
+        brief = self.window("cuts.mp4", 2000, 6000, brief=True)
+        self.assertAlmostEqual(brief["cuts_ms"][0], starts[1], delta=120)
+
+    def test_windowed_moments_keep_source_time(self) -> None:
+        # Detected events at 2.1 s / 3.15 s inside a window that starts at 2 s
+        # must keep their absolute times (they were silently dropped before).
+        full = self.clip("events.mp4", 4000)
+        win = self.window("events.mp4", 2000, 4000)
+        times = [m["t_ms"] for m in win["moments"]]
+        full_times = [m["t_ms"] for m in full["moments"]]
+        self.assertEqual(len(times), len(full_times),
+                         "windowed scan missed events: " + json.dumps(win["moments"]))
+        for got, want in zip(times, full_times):
+            self.assertAlmostEqual(got, want, delta=100)
+        self.assertEqual([(m["kind"], m["settles"]) for m in win["moments"]],
+                         [(m["kind"], m["settles"]) for m in full["moments"]],
+                         "classification must not depend on the window offset")
+        self.assertAlmostEqual(times[0], 2100, delta=150)
+        for moment in win["moments"]:
+            self.assertGreaterEqual(moment["onset_ms"], 2000, "onset before the window")
+            self.assertLessEqual(moment["onset_ms"], moment["t_ms"], "onset after the peak")
+
+    def test_windowed_loop_uses_the_windows_own_frames(self) -> None:
+        # The 3 s loop needs >= 2 cycles inside the scanned window. Indexing the
+        # window-local thumbnails with source time dropped it entirely.
+        full = self.window("loop3.mp4", 0, 12000, fps=12)
+        win = self.window("loop3.mp4", 2000, 12000, fps=12)
+        self.assertTrue(full["rhythm"]["loop"]["found"],
+                        json.dumps(full["rhythm"]["loop"]))
+        loop = win["rhythm"]["loop"]
+        self.assertTrue(loop["found"], "a windowed loop was lost: " + json.dumps(loop))
+        self.assertAlmostEqual(loop["period_ms"], full["rhythm"]["loop"]["period_ms"], delta=120)
+        self.assertAlmostEqual(loop["period_ms"], 3000, delta=120)
+
+    def test_windowed_shot_peak_is_source_time(self) -> None:
+        full = self.clip("cutmove.mp4", 6000)
+        win = self.window("cutmove.mp4", 2000, 6000)
+        starts = [s["start_ms"] for s in win["shots"]]
+        self.assertEqual(len(starts), 2, json.dumps(win["shots"]))
+        self.assertAlmostEqual(starts[0], 2000, delta=120)
+        self.assertAlmostEqual(starts[1], 3000, delta=120)
+        for shot in win["shots"]:
+            self.assertGreaterEqual(shot["peak_ms"], shot["start_ms"])
+            self.assertLessEqual(shot["peak_ms"], shot["end_ms"])
+        # The cut/move shot's peak is the same source time in both scans.
+        self.assertAlmostEqual(win["shots"][1]["peak_ms"], full["shots"][1]["peak_ms"],
+                               delta=120)
+        self.assertAlmostEqual(win["shots"][1]["peak_ms"], 5400, delta=150)
+
+    def test_explicit_zero_window_matches_full_scan(self) -> None:
+        implicit = _perceive_media(str(self.dir / "events.mp4"), end_ms=4000, fps=15)
+        explicit = _perceive_media(str(self.dir / "events.mp4"), start_ms=0, end_ms=4000,
+                                   fps=15)
+        self.assertEqual(json.dumps(implicit, sort_keys=True),
+                         json.dumps(explicit, sort_keys=True))
 
     def test_still_clip_has_no_events_and_says_so(self) -> None:
         vpm = self.clip("static.mp4", 6000)

@@ -285,6 +285,40 @@ async function runBatch(sessionId, jobId, terminalState) {
   return inst
 }
 
+// A slow first /job read must not be joined by the 2.5s interval. Both reads
+// spawn their own Python probe, and the older answer can land after the newer
+// one. The initial read used to bypass the interval's ticking guard.
+{
+  const sid = 'slow-first-tick'
+  let calls = 0
+  let release = null
+  const pending = new Promise((resolve) => { release = resolve })
+  debug.__video2agentSetQueue(sid, {
+    createdAt: Date.now(),
+    collapsed: false,
+    jobs: [{ job_id: 'job_slowtick', video_id: 'BV1slowtick', title: '慢任务', state: 'running' }],
+    evidence: null,
+  })
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/queue')) return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    if (url.includes('/api/video2agent/job?')) {
+      calls += 1
+      await pending
+      return jobPayload('job_slowtick', 'running')
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(table, { session: { id: sid, running: true } })
+  await flush()
+  await advance(2700)
+  expect(calls === 1, 'a slow first job read was duplicated by the interval: ' + calls)
+  release()
+  await flush()
+  await advance(2700)
+  expect(calls === 2, 'the next job read did not follow the released one: ' + calls)
+  unmount(inst)
+  debug.__video2agentClearQueue(sid)
+}
 
 // A narrower, newer client row must not hide the batch the Host started. This
 // was the reported "only one card for five minutes" while ten videos ran.
@@ -1352,6 +1386,7 @@ expect(narrowMedia.includes('[data-vp-queue-ring-wrap],[data-vp-queue-ring]{widt
     state = 'ready'
     await advance(5100)
     expect(textOf(page.tree).includes('视频引擎已更新至 0.3.6'), 'the followed update did not finish: ' + textOf(page.tree).slice(0, 300))
+    expect(!textOf(page.tree).includes('有安装任务正在进行'), 'the busy notice stayed under the success line: ' + textOf(page.tree).slice(0, 300))
     unmount(page)
   }
 
@@ -1453,6 +1488,35 @@ expect(narrowMedia.includes('[data-vp-queue-ring-wrap],[data-vp-queue-ring]{widt
     expect(urls[2].includes('refresh=1'), '重新检测 did not bypass the status cache: ' + urls[2])
     unmount(page)
   }
+
+  // K. A failed manual update, then a re-check that reports a running update:
+  // the newer Host state owns the card. It used to show "正在更新视频引擎…"
+  // and "视频引擎更新失败，可重试。" (plus a retry) at the same time.
+  {
+    let hostState = 'idle'
+    serve((method) => {
+      if (method === 'POST') {
+        return payload({ ok: false, error: { message: '更新没有完成' }, status: basePayload({ engine_update: { state: 'failed', target: '0.3.6' } }) })
+      }
+      return payload(basePayload({ engine_update: { state: hostState, target: '0.3.6' } }))
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    const update = collectByAttr(page.tree, 'data-vp-bili-btn').find((node) => textOf(node) === '更新引擎')
+    expect(update, 'no engine update button before the failed manual update')
+    update.props.onClick()
+    await flush()
+    expect(textOf(page.tree).includes('视频引擎更新失败，可重试。'), 'the failed manual update was not reported')
+    hostState = 'updating'
+    const refresh = findByAttr(page.tree, 'data-vp-env-refresh')
+    refresh.props.onClick()
+    await flush()
+    const text = textOf(page.tree)
+    expect(text.includes('正在更新视频引擎…'), 'the newer running update is not shown: ' + text.slice(0, 300))
+    expect(!text.includes('视频引擎更新失败'), 'a stale failure is still shown next to a running update')
+    expect(!findByAttr(page.tree, 'data-vp-env-engine-retry'), 'a retry is offered while the Host is already updating')
+    unmount(page)
+  }
 }
 
-console.log('dock state ok: clear removes card, canceled is not ready, auto-clear, late poll cannot revive the closing card, batch owns turn end, search line budget/hold/session/disable guards, environment card restart notice/manual update/updating poll/failed retry/bounded reads, failed save persists, debounce keeps both keys')
+console.log('dock state ok: clear removes card, canceled is not ready, auto-clear, late poll cannot revive the closing card, batch owns turn end, search line budget/hold/session/disable guards, environment card restart notice/manual update/updating poll/failed retry/bounded reads, stale failure/busy copy cleared by a newer update, slow first queue read not duplicated, failed save persists, debounce keeps both keys')

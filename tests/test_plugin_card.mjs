@@ -169,6 +169,20 @@ if (link.type.name !== 'LinkCard') throw new Error('expected LinkCard, got ' + l
 const linkRendered = link.type(link.props)
 if (!JSON.stringify(linkRendered).includes('Transformer 链接')) throw new Error('link card title missing')
 
+// A Douyin resolve is still a video-link payload, but its card must name the
+// actual platform instead of the hard-coded Bilibili kicker.
+const douyinLink = captured.component({
+  block: {
+    call: { argsRaw: JSON.stringify({ command: 'resolve', url: 'https://www.douyin.com/video/7665930064613199114' }) },
+    content: [{ type: 'text', text: JSON.stringify({ ok: true, kind: 'video-link', platform: 'douyin', title: '抖音链接', url: 'https://www.douyin.com/video/7665930064613199114', uploader: 'tester' }) }],
+    isError: false,
+  },
+})
+if (douyinLink.type.name !== 'LinkCard') throw new Error('expected LinkCard for a Douyin link')
+const douyinLinkJson = JSON.stringify(douyinLink.type(douyinLink.props))
+if (!douyinLinkJson.includes('抖音视频')) throw new Error('Douyin link card is not labelled 抖音视频')
+if (douyinLinkJson.includes('Bilibili')) throw new Error('Douyin link card still claims Bilibili')
+
 // Inline job card: same information the old floating HUD had, in place.
 const progress = captured.component({
   block: {
@@ -1253,4 +1267,4 @@ for (const [label, source, pattern] of [
   if (!pattern.test(source)) throw new Error('missing regression guard: ' + label)
 }
 
-console.log('card ok: composer-preview, link, discovery, inline-job, evidence, search, live-window, error-window, same-video-session, dismiss-persistence, settings, per-session-live, theme-colour, stale-watchdog, turn-end-close, success-state, direct-link-row, cleared-direct-row, folded-preserved, failed-row-unblocked, trailing-slash-resolve, batch-kept-on-direct, retry-dedupe, bv-only-dedupe, stale-card-keeps-retry, parts-stay-separate, case-sensitive-ids, finished-row-not-demoted, retry-clears-lost, live-batch-append, replayed-card-no-row, terminal-replay-no-row, history-blocked, no-picker, host-shortlist-table, jobs-row-guard')
+console.log('card ok: composer-preview, link, douyin-link-label, discovery, inline-job, evidence, search, live-window, error-window, same-video-session, dismiss-persistence, settings, per-session-live, theme-colour, stale-watchdog, turn-end-close, success-state, direct-link-row, cleared-direct-row, folded-preserved, failed-row-unblocked, trailing-slash-resolve, batch-kept-on-direct, retry-dedupe, bv-only-dedupe, stale-card-keeps-retry, parts-stay-separate, case-sensitive-ids, finished-row-not-demoted, retry-clears-lost, live-batch-append, replayed-card-no-row, terminal-replay-no-row, history-blocked, no-picker, host-shortlist-table, jobs-row-guard')

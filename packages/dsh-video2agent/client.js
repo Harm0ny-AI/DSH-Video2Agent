@@ -2110,7 +2110,10 @@ window.__ModuleLoader__.load({
               || (action === 'update-cli' ? '视频引擎更新失败，可重试。' : '安装失败，请稍后重试。')
             setLog(String(error) + (data && data.output ? '\n' + data.output : ''))
             if (action === 'update-cli') {
-              engineProgressRef.current = false
+              // A busy lock means another run already owns the update: keep
+              // following it so that "有安装任务正在进行" is cleared when the
+              // update settles instead of sitting under a later success line.
+              engineProgressRef.current = busyLock && stillUpdating
               if (!busyLock) setUpdateResult({ state: 'failed' })
             }
           } else if (action === 'update-cli') {
@@ -2170,9 +2173,12 @@ window.__ModuleLoader__.load({
       const engineState = engine ? String(engine.state || '') : ''
       const engineUpdating = engineState === 'updating'
       // A Host that now reports ready overrides an older local failure (e.g. the
-      // retry succeeded but the answer came from another update path).
-      const engineFailed = engineState === 'failed'
-        || (!!(updateResult && updateResult.state === 'failed') && engineState !== 'ready')
+      // retry succeeded but the answer came from another update path). A newer
+      // update in progress also supersedes it: a failed manual POST followed by
+      // a re-check that reports a running update used to show both "正在更新"
+      // and "更新失败" (plus a retry button) at the same time.
+      const engineFailed = !engineUpdating && (engineState === 'failed'
+        || (!!(updateResult && updateResult.state === 'failed') && engineState !== 'ready'))
       const engineReady = !engineFailed && !engineUpdating
         && ((engineState === 'ready' && sawUpdatingRef.current) || !!(updateResult && updateResult.state === 'ready'))
       const engineVersion = String((engine && engine.target) || (data && data.cli && data.cli.version) || '')
@@ -3970,14 +3976,17 @@ window.__ModuleLoader__.load({
             }
           }
         }
-        tick()
-        timer = setInterval(() => {
+        // The first tick uses the same guard as the interval: a slow initial
+        // read used to leave the interval free to start a second one 2.5s
+        // later, so two /job reads (each spawning Python) ran at once.
+        const runTick = () => {
           // A slow tick must not stack requests: each one spawns Python.
-          if (!stopped && !ticking) {
-            ticking = true
-            Promise.resolve(tick()).finally(() => { ticking = false })
-          }
-        }, 2500)
+          if (stopped || ticking) return
+          ticking = true
+          Promise.resolve(tick()).finally(() => { ticking = false })
+        }
+        runTick()
+        timer = setInterval(runTick, 2500)
         return () => { alive = false; stopped = true; if (timer) clearInterval(timer) }
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [queue && queue.createdAt, jobsKey, anyRunning])
@@ -4528,9 +4537,13 @@ window.__ModuleLoader__.load({
 
     function LinkCard(props) {
       const data = props.data
+      // resolve carries the platform for both sources; a Douyin link must not be
+      // labelled Bilibili (the composer preview already follows the platform).
+      const platformLabel = String(data.platform || '').toLowerCase() === 'douyin'
+        ? '抖音视频' : 'Bilibili'
       return h('div', { 'data-vp-card': '' },
         h('div', { 'data-vp-head': '' },
-          h('div', { 'data-vp-kicker': '' }, 'Bilibili · 视频链接'),
+          h('div', { 'data-vp-kicker': '' }, platformLabel + ' · 视频链接'),
           h('div', { 'data-vp-muted': '' }, data.platform || 'video')
         ),
         h('div', { 'data-vp-linkrow': '' },

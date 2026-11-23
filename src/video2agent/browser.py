@@ -10,6 +10,7 @@ person would see. It is optional: install the extra with
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import time
@@ -32,6 +33,12 @@ _DOUYIN_ID_RE = re.compile(r"抖音号[：:]\s*([0-9A-Za-z_-]+)")
 _IP_RE = re.compile(r"IP属地[：:]\s*([^\n\s]+)")
 _WORKS_RE = re.compile(r"作品\s*\n\s*" + _COUNT_RE)
 _LOGIN_COOKIES = ("sessionid", "sessionid_ss")
+
+_PROFILE_API_MARKER = "/aweme/v1/web/user/profile/other/"
+_PROFILE_COUNT_KEYS = ("follows", "fans", "likes", "works")
+_MAX_PROFILE_BATCH = 10
+_MAX_PROFILE_ENTRY_TIMEOUT_S = 60.0
+_PROFILE_API_GRACE_S = 1.0
 
 # The visible tabs are role=tab headers; the data-e2e="user-*-tab" nodes are
 # hidden panes. Keep the alias map and the list selector in one place so a new
@@ -147,17 +154,25 @@ def parse_profile(title: str, text: str, url: str) -> dict[str, Any]:
     douyin_id = _DOUYIN_ID_RE.search(text or "")
     ip_location = _IP_RE.search(text or "")
     works = _WORKS_RE.search(text or "")
+    displayed = {
+        "follows": _parse_count(follows),
+        "fans": _parse_count(fans),
+        "likes": _parse_count(likes),
+        "works": _parse_count(works),
+    }
     return {
         "ok": True,
         "platform": "douyin",
         "url": url,
         "nickname": nickname,
         "douyin_id": douyin_id.group(1) if douyin_id else "",
-        "follows": _parse_count(follows),
-        "fans": _parse_count(fans),
-        "likes": _parse_count(likes),
-        "works": _parse_count(works),
+        **displayed,
         "ip_location": ip_location.group(1) if ip_location else "",
+        # The DOM prints 1.4万/30.1万; the profile JSON carries 14064/301208.
+        # Keep both so a later readiness re-read cannot silently overwrite an
+        # exact counter with the rounded visible one.
+        "displayed_counts": dict(displayed),
+        "counts_exact": {key: False for key in _PROFILE_COUNT_KEYS},
     }
 
 
@@ -241,6 +256,48 @@ def _profile_target(raw: str) -> tuple[str, bool]:
     sec = sec_uid_of(value)
     return PROFILE_URL.format(sec_uid=sec), False
 
+
+def _canonical_profile_target(raw: str) -> tuple[str, str]:
+    """Strictly canonicalise one batch entry to (sec_uid, profile URL)."""
+    value = str(raw or "").strip()
+    if not value:
+        raise Video2AgentError("E_DOUYIN_USER", "主页参数为空", "传抖音主页链接或 sec_uid。")
+    if value.startswith(("http://", "https://")):
+        url, is_self = _profile_target(value)
+    else:
+        if not _SEC_RE.fullmatch(value):
+            raise Video2AgentError("E_DOUYIN_USER", "不是抖音主页链接或 sec_uid", "使用 https://www.douyin.com/user/MS4wLjAB... 或只传 MS4wLjAB...。")
+        url, is_self = PROFILE_URL.format(sec_uid=value), False
+    if is_self:
+        raise Video2AgentError("E_DOUYIN_USER", "批量查询只接受公开主页，不接受 /user/self", "传公开主页链接或 sec_uid；自己的资料用 douyin me。")
+    sec = sec_uid_of(url)
+    return sec, PROFILE_URL.format(sec_uid=sec)
+
+
+def parse_profile_batch(raw: Any) -> list[str]:
+    """Validate the JSON array for douyin profiles --urls."""
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise Video2AgentError("E_DOUYIN_ARGS", f"--urls 不是合法 JSON：{exc.msg}", "传一个 JSON 字符串数组，例如 [\"https://www.douyin.com/user/MS4wLjAB...\"]。") from exc
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        raise Video2AgentError("E_DOUYIN_ARGS", "缺少 --urls", "传一个 JSON 字符串数组（1-10 个主页链接或 sec_uid）。")
+    if not isinstance(items, list):
+        raise Video2AgentError("E_DOUYIN_ARGS", "--urls 必须是 JSON 数组", "例如 [\"https://www.douyin.com/user/MS4wLjAB...\"]。")
+    if not 1 <= len(items) <= _MAX_PROFILE_BATCH:
+        raise Video2AgentError("E_DOUYIN_ARGS", f"--urls 需要 1-{_MAX_PROFILE_BATCH} 个主页，收到 {len(items)} 个", f"一次最多查询 {_MAX_PROFILE_BATCH} 个主页，分几次重试。")
+    cleaned: list[str] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, str):
+            raise Video2AgentError("E_DOUYIN_ARGS", f"--urls 第 {index + 1} 项不是字符串", "每一项都必须是主页链接或 sec_uid 字符串。")
+        value = item.strip()
+        if not value:
+            raise Video2AgentError("E_DOUYIN_ARGS", f"--urls 第 {index + 1} 项为空", "去掉空项后重试。")
+        cleaned.append(value)
+    return cleaned
 
 def _validate_profile(result: dict[str, Any], *, is_self: bool) -> dict[str, Any]:
     """Turn empty/logged-out pages into actionable errors instead of ok:true."""
@@ -548,10 +605,12 @@ def _merge_api_profile(result: dict[str, Any], user: dict[str, Any]) -> dict[str
         "favoriting_count": "favoriting_count",
         "mix_count": "mix_count",
     }
+    exact = result.setdefault("counts_exact", {})
     for output_key, api_key in mapping.items():
         value = user.get(api_key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             result[output_key] = int(value)
+            exact[output_key] = True
     nickname = str(user.get("nickname") or "").strip()
     if nickname:
         result["nickname"] = nickname
@@ -569,10 +628,233 @@ def _merge_api_profile(result: dict[str, Any], user: dict[str, Any]) -> dict[str
     return result
 
 
+def _query_sec_uid(url: str) -> str:
+    """Read the profile API identity from its query string (sec_user_id)."""
+    try:
+        from urllib.parse import parse_qs, urlparse
+        query = parse_qs(urlparse(str(url or "")).query)
+    except Exception:
+        return ""
+    for key in ("sec_user_id", "sec_uid"):
+        for value in query.get(key) or []:
+            text = str(value or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _profile_response_identity(payload: Any, url: str) -> tuple[str, dict[str, Any]]:
+    """Return (identity, user) only when the response is internally consistent."""
+    if not isinstance(payload, dict):
+        return "", {}
+    user = payload.get("user")
+    if not isinstance(user, dict):
+        return "", {}
+    payload_sec = str(user.get("sec_uid") or "").strip()
+    query_sec = _query_sec_uid(url)
+    # A cached/proxied response for a different person must never overwrite this
+    # page: if the payload and its URL name different sec_uids, trust neither.
+    if payload_sec and query_sec and payload_sec != query_sec:
+        return "", {}
+    identity = payload_sec or query_sec
+    if not identity:
+        return "", {}
+    return identity, user
+
+
+def _profile_capture(expected_sec: str) -> tuple[dict[str, Any], Any]:
+    """Capture only the profile response whose identity is the requested person."""
+    holder: dict[str, Any] = {"user": {}}
+
+    def capture(response: Any) -> None:
+        try:
+            url = str(response.url)
+        except Exception:
+            return
+        if _PROFILE_API_MARKER not in url:
+            return
+        try:
+            payload = response.json()
+        except Exception:
+            return
+        identity, user = _profile_response_identity(payload, url)
+        if not user or not identity:
+            return
+        if expected_sec and identity != expected_sec:
+            return
+        holder["user"].clear()
+        holder["user"].update(user)
+
+    return holder, capture
+
+
+def _safe_page_title(page: Any, timeout_ms: int | None = None) -> str:
+    try:
+        if timeout_ms is None:
+            return str(page.title() or "")
+        return str(page.title(timeout=max(1, int(timeout_ms))) or "")
+    except Exception:
+        return ""
+
+
+def _safe_page_url(page: Any) -> str:
+    try:
+        return str(page.url or "")
+    except Exception:
+        return ""
+
+
+def _profile_page_sec(page_url: str) -> str:
+    """Return the sec_uid only for an exact normalised /user/<sec_uid> path.
+
+    No substring matching and no fallback to the requested URL: a redirect to
+    another profile, the login wall, or a missing current URL must not pass as
+    the person we asked for.
+    """
+    try:
+        from urllib.parse import unquote, urlparse
+        parsed = urlparse(str(page_url or ""))
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme.lower() not in ("http", "https") or host not in _PROFILE_HOSTS:
+            return ""
+        path = parsed.path or ""
+    except Exception:
+        return ""
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "user":
+        return unquote(parts[1])
+    return ""
+
+
+def _profile_snapshot(page: Any, *, url: str, holder: dict[str, Any],
+                      logged_in: bool, deadline: float,
+                      expected_sec: str) -> dict[str, Any]:
+    title_ms = max(1, int((deadline - time.monotonic()) * 1000))
+    title = _safe_page_title(page, title_ms)
+    text_ms = max(1, int((deadline - time.monotonic()) * 1000))
+    text = _page_text(page, timeout_ms=text_ms)
+    result = parse_profile(title, text, url)
+    api_user = holder.get("user") or {}
+    page_sec = _profile_page_sec(_safe_page_url(page))
+    if expected_sec:
+        api_sec = str(api_user.get("sec_uid") or "").strip() if api_user else ""
+        # Never merge a matching API blob into DOM text from another URL: that
+        # would produce a truthful API identity with the wrong page's counters.
+        if page_sec != expected_sec or (api_sec and api_sec != expected_sec):
+            api_user = {}
+    if api_user:
+        result = _merge_api_profile(result, api_user)
+    result["logged_in"] = bool(logged_in)
+    return result
+
+
+def _profile_identity_ok(*, api_user: dict[str, Any], page_url: str,
+                         expected_sec: str, is_self: bool,
+                         result: dict[str, Any]) -> bool:
+    if expected_sec:
+        if _profile_page_sec(page_url) != expected_sec:
+            return False
+        api_sec = str(api_user.get("sec_uid") or "").strip() if api_user else ""
+        return not api_sec or api_sec == expected_sec
+    if is_self:
+        return bool(result.get("logged_in")) or bool(result.get("nickname"))
+    return False
+
+
+def _profile_counters_complete(result: dict[str, Any]) -> bool:
+    return all(result.get(key) is not None for key in _PROFILE_COUNT_KEYS)
+
+
+def _profile_counts_are_exact(result: dict[str, Any]) -> bool:
+    exact = result.get("counts_exact") or {}
+    return all(bool(exact.get(key)) for key in _PROFILE_COUNT_KEYS)
+
+
+def _profile_deadline_guard(page: Any, *, expected_sec: str,
+                             result: dict[str, Any]) -> dict[str, Any]:
+    """At the time bound, only accept the exact requested /user/<sec_uid> page."""
+    if expected_sec and _profile_page_sec(_safe_page_url(page)) != expected_sec:
+        raise Video2AgentError(
+            "E_DOUYIN_USER",
+            "主页没有停留在请求的账号页（可能被重定向或遇到验证页），已跳过",
+            "检查链接是否仍指向该主页；如果出现登录/验证页，先完成验证或 douyin login 后重试。",
+        )
+    return result
+
+
+def _wait_for_profile(page: Any, *, url: str, expected_sec: str, is_self: bool,
+                      timeout_s: float, logged_in: bool, holder: dict[str, Any],
+                      api_grace_s: float) -> dict[str, Any]:
+    """Poll until identity and all four counters are readable, or the bound expires.
+
+    The old fixed 9s sleep both wasted time and could return before the profile
+    JSON arrived. This exits as soon as the exact API counters are in; if only the
+    DOM is ready it waits a short grace for the exact response, then returns the
+    displayed counts without ever overwriting them with a later rounded re-read.
+    Every page/title read is given only the remaining deadline, and the timeout
+    path re-checks the current URL so a redirect cannot be returned as the target.
+    """
+    deadline = time.monotonic() + max(0.001, float(timeout_s))
+    grace = max(0.0, float(api_grace_s))
+    dom_ready_since: float | None = None
+    result: dict[str, Any] = {}
+    while True:
+        if time.monotonic() >= deadline:
+            return _profile_deadline_guard(page, expected_sec=expected_sec, result=result)
+        api_user = holder.get("user") or {}
+        result = _profile_snapshot(
+            page, url=url, holder=holder, logged_in=logged_in, deadline=deadline,
+            expected_sec=expected_sec,
+        )
+        page_url = _safe_page_url(page)
+        complete = bool(result.get("nickname")) and _profile_counters_complete(result)
+        if complete and _profile_identity_ok(api_user=api_user, page_url=page_url,
+                                             expected_sec=expected_sec, is_self=is_self,
+                                             result=result):
+            if _profile_counts_are_exact(result) or grace <= 0:
+                return result
+            now = time.monotonic()
+            if dom_ready_since is None:
+                dom_ready_since = now
+            if now - dom_ready_since >= grace:
+                return result
+        else:
+            dom_ready_since = None
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            return _profile_deadline_guard(page, expected_sec=expected_sec, result=result)
+        try:
+            page.wait_for_timeout(min(250, max(1, int(remain * 1000))))
+        except Exception as exc:
+            if _is_closed_browser_error(exc):
+                raise Video2AgentError(
+                    "E_DOUYIN_USER",
+                    "主页页面在读取时被关闭",
+                    "重试；如果反复关闭，先关闭多余的浏览器窗口。",
+                ) from exc
+            raise
+
+
+def _load_profile_page(page: Any, url: str, *, expected_sec: str, is_self: bool,
+                       timeout_s: float, logged_in: bool,
+                       api_grace_s: float = _PROFILE_API_GRACE_S) -> dict[str, Any]:
+    holder, capture = _profile_capture(expected_sec)
+    page.on("response", capture)
+    budget = max(0.001, float(timeout_s))
+    deadline = time.monotonic() + budget
+    goto_timeout = max(1, int(min(45000, (deadline - time.monotonic()) * 1000)))
+    page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout)
+    return _wait_for_profile(
+        page, url=url, expected_sec=expected_sec, is_self=is_self,
+        timeout_s=max(0.01, deadline - time.monotonic()), logged_in=logged_in,
+        holder=holder, api_grace_s=api_grace_s,
+    )
+
 def profile(sec_uid_or_url: str, *, cookie_path: str | Path | None = None,
             wait_ms: int = 9000) -> dict[str, Any]:
     """Read a Douyin profile page through the browser; no JSON/signature needed."""
     url, is_self = _profile_target(sec_uid_or_url)
+    expected_sec = "" if is_self else sec_uid_of(url)
     sync_playwright = _playwright()
     with sync_playwright() as playwright:
         browser = _launch(playwright)
@@ -588,32 +870,154 @@ def profile(sec_uid_or_url: str, *, cookie_path: str | Path | None = None,
                         "name": c["name"], "value": c["value"], "domain": c["domain"],
                         "path": c["path"], "expires": c["expires"] or -1, "secure": c["secure"],
                     } for c in cookies])
-            page = context.new_page()
-            api_user: dict[str, Any] = {}
-
-            def capture(response: Any) -> None:
-                if "/aweme/v1/web/user/profile/other/" not in str(response.url):
-                    return
-                try:
-                    payload = response.json()
-                    if isinstance(payload, dict) and isinstance(payload.get("user"), dict):
-                        api_user.clear()
-                        api_user.update(payload["user"])
-                except Exception:
-                    return
-
-            page.on("response", capture)
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            page.wait_for_timeout(wait_ms)
-            result = parse_profile(page.title(), page.inner_text("body"), url)
-            if api_user:
-                result = _merge_api_profile(result, api_user)
-            result["logged_in"] = any(
+            logged_in = any(
                 c.get("name") in _LOGIN_COOKIES for c in context.cookies()
             )
-            return _validate_profile(result, is_self=is_self)
+            page = context.new_page()
+            try:
+                result = _load_profile_page(
+                    page, url, expected_sec=expected_sec, is_self=is_self,
+                    timeout_s=max(0.5, float(wait_ms) / 1000.0),
+                    logged_in=logged_in,
+                )
+                return _validate_profile(result, is_self=is_self)
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
         finally:
             browser.close()
+
+
+def _profile_error_row(input_value: str, sec_uid: str, exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, Video2AgentError):
+        error = exc.as_dict()
+    else:
+        error = {
+            "code": "E_DOUYIN_USER",
+            "message": f"读取主页失败（{type(exc).__name__}）",
+            "remedy": "稍后重试；如果持续失败，先运行 video2agent douyin login。",
+        }
+    return {"input": input_value, "sec_uid": sec_uid, "ok": False, "error": error}
+
+
+def _profile_entry_timeout(value: Any) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as exc:
+        raise Video2AgentError(
+            "E_DOUYIN_ARGS",
+            f"entry timeout 不是数字：{value!r}",
+            "传秒数（默认 12）。",
+        ) from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise Video2AgentError(
+            "E_DOUYIN_ARGS",
+            "entry timeout 必须大于 0 秒",
+            "传一个正数秒数（默认 12）。",
+        )
+    return max(0.05, min(_MAX_PROFILE_ENTRY_TIMEOUT_S, timeout))
+
+
+def profiles(urls: Any, *, entry_timeout_s: float = 12.0,
+             api_grace_s: float = _PROFILE_API_GRACE_S) -> dict[str, Any]:
+    """Read 1-10 public Douyin homepages in one browser/context.
+
+    Returns ok=true with per-entry errors if at least one person was read; ok=false
+    (plus E_DOUYIN_PROFILES) only when every distinct entry failed. One page is
+    opened per distinct person and closed before the next, so a stale response
+    cannot leak into the following profile.
+    """
+    inputs = parse_profile_batch(urls)
+    timeout = _profile_entry_timeout(entry_timeout_s)
+    started = time.monotonic()
+    rows: list[dict[str, Any] | None] = []
+    plan: list[tuple[int, str, str, str]] = []
+    seen: set[str] = set()
+    duplicates = 0
+
+    for raw in inputs:
+        try:
+            sec, url = _canonical_profile_target(raw)
+        except Video2AgentError as exc:
+            rows.append(_profile_error_row(raw, "", exc))
+            continue
+        if sec in seen:
+            duplicates += 1
+            continue
+        seen.add(sec)
+        rows.append(None)
+        plan.append((len(rows) - 1, raw, sec, url))
+
+    if plan:
+        sync_playwright = _playwright()
+        with sync_playwright() as playwright:
+            browser = _launch(playwright)
+            try:
+                context = browser.new_context(
+                    viewport={"width": 1280, "height": 900}, locale="zh-CN",
+                )
+                try:
+                    try:
+                        logged_in = any(
+                            c.get("name") in _LOGIN_COOKIES for c in context.cookies()
+                        )
+                    except Exception:
+                        logged_in = False
+                    for index, raw, sec, url in plan:
+                        page = None
+                        try:
+                            page = context.new_page()
+                            result = _load_profile_page(
+                                page, url, expected_sec=sec, is_self=False,
+                                timeout_s=timeout, logged_in=logged_in,
+                                api_grace_s=api_grace_s,
+                            )
+                            result = _validate_profile(result, is_self=False)
+                            row = {"input": raw, "sec_uid": sec, "url": url, "ok": True}
+                            row.update(result)
+                            rows[index] = row
+                        except Video2AgentError as exc:
+                            rows[index] = _profile_error_row(raw, sec, exc)
+                        except Exception as exc:  # noqa: BLE001 - one page must not abort the batch
+                            rows[index] = _profile_error_row(raw, sec, exc)
+                        finally:
+                            if page is not None:
+                                try:
+                                    page.close()
+                                except Exception:
+                                    pass
+                finally:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+            finally:
+                browser.close()
+
+    results = [row for row in rows if row is not None]
+    succeeded = sum(1 for row in results if row.get("ok"))
+    failed = len(results) - succeeded
+    payload: dict[str, Any] = {
+        "ok": succeeded > 0,
+        "platform": "douyin",
+        "requested": len(inputs),
+        "count": len(results),
+        "succeeded": succeeded,
+        "failed": failed,
+        "duplicates": duplicates,
+        "entry_timeout_s": timeout,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "results": results,
+    }
+    if not succeeded:
+        payload["error"] = {
+            "code": "E_DOUYIN_PROFILES",
+            "message": f"{len(results)} 个主页都没有读取成功",
+            "remedy": "检查链接是否有效；需要登录的内容先运行 video2agent douyin login；稍后重试。",
+        }
+    return payload
 
 
 # Strong phrases only: the login modal also contains an SMS-login tab labelled
@@ -749,9 +1153,11 @@ def _qr_signature(page: Any) -> str:
         return ""
 
 
-def _page_text(page: Any) -> str:
+def _page_text(page: Any, timeout_ms: int | None = None) -> str:
     try:
-        return str(page.inner_text("body"))
+        if timeout_ms is None:
+            return str(page.inner_text("body"))
+        return str(page.inner_text("body", timeout=max(1, int(timeout_ms))))
     except Exception:  # noqa: BLE001
         return ""
 

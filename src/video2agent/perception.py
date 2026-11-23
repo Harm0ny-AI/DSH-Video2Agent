@@ -184,12 +184,18 @@ def _cell_stats(prev_rgb: np.ndarray, rgb: np.ndarray) -> tuple[np.ndarray, np.n
 
 
 def _cut_events(g: np.ndarray, support: np.ndarray, fps: int,
-                color: np.ndarray, color_support: np.ndarray) -> list[dict[str, Any]]:
+                color: np.ndarray, color_support: np.ndarray,
+                start_ms: int = 0) -> list[dict[str, Any]]:
     """Hard cuts: an absolute jump with wide spatial support that stands out from
     its own +-1 s baseline. Structure covers normal cuts; the colour channel
     covers a cut between two flat scenes (a theme switch, a solid title card),
     where luma NCC is undefined. A pan is a sustained drop, not a spike, and
-    flicker is periodic, so neither passes the spike test."""
+    flicker is periodic, so neither passes the spike test.
+
+    Array indices are window-local (frame 0 is the first decoded frame), while
+    the returned t_ms is source time: start_ms is added here so a windowed scan
+    reports the same coordinates as a full scan. Mixing the two shifted every
+    windowed cut, shot and moment by the window offset."""
     signal = np.maximum(g, color * 2.0)
     cuts: list[dict[str, Any]] = []
     n = len(g)
@@ -203,7 +209,7 @@ def _cut_events(g: np.ndarray, support: np.ndarray, fps: int,
         base = float(np.median(win)) if len(win) else 0.0
         if float(signal[i] - base) < CUT_SPIKE:
             continue
-        t_ms = int(round((i + 1) * 1000 / fps))
+        t_ms = int(start_ms + round((i + 1) * 1000 / fps))
         if cuts and t_ms - cuts[-1]["t_ms"] < CUT_MERGE_MS:
             if float(signal[i]) > cuts[-1]["g"]:
                 cuts[-1] = {"t_ms": t_ms, "g": round(float(signal[i]), 3),
@@ -234,13 +240,18 @@ def _shot_rows(bounds: list[int], score: np.ndarray, start_ms: int, fps: int) ->
 
 def _moment_events(score: np.ndarray, cell_stack: np.ndarray, color_stack: np.ndarray,
                    fps: int, shots: list[dict[str, Any]],
-                   cuts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                   cuts: list[dict[str, Any]],
+                   start_ms: int = 0) -> list[dict[str, Any]]:
     """Rank changes relative to their own shot: constant motion is not an event,
-    one changed cell in a still shot is. Temporal NMS keeps one per 0.6 s."""
+    one changed cell in a still shot is. Temporal NMS keeps one per 0.6 s.
+
+    score index i is the change between decoded frames i and i+1, so its source
+    time is start_ms + (i+1)/fps. Shots and cuts are already source time; the
+    shot lookup and cut exclusion below must use the same clock."""
     accepted: list[int] = []
     picked: list[dict[str, Any]] = []
     for i in np.argsort(-score):
-        t_ms = int(round((i + 1) * 1000 / fps))
+        t_ms = int(start_ms + round((i + 1) * 1000 / fps))
         if float(score[i]) < MOMENT_ABS:
             break
         shot = next((s for s in shots if s["start_ms"] <= t_ms < s["end_ms"]), None)
@@ -275,7 +286,8 @@ def _moment_events(score: np.ndarray, cell_stack: np.ndarray, color_stack: np.nd
         floor_index = max(0, i - int(0.8 * fps))
         while onset > floor_index and float(score[onset - 1]) >= threshold:
             onset -= 1
-        picked.append({"t_ms": t_ms, "onset_ms": int(round((onset + 1) * 1000 / fps)),
+        picked.append({"t_ms": t_ms,
+                       "onset_ms": int(start_ms + round((onset + 1) * 1000 / fps)),
                        "kind": kind, "score": round(float(score[i]), 2),
                        "cell": [int(r), int(c)], "settles": settles})
         if len(picked) >= 12:
@@ -393,13 +405,18 @@ def _flicker(luma: np.ndarray, fps: int, raw: np.ndarray,
 
 
 def _loop(thumbs: list[np.ndarray], fps: int,
-          shots: list[dict[str, Any]]) -> dict[str, Any] | None:
+          shots: list[dict[str, Any]],
+          start_ms: int = 0) -> dict[str, Any] | None:
     """Loop as appearance repetition, not energy autocorrelation: a sine motion
-    repeats at half its period in energy, which is a known false period."""
+    repeats at half its period in energy, which is a known false period.
+
+    thumbs is window-local, so source-time shot bounds are converted back by
+    subtracting start_ms. Using them directly made a windowed scan read a frame
+    pair seconds away from the shot it was analysing (or nothing at all)."""
     best: dict[str, Any] | None = None
     for shot in shots:
-        i0 = max(0, int(round(shot["start_ms"] * fps / 1000.0)))
-        i1 = min(len(thumbs), int(round(shot["end_ms"] * fps / 1000.0)))
+        i0 = max(0, int(round((shot["start_ms"] - start_ms) * fps / 1000.0)))
+        i1 = min(len(thumbs), int(round((shot["end_ms"] - start_ms) * fps / 1000.0)))
         n = i1 - i0
         if n < max(int(1.5 * fps), 8):
             continue
@@ -557,14 +574,19 @@ def _perceive_media(path: str, *, start_ms: int = 0, end_ms: int | None = None,
     cell_arr = np.stack(cell_stack)
     color_arr = np.stack(color_stack)
 
+    # start_ms is applied exactly once, when a local frame index becomes a
+    # timestamp (cuts/moments); bounds are already source time, so shot rows
+    # subtract it again only to slice the window-local score array.
     cuts = _cut_events(g_arr, sup_arr, fps,
                         np.asarray(color_frame, dtype=np.float32),
-                        np.asarray(color_support, dtype=np.float32))
+                        np.asarray(color_support, dtype=np.float32),
+                        int(start_ms))
     bounds = [int(start_ms)]
     bounds.extend(c["t_ms"] for c in cuts)
     bounds.append(int(start_ms + frames * 1000 / fps))
     shots = _shot_rows(bounds, score_arr, int(start_ms), fps)
-    moments = _moment_events(score_arr, cell_arr, color_arr, fps, shots, cuts)
+    moments = _moment_events(score_arr, cell_arr, color_arr, fps, shots, cuts,
+                             int(start_ms))
     for shot in shots:
         shot.pop("_baseline", None)
 
@@ -593,7 +615,7 @@ def _perceive_media(path: str, *, start_ms: int = 0, end_ms: int | None = None,
 
     compact_shots, shot_count = _compact_shots(shots)
     cut_times = [int(c["t_ms"]) for c in cuts]
-    loop = _loop(thumbs, fps, shots)
+    loop = _loop(thumbs, fps, shots, int(start_ms))
     window_end = int(start_ms + frames * 1000 / fps)
     payload: dict[str, Any] = {
         "ok": True,

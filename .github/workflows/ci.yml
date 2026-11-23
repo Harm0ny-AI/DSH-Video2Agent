@@ -112,6 +112,11 @@ jobs:
 
   # The upgrade gate: a real public 0.3.3 wheel -> this commit's candidate wheel,
   # through the plugin's own startup path, in an isolated venv + isolated home.
+  # Three modes share the same harness: a managed record (in-place), a legacy
+  # record with no provenance (adopted into <home>/engines/<version>/venv-<attempt>), and
+  # no record with the old CLI first on PATH (adopted the same way). The legacy
+  # modes also prove the old 0.3.3 interpreter is left untouched and that the
+  # registered tool calls the new private interpreter.
   # macOS is the leg the other jobs do not cover (Linux/Windows mock the upgrade).
   # No real pip runs on a developer machine; this job is the isolated environment.
   # The harness needs Python + Node + PyPI egress only (no npm/ffmpeg/Playwright/
@@ -120,7 +125,7 @@ jobs:
   macos-upgrade:
     name: macOS upgrade smoke (real 0.3.3 -> candidate)
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -149,10 +154,19 @@ jobs:
           wheel=$(ls "dist/video2agent-${version}-"*.whl | head -n 1)
           VIDEO2AGENT_UPGRADE_WHEEL="$wheel" node tests/test_plugin_upgrade_smoke.mjs
 
-      - name: Legacy record needs one explicit update
+      - name: Legacy record adopts a private engine at startup
         env:
           VIDEO2AGENT_TEST_PYTHON: python
           VIDEO2AGENT_SMOKE_LEGACY: "1"
+        run: |
+          version=$(node -p "require('./packages/dsh-video2agent/package.json').version")
+          wheel=$(ls "dist/video2agent-${version}-"*.whl | head -n 1)
+          VIDEO2AGENT_UPGRADE_WHEEL="$wheel" node tests/test_plugin_upgrade_smoke.mjs
+
+      - name: PATH-only 0.3.3 adopts a private engine at startup
+        env:
+          VIDEO2AGENT_TEST_PYTHON: python
+          VIDEO2AGENT_SMOKE_PATH: "1"
         run: |
           version=$(node -p "require('./packages/dsh-video2agent/package.json').version")
           wheel=$(ls "dist/video2agent-${version}-"*.whl | head -n 1)

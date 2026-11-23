@@ -777,10 +777,12 @@ def _make_parser() -> argparse.ArgumentParser:
     # the logged-in "me" page. Douyin's JSON APIs need signatures, so this drives
     # the user's own Chrome/Edge instead.
     dy = cmd("douyin", "Read a public Douyin profile or log in via a browser (optional)")
-    dy.add_argument("action", choices=["profile", "login", "status", "me", "videos"])
+    dy.add_argument("action", choices=["profile", "profiles", "login", "status", "me", "videos"])
     dy.add_argument("--tab", choices=["works", "likes", "favorites"], default="works", help="videos: works, likes or favorites")
     dy.add_argument("--limit", type=int, default=20, help="videos: maximum rows (default 20)")
     dy.add_argument("--url", default=None, help="Douyin profile URL or sec_uid")
+    dy.add_argument("--urls", default=None, help="profiles: JSON array of 1-10 homepage URLs or sec_uids")
+    dy.add_argument("--entry-timeout", type=float, default=12.0, help="profiles: seconds allowed per homepage (default 12)")
     dy.add_argument("--qr-out", default=None, help="Where to save the login QR screenshot")
     dy.add_argument("--status-out", default=None, help="Write the login stage (verifying/qr/waiting) here")
     dy.add_argument("--timeout", type=float, default=180.0, help="Seconds to wait for the QR scan")
@@ -1346,6 +1348,18 @@ def _run_douyin(args: Any, cfg: Any) -> dict[str, Any]:
 
     action = str(getattr(args, "action", "") or "")
     cookies = cfg.home / "cookies" / "douyin.txt"
+    if action == "profiles":
+        raw = getattr(args, "urls", None)
+        if raw is None:
+            raise Video2AgentError(
+                "E_DOUYIN_ARGS",
+                "缺少 --urls",
+                '传一个 JSON 字符串数组，例如 \'["https://www.douyin.com/user/MS4wLjAB..."]\'。',
+            )
+        return browser.profiles(
+            raw,
+            entry_timeout_s=float(getattr(args, "entry_timeout", 12.0)),
+        )
     if action == "status":
         from .douyin_search import login_status
 

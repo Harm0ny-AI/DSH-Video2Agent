@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.3.7 (2026-11-24)
+
+- **Older engines move into a versioned private environment on startup.** An
+  install whose record has no provenance, or that only exists as a
+  `video2agent` command on PATH, is now adopted automatically when the 0.3.7
+  plugin loads. The plugin builds a fresh venv under
+  `<home>/engines/0.3.7/venv-*` from the interpreter that really runs the old
+  CLI (the CLI's own `doctor` for a pipx/venv wrapper, otherwise every Python
+  candidate rather than the first one on PATH), installs the exact plugin
+  version there, and switches the record in one atomic rename only after the
+  new engine and the components the old one had (browser/OCR) are verified.
+  The old environment is never modified or deleted, so a failed attempt simply
+  keeps it in use. Explicit `VIDEO2AGENT_BIN`/`VIDEO2AGENT_PYTHON` pins, an
+  editable checkout and a direct-URL install stay on the manual update path.
+- **OCR and browser components install into the engine's own environment.**
+  The card used to pip-install into whichever `python` came first on PATH, so
+  it could say "已安装" while `models status` still reported OCR missing. The
+  install now runs in the interpreter the managed record names, or the one the
+  CLI's own `doctor` reports for a PATH/pipx engine, and refuses with an
+  actionable message when no trustworthy interpreter can be identified. It
+  pins `video2agent[ocr]==<installed version>` instead of `--upgrade`, so
+  satisfying the extra cannot backtrack or replace the core engine.
+- **Link previews follow the settings TTL.** The Host's resolve cache used a
+  hard-coded 24 hours, so a cached preview kept resolving long after the page
+  would have refreshed it (or the reverse). It now judges entries against the
+  same `cacheTtlMs` the composer persists.
+- **Cards stop contradicting their own state.** A failed manual engine update
+  that was followed by a running update no longer shows "更新失败" plus a retry
+  button under "正在更新"; a busy lock keeps following the run, so
+  "有安装任务正在进行" clears when the update settles; the queue poll's first
+  tick uses the same guard as its interval, so a slow read no longer starts a
+  second `/job` (each spawns Python); a Douyin link card is labelled
+  "抖音视频" instead of Bilibili.
+- **Douyin creator batches and homepage links.** `admin douyin` gains a
+  `profiles` action: 1-10 homepage URLs or sec_uids in one browser session
+  (`douyin profiles --urls` from the CLI), one page per person (~12s each,
+  bounded), deduped by sec_uid, with a per-row error so one bad link does not
+  abort the batch. A partial batch keeps its successes; an all-failed batch
+  answers `E_DOUYIN_PROFILES` and still lists every row. `find` Douyin
+  candidates now carry a verified `profile_url` built from `uploader_sec_uid`,
+  so find → profiles needs no URL rebuilding. Each page is confirmed to be the
+  requested `/user/<sec_uid>` and its counters wait for the profile JSON's
+  exact numbers (14064/301208) instead of a fixed 9s sleep, so a redirect or
+  another person's cached response cannot be returned as the target.
+- **Windowed `perceive` timestamps are source time.** A windowed scan mixed
+  two clocks: cut and moment timestamps were window-local while shot rows used
+  source time, so every windowed cut and moment was shifted by the window
+  start, attributed to the wrong shot, and the loop analysis compared frames
+  from the wrong part of the window. The offset is now applied exactly once,
+  when a window-local frame index becomes a timestamp; `perceive` with
+  `start`/`end` reports the same coordinates as a full scan.
+
 ## 0.3.6 (2026-11-23)
 
 - **A plugin-managed video engine follows the loaded plugin.** After the 0.3.6

@@ -134,9 +134,9 @@ duplicate frames, flicker) as numbers.
 ### 6. Account and export
 
 `admin` `account` reads Bilibili favorites/history/folders; writes are CLI-only.
-`admin` `douyin`: `admin_action:"douyin"`, `douyin_action:"profile|videos|me|status"`;
-`douyin_url` needs the `MS4wLjAB...` sec_uid from `find`'s `uploader_sec_uid`.
-`admin` with `admin_action:"export"` writes a knowledge pack only when asked.
+`admin` `douyin`: `douyin_action:"me|profile|videos|status|profiles"`; one via
+`douyin_url`, 1-10 via `douyin_urls` (per-row errors), ids from `find`'s `profile_url`.
+`admin` `admin_action:"export"` writes a knowledge pack only when asked.
 
 ## Hard rules
 

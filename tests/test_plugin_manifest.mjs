@@ -201,8 +201,9 @@ function fakeCtx({ withWebServer = false, provideWebServer = null } = {}) {
   assert.ok(index.includes("query.get('refresh') === '1'"), 'manual refresh must bypass the setup probe cache')
   assert.ok(index.includes('VIDEO2AGENT_PLUGIN_MANIFEST'), 'a launch context can supply the active profile manifest')
 
-  // A legacy record is a path, not an authorization. Applying the plugin with
-  // such a record must resolve the startup gate without probing or pip.
+  // A legacy record is a path, not an authorization for an in-place update.
+  // Applying the plugin may probe it to compare versions, but an unverifiable
+  // optional-component probe must keep the working old engine and never pip.
   const oldBin = process.env.VIDEO2AGENT_BIN
   const oldPython = process.env.VIDEO2AGENT_PYTHON
   delete process.env.VIDEO2AGENT_BIN
@@ -221,8 +222,9 @@ function fakeCtx({ withWebServer = false, provideWebServer = null } = {}) {
   const { ctx: autoCtx } = fakeCtx()
   mod.apply(autoCtx)
   await mod.__test.waitForEngineReady()
-  assert.equal(probes, 0, 'an ambiguous legacy record must not be probed for upgrade')
-  assert.equal(mod.__test.engineUpdatePublic().state, 'idle')
+  assert.equal(probes, 1, 'a legacy record is probed only to compare versions')
+  assert.equal(mod.__test.engineUpdatePublic().state, 'idle',
+    'an unverifiable legacy environment keeps the old engine')
   fs.rmSync(managedPath, { force: true })
   mod.__test.resetEngineUpdate()
   if (oldBin === undefined) delete process.env.VIDEO2AGENT_BIN

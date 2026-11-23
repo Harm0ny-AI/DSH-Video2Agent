@@ -150,6 +150,22 @@ assert.deepEqual(__test.commandArgs({ command: 'admin', admin_action: 'douyin', 
   ['douyin', 'profile', '--url', 'https://www.douyin.com/user/self', '--json'], 'douyin profile must pass the URL')
 assert.equal(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'profile' }), null, 'profile without a URL is an argument error')
 assert.equal(__test.commandArgs({ command: 'admin', admin_action: 'douyin', douyin_action: 'videos', douyin_tab: 'nope' }), null, 'invalid Douyin tab must be rejected')
+// Batch profiles: 1-10 non-empty bounded scalars go to the CLI as ONE --urls
+// JSON-array argv. Individual identity validity stays with Python, so a bad
+// identity must not be rejected here (the batch answers with a per-entry error).
+const batchProfileUrls = ['https://www.douyin.com/user/MS4wLjAB' + 'a'.repeat(24), ' MS4wLjAB' + 'b'.repeat(24) + ' ']
+assert.deepEqual(__test.commandArgs({
+  command: 'admin', admin_action: 'douyin', douyin_action: 'profiles', douyin_urls: batchProfileUrls,
+}), ['douyin', 'profiles', '--urls', JSON.stringify([batchProfileUrls[0], batchProfileUrls[1].trim()]), '--json'],
+'the batch must pass exactly one JSON-array argv, with trimmed identities')
+for (const invalid of [
+  [], Array.from({ length: 11 }, (_, index) => 'MS4wLjAB' + index), ['ok', ''], ['ok', '   '],
+  ['ok', 7], ['ok', null], [{}], 'not-an-array', ['x'.repeat(1025)], ['a\nb'],
+]) {
+  assert.equal(__test.commandArgs({
+    command: 'admin', admin_action: 'douyin', douyin_action: 'profiles', douyin_urls: invalid,
+  }), null, 'invalid douyin_urls must be an argument error: ' + JSON.stringify(invalid).slice(0, 60))
+}
 assert.equal(__test.workerEligible({ command: 'find' }), true)
 // Candidate offers and shortlist idempotency are per session.
 assert.notEqual(__test.discoveryLastPath('session-a'), __test.discoveryLastPath('session-b'), 'discovery candidates must be per session')
@@ -345,7 +361,11 @@ for (const verb of ['find', 'ingest', 'outline', 'read', 'evidence', 'frames', '
   assert.ok(skillText.includes(verb), `SKILL.md must route the ${verb} verb`)
 }
 assert.ok(String(registeredTool.description).length < 1500, 'the tool description must stay a router, not a manual')
-assert.ok(Object.keys(registeredTool.parameters.properties).length <= 56, 'schemas with 57+ params need a split, not another description')
+// 57 is the approved ceiling: the batch profile flow adds one array field
+// (douyin_urls) and still routes through the existing admin verb.
+assert.ok(Object.keys(registeredTool.parameters.properties).length <= 57, 'schemas with 58+ params need a split, not another description')
+assert.ok(registeredTool.parameters.properties.douyin_action.enum.includes('profiles'), 'the batch action must be routable')
+assert.equal(registeredTool.parameters.properties.douyin_urls.maxItems, 10, 'the batch schema must bound the array')
 assert.equal(registeredTool.parameters.properties.command.enum.length, 8, 'the model-facing command enum must stay at eight verbs')
 // Image budget default: text first (docs/COST.md), 2 frames for layout.
 const imagesSchema = registeredTool.parameters?.properties?.images
@@ -561,6 +581,67 @@ assert.equal(advertised.status, 200, 'the advertised origin must be allowed to w
 const stillIntact = JSON.parse((await call('GET')).body)
 assert.notEqual(stillIntact.accentColor, '#ff0000', 'rejected writes must not change settings')
 
+// Link preview TTL: the Host cache must use the same persisted cacheTtlMs the
+// composer stores, not a hard-coded day. The page judges both its localStorage
+// entries and its in-memory copy against getSettings().cacheTtlMs on every
+// mount, so the route reads the merged setting at request time too; a changed
+// TTL re-evaluates an existing entry instead of freezing the old one.
+{
+  const resolveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-resolve-ttl-'))
+  const resolveCount = path.join(resolveDir, 'count.txt')
+  fs.writeFileSync(resolveCount, '0', 'utf8')
+  // An extensionless JS file is what "node resolve <url> --json" executes, the
+  // same fake-CLI pattern the tool tests already use.
+  fs.writeFileSync(path.join(resolveDir, 'resolve'), [
+    "const fs = require('node:fs')",
+    'const counter = ' + JSON.stringify(resolveCount),
+    "fs.writeFileSync(counter, String(Number(fs.readFileSync(counter, 'utf8')) + 1))",
+    "process.stdout.write(JSON.stringify({ ok: true, url: process.argv[2], title: 'TTL video', duration_ms: 1000 }))",
+  ].join('\n'), 'utf8')
+  const readCount = () => Number(fs.readFileSync(resolveCount, 'utf8'))
+  const settingsPath = path.join(home, 'ui-settings.json')
+  const originalSettings = fs.readFileSync(settingsPath, 'utf8')
+  fs.writeFileSync(settingsPath, JSON.stringify({ cacheTtlMs: 60000 }), 'utf8')
+  const cwdBeforeTtl = process.cwd()
+  const realNow = Date.now
+  let fakeNow = realNow()
+  Date.now = () => fakeNow
+  process.chdir(resolveDir)
+  process.env.VIDEO2AGENT_BIN = process.execPath
+  const previewUrl = 'https://www.bilibili.com/video/BV1ttl000001'
+  const previewPath = '/api/video2agent/resolve?url=' + encodeURIComponent(previewUrl)
+  try {
+    const first = await call('GET', undefined, { path: '/api/video2agent/resolve', url: previewPath })
+    assert.equal(first.status, 200, first.body.slice(0, 200))
+    assert.equal(JSON.parse(first.body).title, 'TTL video')
+    assert.equal(readCount(), 1)
+    fakeNow += 59_000
+    const warm = await call('GET', undefined, { path: '/api/video2agent/resolve', url: previewPath })
+    assert.equal(JSON.parse(warm.body).title, 'TTL video')
+    assert.equal(readCount(), 1, 'a preview inside the configured TTL must come from the Host cache')
+    fakeNow += 2_000
+    await call('GET', undefined, { path: '/api/video2agent/resolve', url: previewPath })
+    assert.equal(readCount(), 2, 'the old 24h cache must not outlive the configured 60s TTL')
+    // Raising the TTL through the persisted settings route (the same value the
+    // composer keeps) makes the existing entry fresh again without a restart.
+    const saved = await call('POST', JSON.stringify({ cacheTtlMs: 120000 }))
+    assert.equal(saved.status, 200)
+    assert.equal(JSON.parse(saved.body).cacheTtlMs, 120000)
+    await call('GET', undefined, { path: '/api/video2agent/resolve', url: previewPath })
+    assert.equal(readCount(), 2, 'the cache entry is judged against the current persisted TTL')
+    // This entry was refreshed at the 61s request, so the 120s TTL runs from
+    // that timestamp, not from the first resolve.
+    fakeNow += 121_000
+    await call('GET', undefined, { path: '/api/video2agent/resolve', url: previewPath })
+    assert.equal(readCount(), 3, 'the raised TTL expires at its own boundary')
+  } finally {
+    Date.now = realNow
+    process.chdir(cwdBeforeTtl)
+    process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
+    fs.writeFileSync(settingsPath, originalSettings, 'utf8')
+  }
+}
+
 // `--images` and `--limit` are declared as bounded in the schema; the argv builder
 // must clamp them, because the model can pass anything. Check the value next to
 // the flag, not `.includes('0')` (which `--at 0` would satisfy by accident).
@@ -584,6 +665,33 @@ fs.rmSync(managedTools, { force: true })
 // update is the only thing that grants authorization for the next release.
 await __test.waitForEngineReady()
 {
+  // doctor prints pretty-printed JSON; parsing only the last line used to fail
+  // with "}" and hid the real interpreter on Windows/macOS.
+  assert.deepEqual(
+    __test.parseJsonObjectText('warning: cache\n{\n  "ok": true,\n  "python": {"executable": "/usr/bin/python3"}\n}\n'),
+    { ok: true, python: { executable: '/usr/bin/python3' } },
+    'multi-line CLI JSON must parse as a whole object',
+  )
+  assert.equal(__test.parseJsonObjectText('not json'), null)
+  // Migration may only accept the Chromium this exact Playwright install reports.
+  // A bare chromium-* cache directory from another version must not count.
+  const fakeBrowsers = path.join(tempRoot, 'fts-playwright-browsers')
+  const chromiumDir = path.join(fakeBrowsers, 'chromium-9999')
+  const chromiumSuffix = process.platform === 'win32'
+    ? ['chrome-win', 'chrome.exe']
+    : process.platform === 'darwin'
+      ? ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium']
+      : ['chrome-linux', 'chrome']
+  fs.mkdirSync(path.dirname(path.join(chromiumDir, ...chromiumSuffix)), { recursive: true })
+  fs.writeFileSync(path.join(chromiumDir, ...chromiumSuffix), '')
+  const oldPlaywrightBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH
+  process.env.PLAYWRIGHT_BROWSERS_PATH = fakeBrowsers
+  assert.equal(await __test.detectPlaywrightBrowser('', { strict: false }), true,
+    'the general probe may fall back to the cache scan')
+  assert.equal(await __test.detectPlaywrightBrowser('', { strict: true }), false,
+    'migration must not accept a cache entry without the matching Playwright executable')
+  if (oldPlaywrightBrowsersPath === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH
+  else process.env.PLAYWRIGHT_BROWSERS_PATH = oldPlaywrightBrowsersPath
   const targetVersion = setupData.cli.latest
   const writeEngineRecord = (extra = {}) => {
     fs.mkdirSync(path.dirname(managedTools), { recursive: true })
@@ -621,13 +729,15 @@ await __test.waitForEngineReady()
   delete process.env.VIDEO2AGENT_BIN
   delete process.env.VIDEO2AGENT_PYTHON
 
-  // 1. A legacy record (detection or an old install) is ambiguous. It must not
-  // be probed for upgrade eligibility, let alone updated.
+  // 1. A legacy record (detection or an old install) is never updated in
+  // place. It may be adopted into a private version venv, but only when the old
+  // environment's optional components can be probed honestly. Here that probe
+  // fails, so the working old engine and its record stay untouched.
   reset()
   writeEngineRecord()
   await __test.runEngineAutoUpdate()
-  assert.equal(probeCalls, 0, 'an unverified record must not even be probed for an upgrade')
-  assert.equal(pipCalls.length, 0, 'an unverified record must never trigger pip')
+  assert.equal(probeCalls, 1, 'the legacy engine is probed only to compare versions')
+  assert.equal(pipCalls.length, 0, 'an unverified record must never trigger an in-place pip')
   assert.equal(__test.engineUpdatePublic().state, 'idle')
   assert.equal(readEngineRecord().source, undefined, 'a bare legacy record must stay bare')
 
@@ -1006,11 +1116,409 @@ await __test.waitForEngineReady()
   assert.equal(__test.cliCommand().command, 'video2agent', 'an unverified legacy launcher is not trusted')
 
 
+  // 17. Legacy detected record (an ordinary PyPI engine from an older plugin)
+  // must follow the loaded plugin on first load. It is adopted into a private,
+  // version-specific venv; the old interpreter is never modified and only the
+  // extras the old engine actually had are carried over.
+  __test.resetEngineUpdate()
+  fs.rmSync(managedTools, { force: true })
+  writeEngineRecord({ python: process.execPath, prefix: [], source: 'detected', auto_update: false, version: '0.3.4' })
+  let createdVenvs = []
+  let migrationPips = []
+  const createStubVenv = (base, dir) => {
+    createdVenvs.push({ base: { command: String(base.command), prefix: [...(base.prefix || [])] }, dir })
+    const python = __test.engineVenvPython(dir)
+    fs.mkdirSync(path.dirname(python), { recursive: true })
+    fs.writeFileSync(python, '')
+    return { ok: true, output: 'created' }
+  }
+  installHooks({
+    probeExtras: async () => ({ ok: true, extras: ['browser'], detail: '' }),
+    browserRuntime: async () => true,
+    createVenv: createStubVenv,
+    pipInstall: async (target, options) => {
+      migrationPips.push({ target, ...options })
+      engineVersion = targetVersion
+      return { code: 0, output: 'migrated' }
+    },
+  })
+  engineVersion = '0.3.4'
+  await __test.runEngineAutoUpdate()
+  const migratedState = __test.engineUpdatePublic()
+  assert.equal(migratedState.state, 'ready', 'a legacy PyPI engine must follow the plugin automatically')
+  assert.equal(migratedState.target, targetVersion)
+  assert.equal(createdVenvs.length, 1, 'exactly one private venv is built')
+  assert.equal(createdVenvs[0].base.command, process.execPath, 'the old CLI interpreter is the venv base')
+  assert.ok(createdVenvs[0].dir.startsWith(__test.engineRootDir(targetVersion) + path.sep),
+    'the venv is created below the managed version root')
+  const migratedVenvPython = __test.engineVenvPython(createdVenvs[0].dir)
+  assert.equal(migrationPips.length, 1, 'one bounded pip attempt')
+  assert.equal(migrationPips[0].target.command, migratedVenvPython,
+    'pip runs inside the private venv')
+  assert.equal(migrationPips[0].spec, 'video2agent[browser]==' + targetVersion, 'only installed extras are carried over')
+  assert.ok(migrationPips[0].timeoutMs >= 180000, 'an extras migration gets the bounded larger budget')
+  assert.equal(migrationPips[0].mirror, false, 'automatic adoption does not take a second mirror path')
+  const migratedRecord = readEngineRecord()
+  assert.equal(migratedRecord.python, migratedVenvPython)
+  assert.deepEqual(migratedRecord.prefix, [])
+  assert.equal(migratedRecord.source, 'plugin-install')
+  assert.equal(migratedRecord.auto_update, true)
+  assert.equal(migratedRecord.version, targetVersion)
+  assert.equal(migratedRecord.engine_root, createdVenvs[0].dir)
+  assert.deepEqual(migratedRecord.previous,
+    { python: process.execPath, prefix: [], version: '0.3.4', source: 'detected' },
+    'the old record is kept as a recovery snapshot')
+  assert.equal(__test.readManagedTools().ffmpeg, undefined, 'migration must not disturb other managed tools')
+  assert.equal(__test.cliCommand().command, migratedVenvPython,
+    'tool calls switch to the private interpreter')
+  assert.deepEqual(__test.cliCommand().prefix, ['-m', 'video2agent'])
+  assert.equal(fs.existsSync(__test.engineUpdateMarkerPath()), false)
+
+  // 18. No record at all: the PATH 0.3.3 engine is the Host's current runtime.
+  // doctor is asked which interpreter really runs it, then the same private
+  // venv adoption happens; the old PATH environment stays 0.3.3.
+  __test.resetEngineUpdate()
+  fs.rmSync(managedTools, { force: true })
+  createdVenvs = []
+  migrationPips = []
+  engineVersion = '0.3.3'
+  installHooks({
+    probePathCli: async () => ({ code: 0, out: 'video2agent 0.3.3' }),
+    probeCliDoctor: async () => ({ ok: true, interpreter: process.execPath, version: '0.3.3' }),
+    probeExtras: async () => ({ ok: true, extras: [], detail: '' }),
+    createVenv: createStubVenv,
+    pipInstall: async (target, options) => {
+      migrationPips.push({ target, ...options })
+      engineVersion = targetVersion
+      return { code: 0, output: 'migrated' }
+    },
+  })
+  const pathLegacy = await __test.legacyEngineTarget()
+  assert.equal(pathLegacy.ok, true, 'a bare PATH CLI must be discoverable')
+  assert.equal(pathLegacy.source, 'path')
+  assert.equal(pathLegacy.version, '0.3.3')
+  assert.equal(pathLegacy.target.command, process.execPath, 'doctor names the interpreter that runs the old CLI')
+  await __test.runEngineAutoUpdate()
+  assert.equal(__test.engineUpdatePublic().state, 'ready')
+  assert.equal(migrationPips.length, 1)
+  assert.equal(migrationPips[0].spec, 'video2agent==' + targetVersion, 'no extras installed in the old engine')
+  assert.ok(migrationPips[0].timeoutMs <= 120000, 'a core-only adoption keeps the short bounded budget')
+  const pathRecord = readEngineRecord()
+  assert.ok(pathRecord.python.startsWith(__test.engineRootDir(targetVersion) + path.sep),
+    'the PATH adoption also points inside the managed version root')
+  assert.equal(pathRecord.engine_root, path.dirname(path.dirname(pathRecord.python)))
+  assert.deepEqual(pathRecord.previous,
+    { python: process.execPath, prefix: [], version: '0.3.3', source: null },
+    'a PATH install has no record provenance to carry')
+  assert.equal(pathRecord.source, 'plugin-install')
+
+  // 19. Explicit BIN/PYTHON pins are never adopted, even with a legacy record.
+  for (const [key, value] of [['VIDEO2AGENT_BIN', 'pinned-video2agent'], ['VIDEO2AGENT_PYTHON', 'pinned-python']]) {
+    __test.resetEngineUpdate()
+    engineVersion = '0.3.4'
+    writeEngineRecord({ python: process.execPath, prefix: [], source: 'detected', auto_update: false, version: '0.3.4' })
+    process.env[key] = value
+    let legacyProbes = 0
+    installHooks({ probeExtras: async () => { legacyProbes += 1; return { ok: true, extras: [], detail: '' } } })
+    await __test.runEngineAutoUpdate()
+    assert.equal(__test.engineUpdatePublic().state, 'idle', key + ' must keep the old engine')
+    assert.equal(legacyProbes, 0, key + ' must stop adoption before any old-engine probe')
+    assert.equal(readEngineRecord().source, 'detected', key + ' must not rewrite the record')
+    delete process.env[key]
+  }
+
+  // 20. A legacy environment owned by a project checkout or a local wheel is
+  // never switched away from, even though it is old.
+  for (const dist of [
+    { ok: true, version: '0.3.4', editable: true, direct_url: '{"dir_info":{"editable":true}}' },
+    { ok: true, version: '0.3.4', editable: false, direct_url: '{"url":"file:///tmp/video2agent.whl"}' },
+  ]) {
+    __test.resetEngineUpdate()
+    engineVersion = '0.3.4'
+    fs.rmSync(managedTools, { force: true })
+    writeEngineRecord({ python: process.execPath, prefix: [], source: 'detected', auto_update: false, version: '0.3.4' })
+    let venvCalls = 0
+    installHooks({
+      probeDistribution: async () => dist,
+      probeExtras: async () => ({ ok: true, extras: [], detail: '' }),
+      createVenv: async (base, dir) => { venvCalls += 1; return createStubVenv(base, dir) },
+    })
+    await __test.runEngineAutoUpdate()
+    assert.equal(__test.engineUpdatePublic().state, 'idle', 'an owned legacy environment must be left alone')
+    assert.equal(venvCalls, 0, 'no private venv may replace an editable/direct install')
+    assert.equal(readEngineRecord().source, 'detected', 'the owned record must not be rewritten')
+  }
+
+  // 20b. An extra the old engine had must be proven usable in the new venv.
+  // A missing package or a browser runtime that the new Playwright cannot
+  // actually launch blocks the switch; the old record/engine stay.
+  for (const scenario of ['missing-package', 'browser-unavailable']) {
+    __test.resetEngineUpdate()
+    engineVersion = '0.3.4'
+    fs.rmSync(managedTools, { force: true })
+    writeEngineRecord({ python: process.execPath, prefix: [], source: 'detected', auto_update: false, version: '0.3.4' })
+    let builtPython20 = ''
+    let verifyVenvCalls = 0
+    installHooks({
+      probeExtras: async (target) => ({
+        ok: true,
+        extras: scenario === 'missing-package' && target.command === builtPython20 ? [] : ['browser'],
+        detail: '',
+      }),
+      browserRuntime: async () => scenario !== 'browser-unavailable',
+      createVenv: async (base, dir) => { verifyVenvCalls += 1; builtPython20 = __test.engineVenvPython(dir); return createStubVenv(base, dir) },
+      pipInstall: async () => { engineVersion = targetVersion; return { code: 0, output: 'installed' } },
+    })
+    await __test.runEngineAutoUpdate()
+    assert.equal(__test.engineUpdatePublic().state, 'failed', scenario + ' must not report a successful switch')
+    assert.equal(verifyVenvCalls, 1)
+    assert.equal(readEngineRecord().source, 'detected', scenario + ' must keep the old record')
+    assert.equal(__test.cliCommand().command, process.execPath, scenario + ' must keep the old engine')
+  }
+
+  // 21. A failed adoption that already ran an install changes no record, but it
+  // persists its own marker so the next start reports the failure instead of
+  // rebuilding a private venv. Only the explicit update click retries the same
+  // migration. A failure before any install stays transient and may retry.
+  __test.resetEngineUpdate()
+  engineVersion = '0.3.4'
+  fs.rmSync(managedTools, { force: true })
+  writeEngineRecord({ python: process.execPath, prefix: [], source: 'detected', auto_update: false, version: '0.3.4' })
+  let failedVenvCalls = 0
+  migrationPips = []
+  installHooks({
+    probeExtras: async () => ({ ok: true, extras: ['ocr'], detail: '' }),
+    createVenv: async (base, dir) => { failedVenvCalls += 1; return createStubVenv(base, dir) },
+    pipInstall: async (target, options) => {
+      migrationPips.push({ target, ...options })
+      return { code: 1, output: 'network unavailable' }
+    },
+  })
+  await __test.runEngineAutoUpdate()
+  assert.equal(__test.engineUpdatePublic().state, 'failed')
+  assert.equal(failedVenvCalls, 1)
+  assert.equal(migrationPips.length, 1)
+  assert.equal(readEngineRecord().python, process.execPath, 'a failed adoption must not change the record')
+  assert.equal(readEngineRecord().source, 'detected')
+  assert.equal(__test.cliCommand().command, process.execPath, 'the working old engine is still used')
+  const failedMarker = __test.readLegacyMigrationFailure()
+  assert.ok(failedMarker, 'an attempted install must persist a legacy failure marker')
+  assert.equal(failedMarker.kind, 'legacy-migrate')
+  assert.equal(failedMarker.plugin_version, targetVersion)
+  assert.equal(failedMarker.target, targetVersion)
+  assert.equal(failedMarker.old_version, '0.3.4')
+  assert.ok(failedMarker.message, 'the marker keeps the message the card shows')
+  await __test.runEngineAutoUpdate()
+  assert.equal(failedVenvCalls, 1, 'a persisted failure must not rebuild a venv on the next start')
+  assert.equal(migrationPips.length, 1, 'a persisted failure must not run another install')
+  assert.equal(__test.engineUpdatePublic().state, 'failed', 'the next start reports the saved failure')
+
+  // The explicit update click resumes the same private migration. It fails here,
+  // so the marker is refreshed and the record still does not switch.
+  const retriedFailure = await __test.retryLegacyMigration({ cli: { ok: true, version: '0.3.4', latest: targetVersion } })
+  assert.equal(retriedFailure && retriedFailure.ok, false, 'a retried adoption still reports its failure')
+  assert.equal(failedVenvCalls, 2, 'the explicit retry builds one new attempt')
+  assert.ok(__test.readLegacyMigrationFailure(), 'a failed explicit retry keeps the marker')
+
+  // A successful explicit retry switches the record and clears the marker.
+  migrationPips = []
+  installHooks({
+    probeExtras: async () => ({ ok: true, extras: [], detail: '' }),
+    createVenv: createStubVenv,
+    pipInstall: async (target, options) => {
+      migrationPips.push({ target, ...options })
+      engineVersion = targetVersion
+      return { code: 0, output: 'migrated' }
+    },
+  })
+  const retried = await __test.retryLegacyMigration({ cli: { ok: true, version: '0.3.4', latest: targetVersion } })
+  assert.equal(retried && retried.ok, true, 'the explicit retry must adopt the engine')
+  assert.equal(fs.existsSync(__test.engineUpdateMarkerPath()), false, 'a successful adoption clears the marker')
+  assert.equal(readEngineRecord().source, 'plugin-install')
+  assert.notEqual(path.resolve(readEngineRecord().python), path.resolve(process.execPath),
+    'the explicit retry uses the private engine')
+  assert.equal(__test.cliCommand().command, readEngineRecord().python,
+    'tool calls use the adopted engine after the retry')
+
+  // A failure before any install (the venv cannot be created) is not persisted:
+  // nothing was installed, so the next start may retry it.
+  __test.resetEngineUpdate()
+  engineVersion = '0.3.4'
+  fs.rmSync(managedTools, { force: true })
+  writeEngineRecord({ python: process.execPath, prefix: [], source: 'detected', auto_update: false, version: '0.3.4' })
+  let transientVenvCalls = 0
+  installHooks({
+    probeExtras: async () => ({ ok: true, extras: [], detail: '' }),
+    createVenv: async () => { transientVenvCalls += 1; return { ok: false, output: 'no venv module' } },
+  })
+  await __test.runEngineAutoUpdate()
+  assert.equal(__test.engineUpdatePublic().state, 'failed')
+  assert.equal(transientVenvCalls, 1)
+  assert.equal(__test.readLegacyMigrationFailure(), null, 'a venv failure installs nothing and must not persist a marker')
+  await __test.runEngineAutoUpdate()
+  assert.equal(transientVenvCalls, 2, 'a failure before any install still retries on the next start')
+
+  // The legacy marker must not block the normal in-place update of a record that
+  // was since authorized (for example by a manual update).
+  __test.resetEngineUpdate()
+  engineVersion = '0.3.4'
+  writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+  fs.writeFileSync(__test.engineUpdateMarkerPath(), JSON.stringify({
+    kind: 'legacy-migrate', plugin_version: targetVersion, target: targetVersion,
+    state: 'failed', message: 'old adoption failed', at: new Date().toISOString(),
+  }), 'utf8')
+  pipCalls = []
+  installHooks()
+  await __test.runEngineAutoUpdate()
+  assert.equal(pipCalls.length, 1, 'a legacy marker must not block the managed in-place update')
+  assert.equal(__test.engineUpdatePublic().state, 'ready')
+  assert.equal(fs.existsSync(__test.engineUpdateMarkerPath()), false, 'the managed update clears the old marker')
+
+  // 22. An already-current legacy install is left exactly as detected.
+  __test.resetEngineUpdate()
+  engineVersion = targetVersion
+  fs.rmSync(managedTools, { force: true })
+  writeEngineRecord({ python: process.execPath, prefix: [], source: 'detected', auto_update: false, version: targetVersion })
+  let currentVenvCalls = 0
+  installHooks({
+    probeExtras: async () => ({ ok: true, extras: [], detail: '' }),
+    createVenv: async (base, dir) => { currentVenvCalls += 1; return createStubVenv(base, dir) },
+  })
+  await __test.runEngineAutoUpdate()
+  assert.equal(__test.engineUpdatePublic().state, 'idle')
+  assert.equal(currentVenvCalls, 0, 'a current engine needs no migration')
+  assert.equal(readEngineRecord().source, 'detected', 'a current legacy record stays as it is')
+
+  // 23. Adoption holds the engine-install barrier: tool/GC/command entry
+  // points wait until the private environment is verified, then proceed.
+  __test.resetEngineUpdate()
+  engineVersion = '0.3.4'
+  fs.rmSync(managedTools, { force: true })
+  writeEngineRecord({ python: process.execPath, prefix: [], source: 'detected', auto_update: false, version: '0.3.4' })
+  let releaseAdoption = null
+  let markAdoptionStarted = null
+  const adoptionStarted = new Promise((resolve) => { markAdoptionStarted = resolve })
+  installHooks({
+    probeExtras: async () => ({ ok: true, extras: [], detail: '' }),
+    createVenv: createStubVenv,
+    pipInstall: async (target, options) => {
+      migrationPips.push({ target, ...options })
+      markAdoptionStarted()
+      await new Promise((resolve) => { releaseAdoption = resolve })
+      engineVersion = targetVersion
+      return { code: 0, output: 'migrated' }
+    },
+  })
+  const adoption = __test.runEngineAutoUpdate()
+  await adoptionStarted
+  let adoptionEntryResolved = false
+  const adoptionEntry = __test.waitForEngineReady().then(() => { adoptionEntryResolved = true })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(adoptionEntryResolved, false, 'entry points must wait while the private environment is built')
+  releaseAdoption()
+  await adoption
+  await adoptionEntry
+  assert.equal(adoptionEntryResolved, true, 'entry points resume after the private environment is verified')
+  assert.equal(__test.engineUpdatePublic().state, 'ready')
+
   // Restore the harness environment for the remaining tool tests.
   __test.resetEngineUpdate()
   fs.rmSync(managedTools, { force: true })
   process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
   process.env.VIDEO2AGENT_PYTHON = path.join(home, 'missing-python')
+}
+
+// Component installs (OCR/browser) must add the optional extra to the
+// interpreter that really runs the CLI. The old OCR path used the first
+// "python" on PATH, so a plugin-managed/private engine reported the button as
+// installed while the running CLI still had no OCR. These exercise the real
+// /setup entry point; pip itself is injected.
+{
+  const componentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-component-'))
+  const enginePython = path.join(componentDir, 'engine-python')
+  fs.writeFileSync(enginePython, '')
+  const modelsPath = path.join(componentDir, 'models')
+  const writeModels = (available) => fs.writeFileSync(modelsPath,
+    'process.stdout.write(' + JSON.stringify(JSON.stringify({
+      ok: true, ocr: { available, engine_package: 'rapidocr', version: '3.0.0' },
+    })) + ')', 'utf8')
+  writeModels(false)
+  fs.writeFileSync(path.join(componentDir, 'doctor'),
+    'process.stdout.write(' + JSON.stringify(JSON.stringify({
+      ok: true,
+      checks: [],
+      python: { executable: enginePython, version: '3.12.9' },
+    })) + ')', 'utf8')
+  const pipCalls = []
+  __test.setEngineTestHooks({
+    // The engine already installed in the target interpreter is newer than the
+    // plugin here: a component install pins that exact version, never guesses a
+    // downgrade to the plugin version and never lets pip backtrack the core.
+    probeDistribution: async () => ({ ok: true, version: '0.3.9', editable: false, direct_url: '' }),
+    componentPip: async (target, info) => {
+      pipCalls.push({ target, ...info })
+      // The installed extra is visible to the next setup probe.
+      writeModels(true)
+      if (pipCalls.length === 1) return { code: 1, out: '', err: 'default index unavailable' }
+      return { code: 0, out: 'installed', err: '' }
+    },
+  })
+  const cwdBeforeComponent = process.cwd()
+  process.chdir(componentDir)
+  process.env.VIDEO2AGENT_BIN = process.execPath
+  try {
+    const installed = await call('POST', JSON.stringify({ action: 'install-ocr' }), { path: '/api/video2agent/setup' })
+    assert.equal(installed.status, 200, 'install-ocr must answer: ' + installed.body.slice(0, 400))
+    const body = JSON.parse(installed.body)
+    assert.equal(body.ok, true,
+      'OCR must install into the interpreter that runs the active CLI: ' + installed.body.slice(0, 500))
+    assert.equal(pipCalls.length, 2, 'the mirror retry keeps its original behaviour')
+    assert.equal(pipCalls[0].target.command, enginePython,
+      'OCR must use the interpreter the CLI doctor reports, not the first python on PATH')
+    assert.equal(pipCalls[1].args.includes('-i'), true, 'the retry still uses the mirror')
+    for (const row of pipCalls) {
+      assert.equal(row.args.includes('--upgrade'), false,
+        'a component install must not replace/upgrade the core engine')
+      assert.deepEqual(row.args.slice(-1), ['video2agent[ocr]==0.3.9'],
+        'the extra is pinned to the installed core version, so pip cannot backtrack or downgrade it')
+      assert.equal(row.version, '0.3.9')
+      assert.equal(row.args.some((arg) => /^[<>]=?/.test(arg)), false,
+        'no guessed version range may replace the exact installed pin')
+    }
+  } finally {
+    process.chdir(cwdBeforeComponent)
+    process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
+    __test.setEngineTestHooks({ componentPip: null, probeDistribution: null })
+  }
+
+  // The managed record is the exact invocation the Host uses; it outranks a
+  // different interpreter a probe might report.
+  const oldBinComponent = process.env.VIDEO2AGENT_BIN
+  delete process.env.VIDEO2AGENT_BIN
+  const recordPython = path.join(home, 'engines', 'pinned', process.platform === 'win32' ? 'python.exe' : 'bin/python')
+  fs.mkdirSync(path.dirname(recordPython), { recursive: true })
+  fs.writeFileSync(recordPython, '')
+  __test.saveManagedCli(recordPython, [], { source: 'plugin-install' })
+  try {
+    const picked = await __test.componentInstallInterpreter({
+      cli: { ok: true },
+      browser: { interpreter: process.execPath },
+    })
+    assert.equal(picked.ok, true)
+    assert.equal(picked.command, recordPython, 'the managed record owns the component environment')
+    assert.equal(picked.via, 'record')
+    fs.rmSync(managedTools, { force: true })
+
+    // A known CLI with no honest owner must not fall through to another Python:
+    // refuse instead of writing into an environment the Host never invokes.
+    __test.setEngineTestHooks({ probeCliDoctor: async () => ({ ok: false, interpreter: '', version: '' }) })
+    const refused = await __test.componentInstallInterpreter({ cli: { ok: true }, browser: { interpreter: '' } })
+    assert.equal(refused.ok, false)
+    assert.equal(refused.reason, 'interpreter-unknown')
+  } finally {
+    __test.setEngineTestHooks({ probeCliDoctor: null })
+    process.env.VIDEO2AGENT_BIN = oldBinComponent
+  }
 }
 
 const flagValue = (argv, flag) => argv[argv.indexOf(flag) + 1]
@@ -1476,6 +1984,224 @@ assert.equal(failedStatus.phase, 'error', 'a failed start must leave a visible s
     assert.equal(queue.jobs[0].video_id, 'BV1fake00001', 'the dock queue must receive the started row')
   } finally {
     process.chdir(cwdBeforeFake)
+    process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
+  }
+}
+
+// Batch profiles through the real tool path: one controlled subprocess (a fake
+// douyin executable) proves the Host sends one --urls JSON argv and preserves a
+// per-entry failure in a partial-success payload. No login, browser, or network.
+{
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-fake-profiles-'))
+  const recordPath = path.join(fakeDir, 'argv.json')
+  const secUid = 'MS4wLjAB' + 'a'.repeat(30)
+  const profileUrl = 'https://www.douyin.com/user/' + secUid
+  const batchPayload = {
+    ok: true,
+    platform: 'douyin',
+    count: 2,
+    succeeded: 1,
+    failed: 1,
+    duplicates: 0,
+    results: [{
+      input: profileUrl,
+      sec_uid: secUid,
+      ok: true,
+      url: profileUrl,
+      nickname: '测试博主',
+      douyin_id: 'test_id',
+      follows: 1,
+      fans: 2,
+      likes: 3,
+      works: 4,
+      counts_exact: { follows: true, fans: true, likes: true, works: true },
+      displayed_counts: { fans: 2 },
+    }, {
+      input: 'not-a-profile',
+      sec_uid: '',
+      ok: false,
+      error: { code: 'E_DOUYIN_USER', message: 'invalid profile', remedy: 'use a profile URL or sec_uid' },
+    }],
+    duration_ms: 4321,
+    entry_timeout_s: 12,
+  }
+  fs.writeFileSync(path.join(fakeDir, 'douyin'), [
+    'const fs = require("node:fs")',
+    'fs.writeFileSync(' + JSON.stringify(recordPath) + ', JSON.stringify(process.argv.slice(2)))',
+    'process.stdout.write(' + JSON.stringify(JSON.stringify(batchPayload)) + ')',
+  ].join('\n'), 'utf8')
+  const cwdBeforeBatch = process.cwd()
+  pluginModule.__test.stopWorker()
+  process.chdir(fakeDir)
+  try {
+    process.env.VIDEO2AGENT_BIN = process.execPath
+    const urls = [profileUrl, 'not-a-profile']
+    const result = await registeredTool.execute({
+      command: 'admin',
+      admin_action: 'douyin',
+      douyin_action: 'profiles',
+      douyin_urls: urls,
+    })
+    assert.equal(result.ok, true, 'a partial batch success stays ok: ' + String(result.text).slice(0, 300))
+    assert.deepEqual(JSON.parse(fs.readFileSync(recordPath, 'utf8')),
+      ['profiles', '--urls', JSON.stringify(urls), '--json'],
+      'the batch must reach the CLI as one JSON-array argv')
+    const payload = JSON.parse(String(result.text))
+    assert.equal(payload.results.length, 2)
+    assert.equal(payload.results[0].nickname, '测试博主')
+    assert.equal(payload.results[1].error.code, 'E_DOUYIN_USER', 'a per-entry failure must survive a partial success')
+    assert.equal(payload.succeeded, 1)
+    assert.equal(payload.failed, 1)
+  } finally {
+    process.chdir(cwdBeforeBatch)
+    process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
+  }
+}
+
+// An all-failed batch is exit 1 + E_DOUYIN_PROFILES. The generic failure wrapper
+// used to drop the per-person rows; this verifies the allowlisted shape survives
+// and that an absolute path in a per-entry message is redacted first.
+{
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-fake-profiles-fail-'))
+  const secUid = 'MS4wLjAB' + 'c'.repeat(30)
+  const profileUrl = 'https://www.douyin.com/user/' + secUid
+  const allFailedPayload = {
+    ok: false,
+    platform: 'douyin',
+    requested: 2,
+    count: 2,
+    succeeded: 0,
+    failed: 2,
+    duplicates: 0,
+    results: [{
+      input: profileUrl,
+      sec_uid: secUid,
+      ok: false,
+      error: {
+        code: 'E_DOUYIN_LOGIN',
+        message: 'login required; saved page C:/Users/qa/secret/profile.html',
+        remedy: 'run douyin login',
+      },
+    }, {
+      input: 'bad-identity',
+      sec_uid: '',
+      ok: false,
+      error: {
+        code: 'E_DOUYIN_USER',
+        message: 'invalid identity in C:/Users/qa/secret/ids.json',
+        remedy: 'pass a profile URL or sec_uid',
+      },
+    }],
+    error: { code: 'E_DOUYIN_PROFILES', message: 'all profiles failed', remedy: 'check each row' },
+    duration_ms: 9000,
+    entry_timeout_s: 12,
+  }
+  fs.writeFileSync(path.join(fakeDir, 'douyin'), [
+    'process.stdout.write(' + JSON.stringify(JSON.stringify(allFailedPayload)) + ')',
+    'process.exitCode = 1',
+  ].join('\n'), 'utf8')
+  const cwdBeforeBatchFail = process.cwd()
+  pluginModule.__test.stopWorker()
+  process.chdir(fakeDir)
+  try {
+    process.env.VIDEO2AGENT_BIN = process.execPath
+    const result = await registeredTool.execute({
+      command: 'admin',
+      admin_action: 'douyin',
+      douyin_action: 'profiles',
+      douyin_urls: [profileUrl, 'bad-identity'],
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.error.code, 'E_DOUYIN_PROFILES', 'the top-level batch code must survive')
+    assert.ok(!String(result.text).includes('Users'), 'an absolute path must be redacted from the batch rows')
+    assert.ok(String(result.text).includes('profile.html'), 'the basename stays readable')
+    const payload = JSON.parse(String(result.text))
+    assert.equal(payload.ok, false)
+    assert.equal(payload.platform, 'douyin')
+    assert.equal(payload.requested, 2)
+    assert.equal(payload.count, 2)
+    assert.equal(payload.succeeded, 0)
+    assert.equal(payload.failed, 2)
+    assert.equal(payload.results.length, 2, 'every per-entry row must survive an all-failed batch')
+    assert.equal(payload.results[0].error.code, 'E_DOUYIN_LOGIN')
+    assert.equal(payload.results[1].error.code, 'E_DOUYIN_USER')
+    assert.ok(payload.results[0].input.startsWith('https://www.douyin.com/user/'), 'a profile URL must not be redacted')
+    const renderedFailure = registeredTool.output.render({ command: 'admin' }, result)
+    const envelope = JSON.parse(renderedFailure[0].text)
+    assert.equal(envelope.ok, false)
+    assert.equal(envelope.error.code, 'E_DOUYIN_PROFILES')
+    const cardPayload = JSON.parse(envelope.text)
+    assert.equal(cardPayload.results.length, 2, 'the card must keep the per-person rows too')
+  } finally {
+    process.chdir(cwdBeforeBatchFail)
+    process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
+  }
+}
+
+// Douyin search candidates get an additive trusted profile_url derived only
+// from the already-returned sec_uid. Invalid identities and Bilibili rows must
+// not gain one, and no extra request is made (the fake CLI only prints).
+{
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-fake-profile-url-'))
+  const secUid = 'MS4wLjAB' + 'd'.repeat(30)
+  const discoverPayload = {
+    ok: true,
+    query: 'douyin creator',
+    candidates: [{
+      candidate_id: 'douyin_7500000000000000001',
+      platform: 'douyin',
+      video_id: '7500000000000000001',
+      url: 'https://www.douyin.com/video/7500000000000000001',
+      title: '合法博主视频',
+      uploader: '合法博主',
+      uploader_sec_uid: secUid,
+      duration_ms: 1000,
+      stats: { play_count: 5 },
+    }, {
+      candidate_id: 'douyin_7500000000000000002',
+      platform: 'douyin',
+      video_id: '7500000000000000002',
+      url: 'https://www.douyin.com/video/7500000000000000002',
+      title: '无身份视频',
+      uploader: '无身份',
+      uploader_sec_uid: 'not-a-verified-sec-uid',
+      duration_ms: 1000,
+      stats: { play_count: 3 },
+    }, {
+      candidate_id: 'bili_BV1profileurl',
+      platform: 'bilibili',
+      video_id: 'BV1profileurl',
+      url: 'https://www.bilibili.com/video/BV1profileurl',
+      title: 'B站视频',
+      uploader: 'B站UP',
+      uploader_sec_uid: secUid,
+      duration_ms: 1000,
+      stats: { play: 1 },
+    }],
+  }
+  fs.writeFileSync(path.join(fakeDir, 'discover'),
+    'process.stdout.write(' + JSON.stringify(JSON.stringify(discoverPayload)) + ')', 'utf8')
+  const cwdBeforeProfileUrl = process.cwd()
+  pluginModule.__test.stopWorker()
+  process.chdir(fakeDir)
+  try {
+    process.env.VIDEO2AGENT_BIN = process.execPath
+    const found = await registeredTool.execute(
+      { command: 'find', query: 'douyin creator', scope: 'douyin' },
+      { agent: { session: { id: 'sess-profile-url' } } },
+    )
+    assert.equal(found.ok, true, String(found.text).slice(0, 300))
+    const payload = JSON.parse(String(found.text))
+    assert.equal(payload.candidates[0].profile_url, 'https://www.douyin.com/user/' + secUid,
+      'a verified Douyin sec_uid must produce a trusted profile_url')
+    assert.equal('profile_url' in payload.candidates[1], false, 'an unverified sec_uid must not gain a profile_url')
+    assert.equal('profile_url' in payload.candidates[2], false, 'a Bilibili row must stay unchanged')
+    const stored = JSON.parse(fs.readFileSync(__test.discoveryLastPath('sess-profile-url'), 'utf8'))
+    assert.equal(stored.candidates[0].profile_url, 'https://www.douyin.com/user/' + secUid,
+      'the shortlist snapshot must carry the same trusted profile_url')
+    assert.equal('profile_url' in stored.candidates[2], false)
+  } finally {
+    process.chdir(cwdBeforeProfileUrl)
     process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
   }
 }

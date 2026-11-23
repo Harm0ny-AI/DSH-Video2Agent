@@ -56,6 +56,21 @@ function compareVersions(a, b) {
   return 0
 }
 
+// CLI helper commands print pretty-printed JSON, so the last line is just "}".
+// Parse the whole payload, and still tolerate a warning line before the object.
+function parseJsonObjectText(text) {
+  const trimmed = String(text || '').trim()
+  if (!trimmed) return null
+  const candidates = [trimmed]
+  const first = trimmed.indexOf('{')
+  const last = trimmed.lastIndexOf('}')
+  if (first >= 0 && last > first) candidates.push(trimmed.slice(first, last + 1))
+  for (const candidate of candidates) {
+    try { return JSON.parse(candidate) } catch {}
+  }
+  return null
+}
+
 // The plugin row's Config, so DSH's own config editor validates and shows these
 // values alongside every other plugin instead of hiding them in a private file.
 // Runtime precedence: ui-settings.json (written by the settings form) over this
@@ -165,10 +180,12 @@ function managedToolEnv(baseEnv = process.env) {
 // deliberately ambiguous: old versions wrote it after a mere detection, so it
 // must not authorize anything.
 function saveManagedCli(pythonCommand, pythonPrefix, extra = {}) {
+  const target = managedToolsPath()
+  const temporary = target + '.tmp-' + process.pid + '-' + Date.now()
   try {
     const tools = readManagedTools()
     const previous = tools.cli && typeof tools.cli === 'object' ? tools.cli : {}
-    fs.mkdirSync(path.dirname(managedToolsPath()), { recursive: true })
+    fs.mkdirSync(path.dirname(target), { recursive: true })
     const cli = {
       ...previous,
       python: pythonCommand,
@@ -176,9 +193,14 @@ function saveManagedCli(pythonCommand, pythonPrefix, extra = {}) {
       at: new Date().toISOString(),
       ...(extra && typeof extra === 'object' ? extra : {}),
     }
-    fs.writeFileSync(managedToolsPath(), JSON.stringify({ ...tools, cli }, null, 2), 'utf8')
+    // Atomic replace: a crash must never leave a half-written record that makes
+    // cliCommand guess another interpreter. Same directory keeps the rename on
+    // one filesystem.
+    fs.writeFileSync(temporary, JSON.stringify({ ...tools, cli }, null, 2), 'utf8')
+    fs.renameSync(temporary, target)
     return true
   } catch {
+    try { fs.rmSync(temporary, { force: true }) } catch {}
     return false
   }
 }
@@ -212,6 +234,11 @@ const CLI_PACKAGE = 'video2agent'
 // Automatic pip must finish well inside a normal tool budget. A manual click may
 // use the full setup budget.
 const ENGINE_AUTO_PIP_TIMEOUT_MS = 90000
+// A legacy migration also has to create a venv and carry the optional extras the
+// old engine already had (browser/OCR wheels are much larger than the core
+// package), so its single bounded pip gets a larger budget. The managed in-place
+// path above keeps its short automatic budget.
+const ENGINE_MIGRATE_PIP_TIMEOUT_MS = 180000
 const ENGINE_WORKER_QUIESCE_MS = 15000
 const ENGINE_UPDATE = { state: 'idle', target: '', message: '' }
 // Test-only seams. The Node harness must never run a real pip against the
@@ -223,6 +250,18 @@ const ENGINE_TEST_HOOKS = {
   probeInterpreter: null,
   probeEnvironment: null,
   onDiskVersion: null,
+  // Legacy migration seams: the real harness never creates a venv on the test
+  // machine, spawns the PATH CLI, or runs pip. The smoke can leave these unset
+  // to exercise the real cross-platform path.
+  probePathCli: null,
+  probeCliDoctor: null,
+  probeExtras: null,
+  createVenv: null,
+  browserRuntime: null,
+  ocrRuntime: null,
+  // Component installs (OCR/browser) run one injected pip; the harness never
+  // touches a real environment.
+  componentPip: null,
 }
 let ENGINE_READY_GATE = null
 let ENGINE_READY_RESOLVE = null
@@ -345,6 +384,35 @@ function writeEngineUpdateMarker(marker) {
 
 function clearEngineUpdateMarker() {
   try { fs.rmSync(engineUpdateMarkerPath(), { force: true }) } catch {}
+}
+
+// A legacy adoption is heavier than an in-place update: it builds a new venv and
+// installs the package there. A failed attempt must not repeat on every DSH
+// start, so its failure is persisted with its own kind. The managed in-place
+// updater keeps its own marker semantics and must never mistake this one for its
+// own failed attempt.
+const LEGACY_MIGRATION_MARKER_KIND = 'legacy-migrate'
+
+function readLegacyMigrationFailure() {
+  if (!PLUGIN_VERSION) return null
+  const marker = readEngineUpdateMarker()
+  if (!marker || marker.kind !== LEGACY_MIGRATION_MARKER_KIND || marker.state !== 'failed') return null
+  if (marker.plugin_version !== PLUGIN_VERSION || marker.target !== PLUGIN_VERSION) return null
+  return marker
+}
+
+// Written only after an install was actually attempted. A failure before that
+// (for example a venv that cannot be created) is transient and may retry.
+function writeLegacyMigrationFailure(message, oldVersion) {
+  return writeEngineUpdateMarker({
+    kind: LEGACY_MIGRATION_MARKER_KIND,
+    plugin_version: PLUGIN_VERSION,
+    target: PLUGIN_VERSION,
+    state: 'failed',
+    message: String(message || ''),
+    old_version: String(oldVersion || ''),
+    at: new Date().toISOString(),
+  })
 }
 
 // Test-only reset, used after the first gate settles. It is deliberately
@@ -960,6 +1028,69 @@ function redactTextPaths(value) {
   return walk(value)
 }
 
+// An all-failed Douyin profile batch still answers the question: the per-person
+// errors say which creator failed and why. The normal error wrapper collapses a
+// failed CLI payload to only code/message/remedy, which would hide those rows, so
+// this shape is allowlisted. Fields follow the CLI contract; unknown fields are
+// dropped and paths are redacted before anything reaches the model.
+function failedBatchProfileText(payload, error) {
+  if (!payload || typeof payload !== 'object' || !Array.isArray(payload.results)) return null
+  const bounded = (value, max) => String(value == null ? '' : value).slice(0, max)
+  const counts = (value) => {
+    if (!value || typeof value !== 'object') return undefined
+    const out = {}
+    for (const key of ['follows', 'fans', 'likes', 'works']) {
+      if (value[key] !== undefined) out[key] = value[key]
+    }
+    return Object.keys(out).length ? out : undefined
+  }
+  const results = payload.results
+    .filter((row) => row && typeof row === 'object')
+    .map((row) => {
+      const entry = { input: bounded(row.input, DOUYIN_PROFILE_INPUT_MAX), sec_uid: bounded(row.sec_uid, 128), ok: row.ok === true }
+      if (row.ok === true) {
+        if (row.url !== undefined) entry.url = bounded(row.url, 2048)
+        for (const key of ['nickname', 'douyin_id']) {
+          if (row[key] !== undefined) entry[key] = bounded(row[key], 200)
+        }
+        for (const key of ['follows', 'fans', 'likes', 'works']) {
+          if (row[key] !== undefined) entry[key] = row[key]
+        }
+        const exact = counts(row.counts_exact)
+        if (exact) entry.counts_exact = exact
+        const displayed = counts(row.displayed_counts)
+        if (displayed) entry.displayed_counts = displayed
+      } else if (row.error && typeof row.error === 'object') {
+        entry.error = {
+          code: bounded(row.error.code, 64),
+          message: bounded(row.error.message, 1000),
+          remedy: bounded(row.error.remedy, 600),
+        }
+      }
+      return entry
+    })
+  if (!results.length) return null
+  const numeric = (value) => (Number.isFinite(Number(value)) ? Number(value) : undefined)
+  const out = {
+    ok: false,
+    platform: 'douyin',
+    count: numeric(payload.count) ?? results.length,
+    succeeded: numeric(payload.succeeded) ?? 0,
+    failed: numeric(payload.failed) ?? results.length,
+    results,
+    error: {
+      code: bounded(error && error.code, 64) || 'E_DOUYIN_PROFILES',
+      message: bounded(error && error.message, 1000),
+      remedy: bounded(error && error.remedy, 600),
+    },
+  }
+  for (const key of ['requested', 'duplicates', 'duration_ms', 'entry_timeout_s']) {
+    const value = numeric(payload[key])
+    if (value !== undefined) out[key] = value
+  }
+  return JSON.stringify(redactTextPaths(out))
+}
+
 function parseStructuredError(stdout) {
   const text = String(stdout || '').trim()
   if (!text.startsWith('{')) return null
@@ -996,10 +1127,44 @@ function badPositional(value) {
 // Douyin account reads are browser-backed and read-only. Keep the mapping here
 // so the tool can read a logged-in Douyin account from any session, not only the
 // CLI. Login itself stays in the settings card / CLI.
+// A batch profile read opens one browser/context for 1-10 identities, reusing a
+// page per person. Each identity is validated by the CLI, so one bad URL must
+// not abort the batch and the Host only enforces the array shape/bounds.
+const DOUYIN_PROFILES_MAX = 10
+const DOUYIN_PROFILE_INPUT_MAX = 1024
+// Default per-entry bound is 12s; 10 entries plus browser startup stay around
+// 130s, so 240s leaves headroom without letting a hung browser hold a call for
+// the normal 10-minute tool budget.
+const DOUYIN_PROFILES_TIMEOUT_MS = 240000
+
+function douyinBatchUrls(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > DOUYIN_PROFILES_MAX) return null
+  const urls = []
+  for (const item of value) {
+    // Scalar only: an object would serialize into the argv and reach the CLI as
+    // an identity it cannot reason about.
+    if (typeof item !== 'string') return null
+    const text = item.trim()
+    if (!text || text.length > DOUYIN_PROFILE_INPUT_MAX) return null
+    // A control character would corrupt the one-argv JSON value in logs and
+    // terminal echoes; identity validity is still the CLI's decision.
+    if (/[\u0000-\u001f\u007f]/.test(text)) return null
+    urls.push(text)
+  }
+  return urls
+}
+
 function douyinAccountArgs(args) {
   const action = String(args.douyin_action || 'me')
-  if (!['me', 'profile', 'videos', 'status'].includes(action)) return null
+  if (!['me', 'profile', 'videos', 'status', 'profiles'].includes(action)) return null
   const out = ['douyin', action]
+  if (action === 'profiles') {
+    const urls = douyinBatchUrls(args.douyin_urls)
+    if (!urls) return null
+    // Exactly one argv entry: the CLI parses the JSON array itself.
+    out.push('--urls', JSON.stringify(urls), '--json')
+    return out
+  }
   const url = args.douyin_url == null ? '' : String(args.douyin_url).trim()
   if (action === 'profile' && !url) return null
   if ((action === 'profile' || action === 'videos') && url) {
@@ -1026,6 +1191,19 @@ function looksLikeDouyinProfile(value) {
     const u = new URL(raw)
     return /(^|\.)douyin\.com$/i.test(u.hostname) && /^\/user\//.test(u.pathname)
   } catch { return false }
+}
+
+// Search results already carry the author's sec_uid from the data they returned;
+// deriving the profile URL adds no request. Only a verified Douyin sec_uid is
+// trusted, and only Douyin rows change, so Bilibili candidates (and a placeholder
+// or missing sec_uid) stay byte-identical. This lets find -> profiles chain
+// without the model rebuilding the URL from the skill text.
+function withCandidateProfileUrl(candidate) {
+  if (!candidate || typeof candidate !== 'object') return candidate
+  if (String(candidate.platform || '') !== 'douyin') return candidate
+  const secUid = String(candidate.uploader_sec_uid || '').trim()
+  if (!/^MS4wLjAB[A-Za-z0-9_-]{20,}$/.test(secUid)) return candidate
+  return { ...candidate, profile_url: 'https://www.douyin.com/user/' + secUid }
 }
 
 function commandArgs(args) {
@@ -1587,8 +1765,14 @@ export function apply(ctx, config) {
               return
             }
             const now = Date.now()
+            // The composer persists cacheTtlMs and judges both its localStorage
+            // entries and its in-memory copy against getSettings().cacheTtlMs on
+            // every mount. The Host cache must use the same read-time value, not
+            // a hard-coded day, or a preview keeps resolving server-side long
+            // after the page would have refreshed it (or vice versa).
+            const ttlMs = readMergedSettings().cacheTtlMs
             const cached = RESOLVE_RESULT_CACHE.get(url)
-            if (cached && now - cached.at < 24 * 60 * 60 * 1000) {
+            if (cached && now - cached.at < ttlMs) {
               res.statusCode = 200
               res.setHeader('Content-Type', 'application/json; charset=utf-8')
               res.setHeader('Cache-Control', 'no-store')
@@ -1824,11 +2008,14 @@ export function apply(ctx, config) {
     }
   }
 
-  async function detectPlaywrightBrowser(interpreter) {
+  async function detectPlaywrightBrowser(interpreter, { strict = false } = {}) {
     // A Python package alone is not usable. Prefer the user's Chrome/Edge, then
     // ask Playwright itself for the Chromium executable it expects. The directory
-    // scan is only a fallback for an old CLI that cannot answer the probe; it
-    // never treats headless_shell as a visible-window runtime.
+    // scan is a fallback for an old CLI that cannot answer the probe; it never
+    // treats headless_shell as a visible-window runtime. Strict mode is for
+    // migration: an arbitrary cached chromium-* directory can belong to a
+    // different Playwright version, so only the executable this exact install
+    // reports may count as compatible.
     const roots = [
       process.env.PLAYWRIGHT_BROWSERS_PATH,
       path.join(process.env.LOCALAPPDATA || '', 'ms-playwright'),
@@ -1841,6 +2028,10 @@ export function apply(ctx, config) {
       const executable = String(probe.out || '').trim().split('\n').pop() || ''
       if (probe.code === 0 && executable && fs.existsSync(executable)) return true
     }
+    // Do not accept a directory scan for migration: it would let a downloaded
+    // Chromium from an older Playwright look usable and lose the browser after
+    // the switch.
+    if (strict) return false
     const names = process.platform === 'win32'
       ? ['chrome-win/chrome.exe']
       : process.platform === 'darwin'
@@ -2223,13 +2414,390 @@ export function apply(ctx, config) {
     }
   }
 
+  // ---- Legacy engine adoption ------------------------------------------------
+  // Older plugin versions recorded only "this interpreter can run the CLI" and
+  // never wrote provenance, so engineAutoTarget() correctly refuses to update
+  // that record in place. That left an ordinary PyPI 0.3.x engine on the manual
+  // path forever after the plugin was upgraded. Adoption never modifies the old
+  // environment: it builds a version-specific private venv, validates it, and
+  // only then atomically switches the record. Explicit pins and self-managed
+  // (editable/direct-url) installs stay with their owner.
+  function engineHomePath() {
+    return path.join(v2aHomePath(), 'engines')
+  }
+
+  function engineRootDir(version) {
+    return path.join(engineHomePath(), String(version))
+  }
+
+  // Each attempt gets a fresh unique venv directory below the version root. A
+  // venv embeds absolute paths in its scripts, so it is created where it will
+  // live and never moved. Existing venvs are never deleted or overwritten (no
+  // recursive deletion here); a failed attempt is kept for diagnostics, and its
+  // persisted failure marker is what stops the next start from building another.
+  function newEngineVenvDir(version) {
+    try {
+      const root = engineRootDir(version)
+      fs.mkdirSync(root, { recursive: true })
+      return fs.mkdtempSync(path.join(root, 'venv-'))
+    } catch {
+      return ''
+    }
+  }
+
+  function engineVenvPython(dir) {
+    return process.platform === 'win32'
+      ? path.join(dir, 'Scripts', 'python.exe')
+      : path.join(dir, 'bin', 'python')
+  }
+
+  // The PATH console script is what a Host with no record actually runs. It is
+  // tried first so a legacy install is only adopted when something real is there.
+  async function probePathCli() {
+    if (ENGINE_TEST_HOOKS.probePathCli) {
+      const r = await ENGINE_TEST_HOOKS.probePathCli()
+      return { ok: r && r.code === 0, version: engineOutputVersion(r && r.out), output: String((r && r.out) || '') }
+    }
+    const r = await runCommand('video2agent', ['--version'], 30000)
+    return { ok: r.code === 0, version: engineOutputVersion(r.out), output: String(r.out || '') }
+  }
+
+  // A pipx/venv console script may live in a directory whose python is not the
+  // first python on PATH. doctor reports the interpreter that really runs the
+  // CLI, which is the only honest base for the private environment.
+  async function probeCliDoctor() {
+    if (ENGINE_TEST_HOOKS.probeCliDoctor) return await ENGINE_TEST_HOOKS.probeCliDoctor()
+    const r = await runCli(['doctor', '--json'], 30000)
+    const data = parseJsonObjectText(r.out)
+    if (data) {
+      const interpreter = String((data && data.python && data.python.executable) || '')
+      return { ok: r.code === 0, interpreter, version: String((data && data.version) || '') }
+    }
+    return { ok: false, interpreter: '', version: '' }
+  }
+
+  // Optional components are carried over only when the old engine really has
+  // them. Installing an extra (and failing) must never silently drop OCR or
+  // browser support the user already had.
+  async function probeEngineExtras(target) {
+    if (ENGINE_TEST_HOOKS.probeExtras) return await ENGINE_TEST_HOOKS.probeExtras(target)
+    const code = [
+      'import importlib.util as u, json',
+      'def has(name):',
+      '    try:',
+      '        return u.find_spec(name) is not None',
+      '    except Exception:',
+      '        return False',
+      'browser = has("playwright")',
+      'ocr = has("rapidocr") or has("rapidocr_onnxruntime")',
+      'print(json.dumps({"ok": True, "browser": browser, "ocr": ocr}))',
+    ].join('\n')
+    const r = await runCommand(target.command, [...(target.prefix || []), '-c', code], 30000)
+    const line = String(r.out || '').trim().split('\n').pop() || ''
+    try {
+      const data = JSON.parse(line)
+      const extras = []
+      if (data.browser === true) extras.push('browser')
+      if (data.ocr === true) extras.push('ocr')
+      return { ok: data.ok === true, extras, detail: '' }
+    } catch {
+      return { ok: false, extras: [], detail: line.slice(0, 300) }
+    }
+  }
+
+  async function createEngineVenv(base, dir) {
+    if (ENGINE_TEST_HOOKS.createVenv) return await ENGINE_TEST_HOOKS.createVenv(base, dir)
+    try {
+      fs.mkdirSync(path.dirname(dir), { recursive: true })
+    } catch (e) {
+      return { ok: false, output: String((e && e.message) || e).slice(0, 500) }
+    }
+    // POSIX and Windows both ship venv in the standard library; a distro that
+    // splits it out reports a normal command error instead of a platform guess.
+    const r = await runCommand(base.command, [...(base.prefix || []), '-m', 'venv', dir], 120000)
+    const output = (String(r.out || '') + '\n' + String(r.err || '')).trim()
+    return { ok: r.code === 0, output: output.slice(-4000) }
+  }
+
+  async function resolvePathCliInterpreter(version) {
+    // doctor is the old CLI's own answer about the interpreter that runs it.
+    // That is authoritative for pipx/venv wrappers, where the first python on
+    // PATH can be a completely different environment.
+    const doctor = await probeCliDoctor()
+    if (doctor.ok && usableInterpreterPath(doctor.interpreter)) {
+      return { command: doctor.interpreter, prefix: [] }
+    }
+    // Fallback: try every candidate, not just the first. On Windows "py" often
+    // starts an unrelated Python while the old CLI's own "python" (or a
+    // pipx/venv launcher earlier on PATH) is the one that can run it.
+    for (const command of pythonCandidates()) {
+      const prefix = command === 'py' ? ['-3'] : []
+      const probe = await probeEngineVersion({ command, prefix })
+      if (probe.ok && (!version || probe.version === version)) {
+        return { command, prefix }
+      }
+    }
+    return null
+  }
+
+  // What old engine (if any) may be adopted. Both a legacy record and a bare
+  // PATH/module install are eligible; an authorized managed record is not (that
+  // path keeps updating in place above), and pins are never touched.
+  async function legacyEngineTarget() {
+    if (process.env.VIDEO2AGENT_BIN) return { ok: false, reason: 'explicit-bin' }
+    if (process.env.VIDEO2AGENT_PYTHON) return { ok: false, reason: 'explicit-python' }
+    const record = readManagedTools().cli
+    if (record && typeof record === 'object' && record.source === 'plugin-install') {
+      return { ok: false, reason: 'managed' }
+    }
+    if (record && typeof record === 'object' && record.python) {
+      const prefix = Array.isArray(record.prefix) ? record.prefix.map(String) : []
+      let target = null
+      if (usableInterpreterPath(record.python)) {
+        target = { command: String(record.python), prefix }
+      } else if (isBareCommandName(record.python)) {
+        // Resolve the recorded launcher without writing it back: a failed
+        // adoption must leave the record exactly as it was.
+        const absolute = await probeEngineInterpreter({ command: String(record.python), prefix })
+        if (absolute) target = { command: absolute, prefix: [] }
+      }
+      if (target) {
+        const probe = await probeEngineVersion(target)
+        if (probe.ok) return { ok: true, target, version: probe.version, source: 'record', record }
+        return { ok: false, reason: 'version-unknown' }
+      }
+    }
+    const pathCli = await probePathCli()
+    if (pathCli.ok && pathCli.version) {
+      const target = await resolvePathCliInterpreter(pathCli.version)
+      if (!target) return { ok: false, reason: 'interpreter-unknown', version: pathCli.version }
+      return { ok: true, target, version: pathCli.version, source: 'path', record: null }
+    }
+    // No PATH console script: the old engine may still be reachable as a module.
+    // Probe every candidate for the same reason as above, rather than trusting
+    // the first Python that happens to exist.
+    for (const command of pythonCandidates()) {
+      const prefix = command === 'py' ? ['-3'] : []
+      const probe = await probeEngineVersion({ command, prefix })
+      if (probe.ok) return { ok: true, target: { command, prefix }, version: probe.version, source: 'python', record: null }
+    }
+    return { ok: false, reason: 'no-engine' }
+  }
+
+  async function verifyPrivateEngine(python) {
+    const probe = await probeEngineVersion({ command: python, prefix: [] })
+    if (!probe.ok || compareVersions(probe.version, PLUGIN_VERSION) < 0) return { ok: false, version: probe.version || '' }
+    const dist = await probeEngineDistribution({ command: python, prefix: [] })
+    if (!dist.ok || dist.editable || dist.direct_url) return { ok: false, version: probe.version || '' }
+    return { ok: true, version: probe.version, dist }
+  }
+
+  async function browserRuntimeAvailable(python) {
+    if (ENGINE_TEST_HOOKS.browserRuntime) return await ENGINE_TEST_HOOKS.browserRuntime(python)
+    // A Python package alone is not a usable browser. Reuse the user's installed
+    // Chrome/Edge, or the browser this exact Playwright install can launch.
+    // Never assume the newest Playwright matches an older downloaded Chromium.
+    return (await detectSystemBrowser()) || (await detectPlaywrightBrowser(python, { strict: true }))
+  }
+
+  async function ocrRuntimeAvailable(python) {
+    if (ENGINE_TEST_HOOKS.ocrRuntime) return await ENGINE_TEST_HOOKS.ocrRuntime(python)
+    const r = await runCommand(python, ['-m', 'video2agent', 'models', 'status', '--json'], 30000)
+    const data = parseJsonObjectText(r.out)
+    return Boolean(data && data.ocr && data.ocr.available === true)
+  }
+
+  // The new venv is only trusted when the core engine AND every optional
+  // component the old engine had are really usable there. Otherwise the record
+  // is not switched and the working old engine remains in use.
+  async function verifyMigratedExtras(python, wanted) {
+    if (!wanted.length) return { ok: true }
+    const installed = await probeEngineExtras({ command: python, prefix: [] })
+    if (!installed.ok) return { ok: false, reason: 'extras-probe' }
+    for (const extra of wanted) {
+      if (!installed.extras.includes(extra)) return { ok: false, reason: 'missing-' + extra }
+    }
+    if (wanted.includes('browser') && !(await browserRuntimeAvailable(python))) {
+      return { ok: false, reason: 'browser-runtime' }
+    }
+    if (wanted.includes('ocr') && !(await ocrRuntimeAvailable(python))) {
+      return { ok: false, reason: 'ocr-runtime' }
+    }
+    return { ok: true }
+  }
+
+  // Runs under the global install lock (the caller takes it) and takes the
+  // engine-install barrier itself, so no tool/GC/command path runs the old or
+  // half-built CLI while pip writes the new environment.
+  async function performLegacyEngineMigration(entry, { manual = false, currentVersion = '' } = {}) {
+    if (!PLUGIN_VERSION) {
+      return { ok: false, error: { code: 'E_VERSION', message: '插件版本未知，无法更新视频引擎。' }, output: '', status: await setupStatus() }
+    }
+    if (!entry || !entry.ok || !entry.target) {
+      return { ok: false, error: { code: 'E_ENGINE_LEGACY', message: '无法确认旧版视频引擎的位置。' }, output: '', status: await setupStatus() }
+    }
+    const current = String(currentVersion || entry.version || '')
+    if (current && compareVersions(current, PLUGIN_VERSION) >= 0) {
+      clearEngineUpdateMarker()
+      setEngineUpdate('idle')
+      return { ok: true, already: true, output: '', status: await setupStatus() }
+    }
+    // A project checkout or a local wheel is owned elsewhere. Switching away
+    // from it would silently override the user's setup, so leave it alone.
+    const oldDist = await probeEngineDistribution(entry.target)
+    if (!oldDist.ok || oldDist.editable || oldDist.direct_url) {
+      setEngineUpdate('idle')
+      return { ok: false, skipped: true, reason: 'owned-environment', output: '' }
+    }
+    const extras = await probeEngineExtras(entry.target)
+    if (!extras.ok) {
+      // Without an honest extras probe the migration could silently lose OCR or
+      // browser support. Keep the working old engine instead of guessing.
+      setEngineUpdate('idle')
+      return { ok: false, skipped: true, reason: 'extras-unknown', output: '' }
+    }
+    const quiescent = await waitForWorkerQuiescence(ENGINE_WORKER_QUIESCE_MS)
+    if (!quiescent) {
+      if (manual) {
+        setEngineUpdate('failed', PLUGIN_VERSION, '有视频正在处理，请稍后再更新。')
+        return {
+          ok: false,
+          error: { code: 'E_BUSY', message: '有视频正在处理，请稍后再更新。' },
+          output: '',
+          status: await setupStatus(),
+        }
+      }
+      setEngineUpdate('idle')
+      return { ok: false, deferred: true, error: { code: 'E_ENGINE_DEFERRED', message: '视频引擎正在使用中，本次自动更新已跳过。' }, output: '' }
+    }
+    // Distinguishes a transient failure (no venv, nothing installed yet) from a
+    // real attempt: only the latter persists a marker that stops the next start.
+    let attemptedInstall = false
+    const failMigration = async (message, output = '') => {
+      if (attemptedInstall) writeLegacyMigrationFailure(message, entry.version)
+      return await failEngineUpdate(message, { output, persist: false })
+    }
+    const venvDir = newEngineVenvDir(PLUGIN_VERSION)
+    if (!venvDir) {
+      return await failEngineUpdate('无法创建独立的视频引擎环境，请检查 Python 安装后重试。', { output: '', persist: false })
+    }
+    beginEngineInstall()
+    try {
+      // No pre-pip CLI probe here: a no-record module install would make
+      // detectCli write a detection record before the migration has succeeded.
+      // GET already serves a read-only transient while state is updating.
+      if (!workerBusy()) stopWorker()
+      setEngineUpdate('updating', PLUGIN_VERSION)
+      try {
+        // A unique attempt directory below the version root; it is created
+        // where it will live (venv scripts embed absolute paths) and existing
+        // venvs are never deleted or reused. The record write below is the
+        // atomic switch: until then this directory is unreferenced and the old
+        // engine keeps running.
+        const venvPython = engineVenvPython(venvDir)
+        const created = await createEngineVenv(entry.target, venvDir)
+        if (!created.ok) {
+          return await failEngineUpdate('无法创建独立的视频引擎环境，请检查 Python 安装后重试。', { output: created.output || '', persist: false })
+        }
+        if (!usableInterpreterPath(venvPython)) {
+          return await failEngineUpdate('无法创建独立的视频引擎环境，请检查 Python 安装后重试。', { output: created.output || '', persist: false })
+        }
+        // Extras are only the ones the old engine actually had. The browser
+        // extra installs Playwright; a system Chrome/Edge or an existing
+        // Playwright browser cache is reused, never downloaded again.
+        const spec = CLI_PACKAGE + (extras.extras.length ? '[' + extras.extras.join(',') + ']' : '') + '==' + PLUGIN_VERSION
+        // From here on something was really installed: a failure leaves a venv
+        // behind, so it must block the next automatic attempt.
+        attemptedInstall = true
+        const pip = await pipInstallEngine({ command: venvPython, prefix: [] }, {
+          spec,
+          timeoutMs: extras.extras.length ? ENGINE_MIGRATE_PIP_TIMEOUT_MS : ENGINE_AUTO_PIP_TIMEOUT_MS,
+          mirror: false,
+        })
+        if (pip.code !== 0) {
+          return await failMigration('视频引擎自动更新未完成，请稍后重试。', pip.output || '')
+        }
+        const verified = await verifyPrivateEngine(venvPython)
+        if (!verified.ok) {
+          return await failMigration('无法确认更新后的视频引擎版本，请稍后重试。', pip.output || '')
+        }
+        const extraCheck = await verifyMigratedExtras(venvPython, extras.extras)
+        if (!extraCheck.ok) {
+          return await failMigration('视频引擎的附加组件无法在新环境中继续使用，已保留当前版本。', extraCheck.reason || '')
+        }
+        const previous = entry.record
+          ? {
+            python: String(entry.record.python || ''),
+            prefix: Array.isArray(entry.record.prefix) ? entry.record.prefix.map(String) : [],
+            version: entry.version || '',
+            source: entry.record.source || null,
+          }
+          : {
+            python: entry.target.command,
+            prefix: (entry.target.prefix || []).map(String),
+            version: entry.version || '',
+            source: null,
+          }
+        const saved = saveManagedCli(venvPython, [], {
+          source: 'plugin-install',
+          auto_update: true,
+          version: verified.version,
+          plugin_version: PLUGIN_VERSION,
+          installed_at: new Date().toISOString(),
+          engine_root: venvDir,
+          previous,
+        })
+        if (!saved) {
+          return await failMigration('无法记录视频引擎位置，请稍后重试。')
+        }
+        clearEngineUpdateMarker()
+        markWorkerStale()
+        setEngineUpdate('ready', PLUGIN_VERSION)
+        return { ok: true, output: '已切换到独立版本视频引擎 ' + PLUGIN_VERSION, status: await setupStatus() }
+      } catch (e) {
+        return await failMigration('视频引擎自动更新未完成，请稍后重试。', String((e && e.message) || e).slice(0, 1000))
+      }
+    } finally {
+      finishEngineInstall()
+    }
+  }
+
   async function runEngineAutoUpdate() {
     if (!PLUGIN_VERSION) { setEngineUpdate('idle'); return }
     // The code that is running may not match the package.json on disk. Until a
     // restart, do not guess which engine version belongs to which plugin.
     if (pluginRestartRequired()) { setEngineUpdate('idle'); return }
     const target = engineAutoTarget()
-    if (!target.ok) { setEngineUpdate('idle'); return }
+    if (!target.ok) {
+      // A legacy install has no authorization record. Adopt it into a private
+      // version environment instead of leaving the user on the manual path
+      // forever. Explicit pins and managed records never reach this branch.
+      if (['no-managed-cli', 'not-authorized', 'interpreter-missing'].includes(String(target.reason || ''))) {
+        // A previous start already installed something and failed. Rebuilding a
+        // private venv on every start is what this marker prevents; resuming is
+        // the user's explicit update click (same migration, marker cleared).
+        const failedMigration = readLegacyMigrationFailure()
+        if (failedMigration) {
+          setEngineUpdate('failed', PLUGIN_VERSION, String(failedMigration.message || '视频引擎更新失败，请手动重试。'))
+          return
+        }
+        const legacy = await legacyEngineTarget()
+        if (legacy.ok) {
+          if (compareVersions(legacy.version, PLUGIN_VERSION) >= 0) {
+            clearEngineUpdateMarker()
+            setEngineUpdate('idle')
+            return
+          }
+          const result = await withInstallLock('engine-legacy-migration', () => performLegacyEngineMigration(legacy, { manual: false, currentVersion: legacy.version }))
+          if (result && result.error && result.error.code === 'E_BUSY') {
+            if (ENGINE_UPDATE.state !== 'updating') setEngineUpdate('idle')
+          }
+          return
+        }
+      }
+      setEngineUpdate('idle')
+      return
+    }
     const probe = await probeEngineVersion(target)
     if (!probe.ok) {
       await failEngineUpdate('无法确认视频引擎版本，请手动更新。')
@@ -2242,7 +2810,11 @@ export function apply(ctx, config) {
       return
     }
     const marker = readEngineUpdateMarker()
-    if (marker && marker.plugin_version === PLUGIN_VERSION && marker.target === PLUGIN_VERSION && marker.state === 'failed') {
+    // A legacy-adoption marker is not an in-place update failure: this branch is
+    // reached only with an authorized managed record, which the adoption did not
+    // create, so it must not block the normal update.
+    if (marker && marker.kind !== LEGACY_MIGRATION_MARKER_KIND
+        && marker.plugin_version === PLUGIN_VERSION && marker.target === PLUGIN_VERSION && marker.state === 'failed') {
       setEngineUpdate('failed', PLUGIN_VERSION, String(marker.message || '视频引擎更新失败，请手动重试。'))
       return
     }
@@ -2285,10 +2857,30 @@ export function apply(ctx, config) {
     })()
   }
 
+  // An explicit update click is the only way out of a failed adoption: retry the
+  // same private migration (it clears the marker on success) instead of leaving
+  // the user on a message with no action. Everything else keeps the in-place
+  // path below.
+  async function retryLegacyMigration(before) {
+    if (!readLegacyMigrationFailure()) return null
+    const legacy = await legacyEngineTarget()
+    if (!legacy.ok) return null
+    const migrated = await performLegacyEngineMigration(legacy, {
+      manual: true,
+      currentVersion: (before && before.cli && before.cli.version) || legacy.version,
+    })
+    return migrated && !migrated.skipped ? migrated : null
+  }
+
   async function installCli(force = false) {
     const before = await setupStatus()
     if (before.cli.ok && !force && !before.cli.update_available) return { ok: true, already: true, output: '', status: before }
     if (before.cli.ok) {
+      // The explicit update button resumes a blocked adoption first.
+      if (force) {
+        const retried = await retryLegacyMigration(before)
+        if (retried) return retried
+      }
       // An installed CLI is updated in place, using the interpreter this Host
       // actually runs. Do not fall through to a different Python: that would
       // install a package the Host never calls and report a false success.
@@ -2297,6 +2889,19 @@ export function apply(ctx, config) {
         allowDetect: false,
       })
       if (!target.ok) {
+        // No record at all (a PATH install this Host never adopted). The
+        // explicit click may use the same private-venv adoption the automatic
+        // path uses; it still never touches pins or a self-managed checkout.
+        if (target.reason === 'interpreter-unknown') {
+          const legacy = await legacyEngineTarget()
+          if (legacy.ok) {
+            const migrated = await performLegacyEngineMigration(legacy, {
+              manual: true,
+              currentVersion: before.cli.version || legacy.version,
+            })
+            if (!migrated.skipped) return migrated
+          }
+        }
         const message = target.reason === 'explicit-bin'
           ? '视频引擎由外部路径指定，请在对应环境手动更新。'
           : target.reason === 'python-pin-missing'
@@ -2432,24 +3037,93 @@ export function apply(ctx, config) {
     return { ok: true, output, status: after }
   }
 
+  // Optional components live in the interpreter that actually runs the CLI. The
+  // managed record is the exact invocation the Host uses; for a PATH/pipx install
+  // the CLI's own doctor is the only honest owner report. A known engine with no
+  // trustworthy interpreter is a refusal, not a reason to install into whichever
+  // "python" happens to be first on PATH: that made the card say "installed"
+  // while the CLI still reported OCR missing.
+  async function componentInstallInterpreter(status) {
+    const direct = cliInterpreter()
+    if (direct && direct.command) {
+      return { ok: true, command: direct.command, prefix: direct.prefix || [], via: 'record' }
+    }
+    if (status && status.cli && status.cli.ok) {
+      const doctor = await probeCliDoctor()
+      if (usableInterpreterPath(doctor.interpreter)) {
+        return { ok: true, command: doctor.interpreter, prefix: [], via: 'doctor' }
+      }
+      return { ok: false, reason: 'interpreter-unknown' }
+    }
+    const python = await detectPython()
+    if (python.ok) return { ok: true, command: python.command, prefix: python.prefix, via: 'detected' }
+    return { ok: false, reason: python.tooOld ? 'python-too-old' : 'no-python' }
+  }
+
+  function componentInstallError(before, reason, extra) {
+    const interpreterUnknown = reason === 'interpreter-unknown'
+    return {
+      ok: false,
+      error: interpreterUnknown
+        ? {
+          code: 'E_PYTHON',
+          message: '无法确认视频引擎所在的 Python 环境',
+          remedy: '请回到安装视频引擎的那个环境重试，或手动运行 pip install "video2agent[' + extra + ']"。',
+        }
+        : {
+          code: 'E_PYTHON',
+          message: reason === 'python-too-old' ? 'Python 版本低于 3.11' : '没有找到可用的 Python',
+          remedy: '安装 Python 3.11/3.12 后重试',
+        },
+      status: before,
+    }
+  }
+
+  // A component install only adds the optional extra to the core engine that
+  // interpreter already has. The exact installed version pins the requirement:
+  // without a version pip may backtrack (or resolve a newer/older core) to
+  // satisfy the extra's dependencies, and --upgrade would replace the managed
+  // engine outside the version/authorization path. importlib.metadata is the
+  // installed package's own answer (editable/dev builds included); the CLI's
+  // reported version is only a fallback. The plugin version is never used here:
+  // pinning that could downgrade a newer or user-owned engine.
+  async function componentEngineVersion(interpreter, status) {
+    const dist = await probeEngineDistribution(interpreter)
+    if (dist.ok && dist.version) return String(dist.version)
+    // The interpreter itself can still answer even when the card's CLI probe was
+    // not usable. Only a real answer is used; no version is guessed.
+    const probe = await probeEngineVersion(interpreter)
+    if (probe.ok && probe.version) return String(probe.version)
+    return status && status.cli && status.cli.version ? String(status.cli.version) : ''
+  }
+
+  function componentPipInstall(interpreter, extra, version, extraArgs = []) {
+    const exact = String(version || '').trim()
+    const pkg = CLI_PACKAGE + '[' + extra + ']' + (exact ? '==' + exact : '')
+    const args = [
+      ...(interpreter.prefix || []),
+      '-m', 'pip', 'install',
+      ...extraArgs,
+      pkg,
+    ]
+    if (ENGINE_TEST_HOOKS.componentPip) {
+      return ENGINE_TEST_HOOKS.componentPip(
+        { command: interpreter.command, prefix: [...(interpreter.prefix || [])] },
+        { args: [...args], extra, package: pkg, version: exact },
+      )
+    }
+    return runCommand(interpreter.command, args, SETUP_INSTALL_TIMEOUT)
+  }
+
   // Optional local OCR (rapidocr-onnxruntime). Separate from installCli: the
   // resolver for that package can be slow, and it has no Python 3.13 wheel.
   async function installOcr() {
     const before = await setupStatus()
     if (before.ocr && before.ocr.ok) return { ok: true, already: true, output: '', status: before }
-    const python = await detectPython()
-    if (!python.ok) {
-      return {
-        ok: false,
-        error: { code: 'E_PYTHON', message: '没有找到 Python', remedy: '安装 Python 3.11/3.12 后重试' },
-        status: before,
-      }
-    }
-    const pipOcr = (extraArgs = []) => runCommand(
-      python.command,
-      [...python.prefix, '-m', 'pip', 'install', '--upgrade', ...extraArgs, 'video2agent[ocr]'],
-      SETUP_INSTALL_TIMEOUT,
-    )
+    const python = await componentInstallInterpreter(before)
+    if (!python.ok) return componentInstallError(before, python.reason, 'ocr')
+    const coreVersion = await componentEngineVersion(python, before)
+    const pipOcr = (extraArgs = []) => componentPipInstall(python, 'ocr', coreVersion, extraArgs)
     let r = await pipOcr()
     let note = ''
     if (r.code !== 0) {
@@ -2501,21 +3175,10 @@ export function apply(ctx, config) {
   async function installBrowser() {
     const before = await setupStatus()
     if (before.browser && before.browser.ok) return { ok: true, already: true, output: '', status: before }
-    const interpreter = (before.browser && before.browser.interpreter)
-      ? { command: before.browser.interpreter, prefix: [] }
-      : (cliInterpreter() || await detectPython())
-    if (!interpreter || !interpreter.command) {
-      return {
-        ok: false,
-        error: { code: 'E_PYTHON', message: '没有找到可用的 Python', remedy: '安装 Python 3.11+ 后重试。' },
-        status: before,
-      }
-    }
-    const pipInstall = (extraArgs = []) => runCommand(
-      interpreter.command,
-      [...(interpreter.prefix || []), '-m', 'pip', 'install', '--upgrade', ...extraArgs, 'video2agent[browser]'],
-      SETUP_INSTALL_TIMEOUT,
-    )
+    const interpreter = await componentInstallInterpreter(before)
+    if (!interpreter.ok) return componentInstallError(before, interpreter.reason, 'browser')
+    const coreVersion = await componentEngineVersion(interpreter, before)
+    const pipInstall = (extraArgs = []) => componentPipInstall(interpreter, 'browser', coreVersion, extraArgs)
     let result = await pipInstall()
     let mirrorNote = ''
     if (result.code !== 0) {
@@ -4272,8 +4935,11 @@ function guardWrite(req, res) {
   __test.withInstallLock = withInstallLock
   __test.setupBusy = setupBusy
   __test.installBrowser = installBrowser
+  __test.installOcr = installOcr
+  __test.componentInstallInterpreter = componentInstallInterpreter
   __test.installAll = installAll
   __test.detectBrowser = detectBrowser
+  __test.detectPlaywrightBrowser = detectPlaywrightBrowser
   __test.installFfmpeg = installFfmpeg
   __test.managedToolEnv = managedToolEnv
   __test.readManagedTools = readManagedTools
@@ -4292,6 +4958,13 @@ function guardWrite(req, res) {
   __test.managedCliTarget = managedCliTarget
   __test.engineAutoTarget = engineAutoTarget
   __test.engineManualTarget = engineManualTarget
+  __test.engineHomePath = engineHomePath
+  __test.engineRootDir = engineRootDir
+  __test.engineVenvPython = engineVenvPython
+  __test.legacyEngineTarget = legacyEngineTarget
+  __test.performLegacyEngineMigration = performLegacyEngineMigration
+  __test.retryLegacyMigration = retryLegacyMigration
+  __test.readLegacyMigrationFailure = readLegacyMigrationFailure
   __test.probeEngineVersion = probeEngineVersion
   __test.probeEngineDistribution = probeEngineDistribution
   __test.probeEngineEnvironment = probeEngineEnvironment
@@ -4608,7 +5281,7 @@ function guardWrite(req, res) {
       + 'evidence (a timestamp plus its on-screen text and an optional frame), '
       + 'frames (exact frames, windows, sheets; view:candidates for shots; view:ocr to read a window), '
       + 'perceive (number-only motion/cut/loop map for a window, never images), '
-      + 'admin (list, export, ocr-index, account read-only for Bilibili, douyin read for a logged-in Douyin account, doctor). Call it directly at the top '
+      + 'admin (list, export, ocr-index, account read-only for Bilibili, douyin reads (one or 1-10 profiles), doctor). Call it directly at the top '
       + 'level; in a harness that only exposes run_code, wrap it in run_code (the dock card may not render); never shell out to the CLI. On failure return the error; do not invent content.',
     parameters: {
       type: 'object',
@@ -4640,16 +5313,23 @@ function guardWrite(req, res) {
         admin_action: {
           type: 'string',
           enum: ['list', 'export', 'ocr-index', 'account', 'douyin', 'doctor'],
-          description: 'admin: list (default), export, ocr-index, account (Bilibili), douyin (Douyin account), or doctor. For a creator full-works timeline use admin_action:"douyin" + douyin_action:"videos" with the sec_uid. Use this exact field name (admin_action), not action.',
+          description: 'admin: list (default), export, ocr-index, account (Bilibili), douyin (one or 1-10 profiles), or doctor. For a creator full-works timeline use admin_action:"douyin" + douyin_action:"videos" with the sec_uid. For 1-10 creators use douyin_action:"profiles" + douyin_urls. Use this exact field name (admin_action), not action.',
         },
         douyin_action: {
           type: 'string',
-          enum: ['me', 'profile', 'videos', 'status'],
-          description: 'admin douyin: me (own profile), profile (douyin_url), videos (douyin_url optional; douyin_tab works/likes/favorites), or status.',
+          enum: ['me', 'profile', 'videos', 'status', 'profiles'],
+          description: 'admin douyin: me (own profile), profile (douyin_url), videos (douyin_url optional; douyin_tab works/likes/favorites), profiles (batch: 1-10 douyin_urls), or status.',
         },
         douyin_url: {
           type: 'string',
           description: 'admin douyin: profile URL or sec_uid (required for profile, optional for videos).',
+        },
+        douyin_urls: {
+          type: 'array',
+          items: { type: 'string' },
+          minItems: 1,
+          maxItems: 10,
+          description: 'admin douyin profiles: 1-10 profile URLs or sec_uids. The CLI validates each identity, so one bad entry does not abort the batch.',
         },
         douyin_tab: {
           type: 'string',
@@ -4767,11 +5447,14 @@ function guardWrite(req, res) {
         // the CLI payload untouched, since those cards parse it directly.
         if (value && value.ok === false) {
           const error = value.error || { code: 'E_RESULT', message: text.slice(0, 800) || 'Video2Agent failed' }
-          // A partial write must keep its per-video receipt; a generic error already
-          // carries message/remedy, so the envelope's inner text stays empty instead
-          // of re-printing the JSON the model just received.
-          const inner = error.code === 'E_ACCOUNT_PARTIAL' && !text.trim().startsWith('{')
-            ? text.slice(0, 60000) : ''
+          // A partial write must keep its per-video receipt, and an all-failed
+          // profile batch must keep its per-person errors, so the card can show
+          // which creator failed. A generic error already carries message/remedy,
+          // so its inner text stays empty instead of re-printing the JSON.
+          const inner = error.code === 'E_DOUYIN_PROFILES'
+            ? text.slice(0, 60000)
+            : error.code === 'E_ACCOUNT_PARTIAL' && !text.trim().startsWith('{')
+              ? text.slice(0, 60000) : ''
           return [{ type: 'text', text: JSON.stringify({ ok: false, error, text: inner }) }]
         }
         const blocks = [{ type: 'text', text }]
@@ -4796,7 +5479,7 @@ function guardWrite(req, res) {
         const error = {
           code: 'E_DOUYIN_USER',
           message: '这是抖音用户主页，不是视频；请用 admin_action:"douyin" 读主页。',
-          remedy: '资料/作品列表用 admin_action:"douyin", douyin_action:"profile" 或 "videos"；单条视频再 ingest。',
+          remedy: '资料/作品列表用 admin_action:"douyin", douyin_action:"profile" 或 "videos"；1-10 个主页用 "profiles" + douyin_urls；单条视频再 ingest。',
         }
         return { ok: false, text: JSON.stringify({ ok: false, error }), error }
       }
@@ -4820,7 +5503,7 @@ function guardWrite(req, res) {
         const error = {
           code: 'E_ARGS',
           message: `Missing required argument for "${command || 'unknown'}".`,
-          remedy: 'discover/search need query; shortlist needs 1-10 video_ids, default_selected plus primary; ingest needs source; overview/transcript/frames/map/evidence/export need video_id; evidence needs at; resolve needs url; admin douyin needs douyin_action (profile also needs douyin_url). Positional values must not start with "-".',
+          remedy: 'discover/search need query; shortlist needs 1-10 video_ids, default_selected plus primary; ingest needs source; overview/transcript/frames/map/evidence/export need video_id; evidence needs at; resolve needs url; admin douyin needs douyin_action (profile also needs douyin_url, profiles needs 1-10 douyin_urls). Positional values must not start with "-".',
         }
         return { ok: false, text: JSON.stringify({ ok: false, error }), error }
       }
@@ -4838,7 +5521,9 @@ function guardWrite(req, res) {
       const waiting = cliCommand === 'jobs' && args.wait_ms
       const timeout = waiting
         ? Math.min(105000, clampInt(Number(args.wait_ms), 45000, 5000, 90000) + 15000)
-        : 600000
+        : cliCommand === 'douyin' && String(args.douyin_action || '') === 'profiles'
+          ? DOUYIN_PROFILES_TIMEOUT_MS
+          : 600000
       const cmd = cliCommand
       const accountWrite = cmd === 'account' && ['create-folder', 'rename-folder', 'add', 'classify-apply'].includes(String(args.account_action || ''))
       const activityKind = cmd === 'ocr-index' ? 'ocr-index' : cmd === 'export' ? 'export' : accountWrite ? 'account-write' : ''
@@ -4874,11 +5559,18 @@ function guardWrite(req, res) {
       // payload with only the error message hides which writes already landed and
       // invites a blind retry.
       const partial = structured && structured.code === 'E_ACCOUNT_PARTIAL'
+      // An all-failed profile batch is still the answer: keep the allowlisted
+      // per-entry errors instead of collapsing them to the top-level envelope.
+      let batchFailure = null
+      if (structured && structured.code === 'E_DOUYIN_PROFILES') {
+        try { batchFailure = failedBatchProfileText(JSON.parse(r.out || ''), error) } catch {}
+      }
       // A failed call must still hand the model JSON. In a run_code/PTC session the
       // nested result exposes this text verbatim, so a plain message made the
       // model's JSON.parse throw and abort the turn (real log 2026-11-14: the
       // second find after a search error; the model lost the rest of its plan).
-      let text = error && !partial ? JSON.stringify({ ok: false, error }) : raw
+      let text = error && !partial && !batchFailure ? JSON.stringify({ ok: false, error }) : raw
+      if (batchFailure) text = batchFailure
       // jobs answers a failed row with {ok:false, job, error}; keep the row so the
       // model can name the video and tell canceled from failed. parseStructuredError
       // only returns code/message/remedy, so read the job from the raw payload.
@@ -4904,6 +5596,9 @@ function guardWrite(req, res) {
           try {
             const parsed = JSON.parse(raw)
             if (Array.isArray(parsed.candidates) && parsed.candidates.length) {
+              // Additive, verified profile URLs only (Douyin + a real sec_uid).
+              // Bilibili rows and unverified placeholders stay byte-identical.
+              parsed.candidates = parsed.candidates.map(withCandidateProfileUrl)
               writeDiscoveryLast({
                 query: String(parsed.query || args.query || ''),
                 candidates: parsed.candidates,
@@ -5140,4 +5835,4 @@ function guardWrite(req, res) {
 }
 // Test-only surface: the Node harness asserts the argv the tool would run and the
 // merged settings precedence without spawning the CLI.
-export const __test = { commandArgs, readMergedSettings, jobFromCliPayload, frameUrlFor, doctorFailure, redactTextPaths, workerEligible, runWorker, stopWorker, workerPid }
+export const __test = { commandArgs, readMergedSettings, jobFromCliPayload, frameUrlFor, doctorFailure, redactTextPaths, workerEligible, runWorker, stopWorker, workerPid, parseJsonObjectText }
