@@ -123,7 +123,9 @@ pip install video2agent
 dsh plugin --profile web add dsh-video2agent
 ```
 
-To try 0.3.5 now, or to work on the source, use the clone route below.
+After updating the plugin, reopen DSH. The video engine updates automatically if the plugin manages it. For older installations, select Update engine once if prompted. Use the environment check in settings for first-time setup or missing components.
+
+To install from source or contribute, use the clone route below.
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent

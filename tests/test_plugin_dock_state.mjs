@@ -710,8 +710,228 @@ expect(narrowMedia.includes('[data-vp-queue-ring-wrap],[data-vp-queue-ring]{widt
   await advance(100)
   expect(textOf(inst.tree) === '', 'old empty status resurrected in the next turn')
   statusAt = clock.t + 10
-  await advance(10200)
+  await advance(2600)
   expect(textOf(inst.tree).includes('没有找到候选'), 'a newer empty status did not render')
+  await advance(4000)
+  expect(textOf(inst.tree) === '', 'a newer empty status outlived its 6s budget: ' + textOf(inst.tree))
+  expect(clears === 2, 'the 6s budget did not clear the Host line exactly once: ' + clears)
+  unmount(inst)
+}
+
+// A no-result line must expire from its own timer even when the next status
+// fetch never answers: the budget is not a check performed by the poll that
+// happens to arrive later.
+{
+  const statusAt = clock.t
+  const clears = []
+  let hang = false
+  fetchImpl = async (url, opts) => {
+    if (url.includes('/api/video2agent/discovery/clear')) {
+      clears.push(JSON.parse(String((opts && opts.body) || '{}')))
+      return { ok: true, status: 200, json: async () => ({ ok: true, cleared: true }) }
+    }
+    if (url.includes('/api/video2agent/discovery/status')) {
+      if (hang) return new Promise(() => {})
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, status: { phase: 'empty', query: '无结果', found: 0, at: statusAt } }),
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'search-empty-hang', running: true } })
+  await flush()
+  expect(textOf(inst.tree).includes('没有找到候选'), 'the empty line did not render')
+  hang = true
+  await advance(6500)
+  expect(textOf(inst.tree) === '', 'the empty line outlived its 6s budget while the next poll hung: ' + textOf(inst.tree))
+  expect(clears.length === 1, 'the 6s budget did not clear the Host line: ' + clears.length)
+  expect(clears[0].session === 'search-empty-hang', 'clear lost its session: ' + JSON.stringify(clears[0]))
+  expect(clears[0].at === statusAt, 'clear did not carry the status at: ' + JSON.stringify(clears[0]))
+  expect(clears[0].phase === 'empty', 'clear did not carry the status phase: ' + JSON.stringify(clears[0]))
+  unmount(inst)
+}
+
+// A failed poll (500) must not cancel the already-armed budget.
+{
+  const statusAt = clock.t
+  let clears = 0
+  let broken = false
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/discovery/clear')) {
+      clears += 1
+      return { ok: true, status: 200, json: async () => ({ ok: true, cleared: true }) }
+    }
+    if (url.includes('/api/video2agent/discovery/status')) {
+      if (broken) return { ok: false, status: 500, json: async () => { throw new Error('boom') } }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, status: { phase: 'error', query: 'q', at: statusAt, error: '搜索没有完成，请重试。' } }),
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'search-error-500', running: true } })
+  await flush()
+  expect(textOf(inst.tree).includes('搜索失败'), 'the error line did not render')
+  broken = true
+  await advance(6500)
+  expect(textOf(inst.tree) === '', 'a failed poll cancelled the error line budget: ' + textOf(inst.tree))
+  expect(clears === 1, 'the error line was not cleared once: ' + clears)
+  unmount(inst)
+}
+
+// An empty body means the Host has no line. A no-result/error line is not
+// waiting for a batch table, so it must not get a fresh 6s hold on top of its
+// budget.
+{
+  const statusAt = clock.t
+  let clears = 0
+  let noLine = false
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/discovery/clear')) {
+      clears += 1
+      return { ok: true, status: 200, json: async () => ({ ok: true, cleared: true }) }
+    }
+    if (url.includes('/api/video2agent/discovery/status')) {
+      if (noLine) return { ok: true, status: 200, json: async () => ({ ok: true }) }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, status: { phase: 'empty', query: '无', found: 0, at: statusAt } }),
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'search-empty-noline', running: true } })
+  await flush()
+  expect(textOf(inst.tree).includes('没有找到候选'), 'the empty line did not render before the line vanished')
+  noLine = true
+  await advance(2600)
+  expect(textOf(inst.tree) === '', 'a no-result line was held after the Host line disappeared: ' + textOf(inst.tree))
+  expect(clears === 0, 'a Host line that was already gone was cleared again: ' + clears)
+  unmount(inst)
+}
+
+// A busy line may be held while the shortlist clears the status (the table is
+// about to paint), but the hold is capped by that phase's remaining budget.
+{
+  const statusAt = clock.t - 8000
+  let gone = false
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/discovery/status')) {
+      if (gone) return { ok: true, status: 200, json: async () => ({ ok: true }) }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, status: { phase: 'curating', query: 'q', found: 2, at: statusAt } }),
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'search-hold-budget', running: true } })
+  await flush()
+  expect(textOf(inst.tree).includes('正在筛选'), 'the busy line did not render')
+  gone = true
+  await advance(2600)
+  expect(textOf(inst.tree).includes('正在筛选'), 'the busy hold was dropped immediately')
+  await advance(1600)
+  expect(textOf(inst.tree) === '', 'the busy hold outlived the remaining phase budget: ' + textOf(inst.tree))
+  unmount(inst)
+}
+
+// A short-lived null from the Host arms the 6s hold; a real new line arriving
+// inside that window must cancel the old timer instead of being wiped by it.
+{
+  let statusAt = clock.t
+  let phase = 'curating'
+  let hasLine = true
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/discovery/status')) {
+      if (!hasLine) return { ok: true, status: 200, json: async () => ({ ok: true }) }
+      return { ok: true, status: 200, json: async () => ({ ok: true, status: { phase, query: 'q', at: statusAt } }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'search-hold-then-new', running: true } })
+  await flush()
+  expect(textOf(inst.tree).includes('正在筛选'), 'the first busy line did not render')
+  hasLine = false
+  await advance(2600)
+  expect(textOf(inst.tree).includes('正在筛选'), 'the null response dropped the busy line before its hold')
+  hasLine = true
+  phase = 'searching'
+  statusAt = clock.t
+  await advance(2600)
+  expect(textOf(inst.tree).includes('正在找视频'), 'the new line did not replace the held one: ' + textOf(inst.tree))
+  // Past the old hold's deadline (+2500+6000) and before the new line's expiry.
+  await advance(3600)
+  expect(textOf(inst.tree).includes('正在找视频'), 'the previous hold timer wiped the new line: ' + textOf(inst.tree))
+  unmount(inst)
+}
+
+// A conversation switch must not show the previous chat's line, and the new
+// chat's own line must win.
+{
+  const statusFor = {
+    'switch-old': { phase: 'empty', query: '旧会话', found: 0, at: clock.t },
+    'switch-new': { phase: 'curating', query: '新会话', found: 2, at: clock.t, candidates: [{ video_id: 'BV1switch', title: '新候选', duration_ms: 60000 }] },
+  }
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/discovery/status')) {
+      const sid = new URL(String(url), 'http://localhost').searchParams.get('session')
+      return { ok: true, status: 200, json: async () => ({ ok: true, status: statusFor[sid] || null }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'switch-old', running: true } })
+  await flush()
+  expect(textOf(inst.tree).includes('没有找到候选'), 'the old session empty line did not render')
+  inst.props = { session: { id: 'switch-new', running: true } }
+  inst.dirty = true
+  await flush()
+  const switched = textOf(inst.tree)
+  expect(!switched.includes('没有找到候选'), 'the previous session card leaked into the new one: ' + switched)
+  expect(switched.includes('正在筛选'), 'the new session line did not render: ' + switched)
+  inst.props = { session: { id: 'switch-none', running: true } }
+  inst.dirty = true
+  await flush()
+  expect(textOf(inst.tree) === '', 'a previous session card survived into an empty session: ' + textOf(inst.tree))
+  unmount(inst)
+}
+
+// Turn end must drop the line without waiting for a status fetch that may be
+// slow or throttled.
+{
+  const statusAt = clock.t
+  let clears = 0
+  let hang = false
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/discovery/clear')) {
+      clears += 1
+      return { ok: true, status: 200, json: async () => ({ ok: true, cleared: true }) }
+    }
+    if (url.includes('/api/video2agent/discovery/status')) {
+      if (hang) return new Promise(() => {})
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, status: { phase: 'empty', query: '无', found: 0, at: statusAt } }),
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'search-turnend-hang', running: true } })
+  await flush()
+  expect(textOf(inst.tree).includes('没有找到候选'), 'the empty line did not render before turn end')
+  hang = true
+  inst.props = { session: { id: 'search-turnend-hang', running: false } }
+  inst.dirty = true
+  await flush()
+  expect(textOf(inst.tree) === '', 'turn end waited for a status fetch: ' + textOf(inst.tree))
+  expect(clears === 1, 'turn end did not clear the Host line: ' + clears)
   unmount(inst)
 }
 
@@ -896,4 +1116,343 @@ expect(narrowMedia.includes('[data-vp-queue-ring-wrap],[data-vp-queue-ring]{widt
   unmount(inst)
 }
 
-console.log('dock state ok: clear removes card, canceled is not ready, auto-clear, late poll cannot revive the closing card, batch owns turn end, failed save persists, debounce keeps both keys')
+// 6b. Disabling the plugin while a search line is on screen must remove it:
+// the poll stops, so nothing else would ever clear the frozen card.
+{
+  const statusAt = clock.t
+  fetchImpl = async (url, opts) => {
+    const method = String((opts && opts.method) || 'GET').toUpperCase()
+    if (url.includes('/api/video2agent/discovery/clear')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, cleared: true }) }
+    }
+    if (url.includes('/api/video2agent/discovery/status')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, status: { phase: 'empty', query: '无', found: 0, at: statusAt } }) }
+    }
+    if (url.includes('/api/video2agent/settings')) {
+      if (method === 'POST') {
+        return { ok: true, status: 200, json: async () => ({ enabled: false, cacheTtlMs: 86400000, cacheExpire: true, cacheDays: 7, cacheLimitEnabled: false, cacheLimitGb: 20, processLimit: 5, accentColor: '#0a84ff' }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ enabled: true, cacheTtlMs: 86400000, cacheExpire: true, cacheDays: 7, cacheLimitEnabled: false, cacheLimitGb: 20, processLimit: 5, accentColor: '#0a84ff' }) }
+    }
+    if (url.includes('/api/video2agent/models')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, asr: { selected: 'small', cached: true }, tiers: [], tier: 'mid' }) }
+    }
+    if (url.includes('/api/video2agent/cloud')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, configured: false, presets: [] }) }
+    }
+    if (url.includes('/api/video2agent/bili-login/status')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, logged_in: false }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(searchStatus, { session: { id: 'search-disable', running: true } })
+  await flush()
+  expect(textOf(inst.tree).includes('没有找到候选'), 'the empty line did not render before disabling')
+  const page = mount(settingsPage, {})
+  await flush()
+  const rows = collectByAttr(page.tree, 'data-vp-settings-row')
+  const enabledRow = rows.find((row) => textOf(row).includes('显示处理卡片'))
+  expect(enabledRow, 'settings page has no 显示处理卡片 row')
+  const toggle = collectByAttr(enabledRow, 'type').find((node) => node.type === 'input' && node.props.type === 'checkbox')
+  expect(toggle, '显示处理卡片 row has no checkbox')
+  toggle.props.onChange({ target: { checked: false } })
+  // The page's autosave debounce is 300ms; the optimistic settings update (and
+  // the listener that drops the dock line) lands with it.
+  await advance(400)
+  expect(textOf(inst.tree) === '', 'disabling the plugin left the frozen search line: ' + textOf(inst.tree))
+  unmount(page)
+  unmount(inst)
+}
+
+// ---- environment card: plugin restart + engine update (Host fields) -----------
+{
+  const basePayload = (extraFields = {}) => ({
+    ok: true,
+    platform: 'win32',
+    python: { ok: true, detail: 'Python 3.12.0' },
+    cli: { ok: true, detail: 'video2agent 0.3.5', version: '0.3.5', latest: '0.3.6', update_available: true },
+    ffmpeg: { ok: true, detail: 'ffmpeg version 7.0' },
+    ocr: { ok: true, supported: true, version: '1.2' },
+    browser: { ok: true, supported: true, version: '1.3' },
+    canInstall: { cli: false, updateCli: true, ffmpeg: false, ocr: false, browser: false },
+    hints: {},
+    ...extraFields,
+  })
+  const saved = { enabled: true, cacheTtlMs: 86400000, cacheExpire: true, cacheDays: 7, cacheLimitEnabled: false, cacheLimitGb: 20, processLimit: 5, accentColor: '#0a84ff' }
+  const serve = (setupHandler) => {
+    fetchImpl = async (url, opts) => {
+      const method = String((opts && opts.method) || 'GET').toUpperCase()
+      if (url.includes('/api/video2agent/setup')) return setupHandler(method, opts)
+      if (url.includes('/api/video2agent/settings')) return { ok: true, status: 200, json: async () => saved }
+      if (url.includes('/api/video2agent/models')) return { ok: true, status: 200, json: async () => ({ ok: true, asr: { selected: 'small', cached: true }, tiers: [], tier: 'mid' }) }
+      if (url.includes('/api/video2agent/cloud')) return { ok: true, status: 200, json: async () => ({ ok: true, configured: false, presets: [] }) }
+      if (url.includes('/api/video2agent/bili-login/status')) return { ok: true, status: 200, json: async () => ({ ok: true, logged_in: false }) }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    }
+  }
+  const payload = (data) => ({ ok: true, status: 200, json: async () => data })
+
+  // A. Old Host: no plugin/engine_update fields -> the existing card is untouched.
+  {
+    let posts = 0
+    serve((method) => {
+      if (method !== 'GET') { posts += 1; return payload({ ok: true, status: basePayload() }) }
+      return payload(basePayload())
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    const text = textOf(page.tree)
+    expect(text.includes('视频引擎可更新：0.3.5 → 0.3.6'), 'old Host lost its update nudge: ' + text.slice(0, 300))
+    expect(!text.includes('插件已更新') && !text.includes('正在更新视频引擎'), 'old Host rendered fields it never sent')
+    expect(posts === 0, 'reading the card posted an install')
+    unmount(page)
+  }
+
+  // B. Old Host first install still offers the missing dependency.
+  {
+    serve(() => payload(basePayload({
+      cli: { ok: false, detail: '未安装', version: '', latest: '0.3.6', update_available: false },
+      canInstall: { cli: true, updateCli: false, ffmpeg: false, ocr: false, browser: false },
+    })))
+    const page = mount(settingsPage, {})
+    await flush()
+    const install = collectByAttr(page.tree, 'data-vp-bili-btn').find((node) => textOf(node) === '安装 视频引擎')
+    expect(install, 'first install button is gone: ' + textOf(page.tree).slice(0, 300))
+    unmount(page)
+  }
+
+  // C. restart_required: say what to do, pause the engine-update nudge, keep the
+  // explicit manual update action working.
+  {
+    const posts = []
+    serve((method, opts) => {
+      if (method === 'POST') {
+        posts.push(JSON.parse(String((opts && opts.body) || '{}')))
+        return payload({ ok: true, output: 'ok', status: basePayload({
+          cli: { ok: true, detail: 'video2agent 0.3.6', version: '0.3.6', latest: '0.3.6', update_available: false },
+          canInstall: { cli: false, updateCli: false, ffmpeg: false, ocr: false, browser: false },
+          engine_update: { state: 'ready', target: '0.3.6' },
+        }) })
+      }
+      return payload(basePayload({ plugin: { loaded: '0.3.5', installed: '0.3.6', restart_required: true } }))
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    let text = textOf(page.tree)
+    expect(text.includes('插件已更新，重开 DSH 后生效'), 'restart notice missing: ' + text.slice(0, 300))
+    expect(!text.includes('视频引擎可更新'), 'a pending plugin reload still nudged an engine update')
+    const manual = findByAttr(page.tree, 'data-vp-env-engine-manual')
+    expect(manual, 'a pending plugin reload removed the manual update button')
+    manual.props.onClick()
+    await flush()
+    expect(posts.length === 1 && posts[0].action === 'update-cli', 'manual update did not POST update-cli: ' + JSON.stringify(posts))
+    text = textOf(page.tree)
+    expect(text.includes('视频引擎已更新至 0.3.6'), 'manual update result is not shown: ' + text.slice(0, 300))
+    unmount(page)
+  }
+
+  // D. A background update: show progress, poll briefly, then show the version
+  // without asking the user to detect again; stop polling after it settles and
+  // never POST from the poll.
+  {
+    let gets = 0
+    let posts = 0
+    let state = 'updating'
+    serve((method) => {
+      if (method !== 'GET') { posts += 1; return payload({ ok: true }) }
+      gets += 1
+      if (state === 'updating') return payload(basePayload({ engine_update: { state: 'updating', target: '0.3.6' } }))
+      return payload(basePayload({
+        cli: { ok: true, detail: 'video2agent 0.3.6', version: '0.3.6', latest: '0.3.6', update_available: false },
+        canInstall: { cli: false, updateCli: false, ffmpeg: false, ocr: false, browser: false },
+        engine_update: { state: 'ready', target: '0.3.6' },
+      }))
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    let text = textOf(page.tree)
+    expect(text.includes('正在更新视频引擎…'), 'updating state is not shown: ' + text.slice(0, 300))
+    expect(!text.includes('视频引擎可更新'), 'an update in progress still nudged another update')
+    state = 'ready'
+    await advance(5100)
+    text = textOf(page.tree)
+    expect(text.includes('视频引擎已更新至 0.3.6'), 'ready state did not show the version: ' + text.slice(0, 300))
+    expect(!text.includes('正在更新视频引擎…'), 'the updating line stayed after ready')
+    expect(!text.includes('视频引擎可更新'), 'a finished update still nudged')
+    const afterReady = gets
+    await advance(5000)
+    expect(gets === afterReady, 'polling continued after the engine settled: ' + afterReady + ' -> ' + gets)
+    expect(posts === 0, 'the poll posted to the setup route')
+    unmount(page)
+  }
+
+  // E. A failed background update: brief failure hint plus the existing retry
+  // action; the retry POSTs update-cli and shows the new version.
+  {
+    const posts = []
+    let state = 'updating'
+    serve((method, opts) => {
+      if (method === 'POST') {
+        posts.push(JSON.parse(String((opts && opts.body) || '{}')))
+        return payload({ ok: true, output: 'ok', status: basePayload({
+          cli: { ok: true, detail: 'video2agent 0.3.6', version: '0.3.6', latest: '0.3.6', update_available: false },
+          canInstall: { cli: false, updateCli: false, ffmpeg: false, ocr: false, browser: false },
+          engine_update: { state: 'ready', target: '0.3.6' },
+        }) })
+      }
+      if (state === 'updating') return payload(basePayload({ engine_update: { state: 'updating', target: '0.3.6' } }))
+      return payload(basePayload({ engine_update: { state: 'failed', target: '0.3.6', message: '更新没有完成' } }))
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    state = 'failed'
+    await advance(5100)
+    let text = textOf(page.tree)
+    expect(text.includes('视频引擎更新失败，可重试。'), 'failure hint missing: ' + text.slice(0, 300))
+    expect(!text.includes('正在更新视频引擎…'), 'a failed update still says updating')
+    const retry = findByAttr(page.tree, 'data-vp-env-engine-retry')
+    expect(retry, 'a failed update has no retry action')
+    retry.props.onClick()
+    await flush()
+    expect(posts.length === 1 && posts[0].action === 'update-cli', 'retry did not POST update-cli: ' + JSON.stringify(posts))
+    text = textOf(page.tree)
+    expect(text.includes('视频引擎已更新至 0.3.6'), 'a successful retry did not show the version: ' + text.slice(0, 300))
+    expect(!text.includes('视频引擎更新失败'), 'the failure hint stayed after a successful retry')
+    unmount(page)
+  }
+
+  // F. E_BUSY from a concurrent install is not a failed engine update: follow the
+  // returned updating state and finish on the next poll.
+  {
+    const posts = []
+    let state = 'idle'
+    serve((method, opts) => {
+      if (method === 'POST') {
+        posts.push(JSON.parse(String((opts && opts.body) || '{}')))
+        return payload({ ok: false, error: { code: 'E_BUSY', message: '有安装任务正在进行' },
+          status: basePayload({ engine_update: { state: 'updating', target: '0.3.6' } }) })
+      }
+      if (state === 'idle') return payload(basePayload({ engine_update: { state: 'idle' } }))
+      return payload(basePayload({
+        cli: { ok: true, detail: 'video2agent 0.3.6', version: '0.3.6', latest: '0.3.6', update_available: false },
+        canInstall: { cli: false, updateCli: false, ffmpeg: false, ocr: false, browser: false },
+        engine_update: { state: 'ready', target: '0.3.6' },
+      }))
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    const update = collectByAttr(page.tree, 'data-vp-bili-btn').find((node) => textOf(node) === '更新引擎')
+    expect(update, 'no engine update button in the healthy card')
+    update.props.onClick()
+    await flush()
+    let text = textOf(page.tree)
+    expect(posts.length === 1 && posts[0].action === 'update-cli', 'update button did not POST update-cli')
+    expect(!text.includes('视频引擎更新失败'), 'a busy install lock was reported as a failed update')
+    expect(text.includes('正在更新视频引擎…'), 'the busy status did not show the running update: ' + text.slice(0, 300))
+    state = 'ready'
+    await advance(5100)
+    expect(textOf(page.tree).includes('视频引擎已更新至 0.3.6'), 'the followed update did not finish: ' + textOf(page.tree).slice(0, 300))
+    unmount(page)
+  }
+
+  // G. A broken Host must not be polled forever, and a closed card must not be
+  // written back to; one manual refresh recovers.
+  {
+    let gets = 0
+    let broken = false
+    serve(() => {
+      gets += 1
+      if (broken) return { ok: false, status: 500, json: async () => { throw new Error('boom') } }
+      return payload(basePayload({ engine_update: { state: 'updating', target: '0.3.6' } }))
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    expect(textOf(page.tree).includes('正在更新视频引擎…'), 'the updating line is missing before the Host breaks')
+    broken = true
+    await advance(70000)
+    const settled = gets
+    expect(settled <= 8, 'failure retries exceeded their budget: ' + settled)
+    await advance(60000)
+    expect(gets === settled, 'the card kept polling a broken Host: ' + settled + ' -> ' + gets)
+    broken = false
+    const refresh = findByAttr(page.tree, 'data-vp-env-refresh')
+    expect(refresh, 'no 重新检测 button')
+    refresh.props.onClick()
+    await flush()
+    expect(gets === settled + 1, 'a manual refresh did not recover: ' + (gets - settled))
+    page.dirty = false
+    unmount(page)
+    await advance(30000)
+    expect(page.dirty === false, 'an unmounted environment card was written back to')
+  }
+
+  // H. Two clicks on 重新检测 while one read is in flight must not stack requests.
+  {
+    let gets = 0
+    let hang = false
+    serve(() => {
+      gets += 1
+      if (hang) return new Promise(() => {})
+      return payload(basePayload())
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    hang = true
+    const refresh = findByAttr(page.tree, 'data-vp-env-refresh')
+    refresh.props.onClick()
+    refresh.props.onClick()
+    await flush()
+    expect(gets === 2, 'overlapping refreshes reached the Host: ' + gets)
+    unmount(page)
+  }
+
+  // I. A hidden settings tab must not keep probing the environment; polling
+  // resumes when the tab is visible again.
+  {
+    let gets = 0
+    serve(() => {
+      gets += 1
+      return payload(basePayload({ engine_update: { state: 'updating', target: '0.3.6' } }))
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    const before = gets
+    context.document.hidden = true
+    try {
+      await advance(16000)
+      expect(gets === before, 'a hidden tab kept probing the environment: ' + (gets - before))
+    } finally {
+      context.document.hidden = false
+    }
+    await advance(5100)
+    expect(gets === before + 1, 'polling did not resume when the tab became visible: ' + (gets - before))
+    unmount(page)
+  }
+
+  // J. 重新检测 bypasses the Host's short status cache; the background poll uses
+  // the plain cached read.
+  {
+    const urls = []
+    serve(() => payload(basePayload({ engine_update: { state: 'updating', target: '0.3.6' } })))
+    const cachedFetch = fetchImpl
+    fetchImpl = async (url, opts) => {
+      if (String(url).includes('/api/video2agent/setup')) urls.push(String(url))
+      return cachedFetch(url, opts)
+    }
+    const page = mount(settingsPage, {})
+    await flush()
+    expect(urls.length === 1, 'the first page read count is wrong: ' + urls.length)
+    expect(!urls[0].includes('refresh=1'), 'the first page read bypassed the cache: ' + urls[0])
+    await advance(5100)
+    expect(urls.length === 2, 'the background poll did not read: ' + urls.length)
+    expect(!urls[1].includes('refresh=1'), 'the background poll bypassed the cache: ' + urls[1])
+    const refresh = findByAttr(page.tree, 'data-vp-env-refresh')
+    refresh.props.onClick()
+    await flush()
+    expect(urls.length === 3, 'the re-check did not read: ' + urls.length)
+    expect(urls[2].includes('refresh=1'), '重新检测 did not bypass the status cache: ' + urls[2])
+    unmount(page)
+  }
+}
+
+console.log('dock state ok: clear removes card, canceled is not ready, auto-clear, late poll cannot revive the closing card, batch owns turn end, search line budget/hold/session/disable guards, environment card restart notice/manual update/updating poll/failed retry/bounded reads, failed save persists, debounce keeps both keys')

@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.6 (2026-11-23)
+
+- **A plugin-managed video engine follows the loaded plugin.** After the 0.3.6
+  plugin loads, the environment card reports "视频引擎可更新：0.3.5 → 0.3.6" and
+  updates the engine in the background; the next tool call uses it, with no
+  further DSH restart (the marketplace plugin update itself still takes effect
+  on a restart). Only a record that says this plugin installed the engine is
+  followed automatically: a record written before provenance existed is never
+  auto-updated — one explicit 更新引擎 click performs that update and records the
+  authorization — and an engine behind an explicit path/Python pin, an editable
+  checkout, a direct-URL install or pipx is reported for manual update instead
+  of being overwritten. One install or update runs at a time; an automatic
+  update waits for in-flight worker calls and is skipped for that start while
+  one is still running, instead of killing the call.
+- **The background cache sweep applies the settings page's policy.** The plugin
+  row's cache values are the default layer below `ui-settings.json` for
+  `gc --auto`, so a page showing 关闭 no longer falls back to the 7-day default
+  and frees a cache the user kept. A corrupt settings file still fails closed,
+  and a malformed host value is rejected before anything is deleted.
+- **Search status lines expire with their phase.** Searching, curating, no-result
+  and error lines each have their own budget and timer, so a line no longer stays
+  above the composer while the model keeps thinking or the poll is throttled. A
+  conversation switch, the end of the turn, or disabling the plugin clears it; a
+  shortlist still holds its busy line briefly so it does not blink out before the
+  table paints.
+- **Douyin 图文 posts are no longer offered as video candidates.** Keyword search
+  mixes image carousels into its results (`images` / `aweme_type` 68, no
+  duration); their play address is the background music, so ingesting one failed
+  with an opaque 404 on an mp3 URL (live 2026-11-23: the first 蓝莓 result was a
+  图文 post). Search now skips them and reports `IMAGE_POSTS_SKIPPED` with the
+  count, and a pasted 图文 URL returns `E_DOUYIN_IMAGE` before any download.
+  Live: 蓝莓 returned 5 videos after skipping 3 图文 posts; the same post now says
+  "这是抖音图文作品（图片合集），没有可分析的视频".
+
 ## 0.3.5 (2026-11-22)
 
 - **Douyin account timelines are complete.** `douyin videos` now scrolls the

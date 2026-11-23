@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -150,6 +151,87 @@ class CliTests(unittest.TestCase):
             p = run_cli(["list", "--json"], home)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertNotIn(vid, [v["id"] for v in json.loads(p.stdout)["videos"]])
+
+
+class GcCacheDefaultsTests(unittest.TestCase):
+    """The Host's gc --auto applies the same cache policy the settings page shows."""
+
+    def _seed(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name) / "home"
+        from video2agent.config import load_config
+        from video2agent.db import Database
+
+        cfg = load_config(home)
+        vid = "vid_gc_row"
+        (cfg.media_dir / vid).mkdir(parents=True)
+        (cfg.derived_dir / vid / "frames").mkdir(parents=True)
+        (cfg.media_dir / vid / "source.mp4").write_bytes(b"x" * 1024)
+        (cfg.derived_dir / vid / "frames" / "f.jpg").write_bytes(b"y" * 512)
+        old = "2026-01-01T00:00:00+00:00"
+        with Database(cfg.db_path) as db:
+            db.upsert_video({
+                "id": vid, "source_kind": "url", "source_uri": "test://" + vid,
+                "source_path": str(cfg.media_dir / vid / "source.mp4"),
+                "title": "aged", "duration_ms": 1000, "status": "ready",
+                "created_at": old,
+            })
+            db.conn.execute("UPDATE videos SET created_at=?, updated_at=? WHERE id=?", [old, old, vid])
+            db.conn.commit()
+        return home, vid, cfg
+
+    def _gc(self, home, defaults):
+        p = run_cli(["gc", "--auto", "--json", "--cache-defaults", json.dumps(defaults)], home)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_row_config_off_keeps_the_cache_without_a_settings_file(self):
+        home, vid, cfg = self._seed()
+        data = self._gc(home, {"cacheExpire": False, "cacheDays": 1,
+                               "cacheLimitEnabled": False, "cacheLimitGb": 20})
+        self.assertFalse(data["policy"]["expire"])
+        self.assertFalse(data["policy"].get("corrupt"))
+        self.assertEqual(data["evicted"], [])
+        self.assertTrue((cfg.media_dir / vid / "source.mp4").exists())
+
+    def test_settings_file_wins_over_row_config(self):
+        home, vid, cfg = self._seed()
+        (home / "ui-settings.json").write_text(
+            json.dumps({"cacheExpire": True, "cacheDays": 1}), encoding="utf-8")
+        data = self._gc(home, {"cacheExpire": False, "cacheDays": 30,
+                               "cacheLimitEnabled": False, "cacheLimitGb": 20})
+        self.assertTrue(data["policy"]["expire"])
+        self.assertIn(vid, [e.get("video_id") for e in data["evicted"]])
+
+    def test_corrupt_settings_file_fails_closed_despite_row_config(self):
+        home, vid, cfg = self._seed()
+        (home / "ui-settings.json").write_text("{not json", encoding="utf-8")
+        data = self._gc(home, {"cacheExpire": True, "cacheDays": 1,
+                               "cacheLimitEnabled": False, "cacheLimitGb": 20})
+        self.assertFalse(data["policy"]["expire"])
+        self.assertTrue(data["policy"].get("corrupt"))
+        self.assertEqual(data["evicted"], [])
+        self.assertTrue((cfg.media_dir / vid / "source.mp4").exists())
+
+    def test_invalid_cache_defaults_are_rejected_before_any_deletion(self):
+        home, vid, cfg = self._seed()
+        stale_tmp = cfg.derived_dir / "stale.tmp"
+        stale_cover = cfg.covers_dir / "bili_old.jpg"
+        stale_log = cfg.logs_dir / "job_old.log"
+        stale_tmp.write_bytes(b"tmp")
+        stale_cover.write_bytes(b"jpg")
+        stale_log.write_text("old log", encoding="utf-8")
+        old = time.time() - 8 * 86400
+        for stale in (stale_tmp, stale_cover, stale_log):
+            os.utime(stale, (old, old))
+        p = run_cli(["gc", "--auto", "--json", "--cache-defaults", "{not json"], home)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(json.loads(p.stdout)["error"]["code"], "E_CACHE_DEFAULTS")
+        self.assertTrue(stale_tmp.exists(), "validation must run before the temp sweep")
+        self.assertTrue(stale_cover.exists(), "validation must run before the cover sweep")
+        self.assertTrue(stale_log.exists(), "validation must run before the log sweep")
+        self.assertTrue((cfg.media_dir / vid / "source.mp4").exists())
 
 
 if __name__ == "__main__":

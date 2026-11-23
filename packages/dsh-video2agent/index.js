@@ -83,8 +83,19 @@ function cliCommand() {
   if (process.env.VIDEO2AGENT_BIN) return { command: process.env.VIDEO2AGENT_BIN, prefix: [] }
   try {
     const cli = readManagedTools().cli
-    if (cli && cli.python && fs.existsSync(cli.python)) {
-      return { command: cli.python, prefix: [...(cli.prefix || []), '-m', 'video2agent'] }
+    if (cli && cli.python) {
+      if (usableInterpreterPath(cli.python)) {
+        return { command: cli.python, prefix: [...(cli.prefix || []), '-m', 'video2agent'] }
+      }
+      // detectCli verified this launcher by actually running the module. Use the
+      // recorded invocation instead of guessing a possibly different
+      // "video2agent" binary on PATH. A bare legacy record is not trusted here.
+      if (cli.source === 'detected' && isBareCommandName(cli.python)) {
+        return {
+          command: String(cli.python),
+          prefix: [...(Array.isArray(cli.prefix) ? cli.prefix.map(String) : []), '-m', 'video2agent'],
+        }
+      }
     }
   } catch {}
   return { command: 'video2agent', prefix: [] }
@@ -103,6 +114,22 @@ function binPath() {
   const invocation = cliCommand()
   return invocation.prefix.length ? invocation.command + ' ' + invocation.prefix.join(' ') : invocation.command
 }
+
+// Windows app-execution aliases (the Store Python exposed through "py") can be
+// spawned, but fs.existsSync follows the reparse point and reports false while
+// lstat still sees the alias. Use lstat so a recorded interpreter that really
+// runs is not mistaken for a missing one.
+function usableInterpreterPath(candidate) {
+  const text = String(candidate || '')
+  if (!text) return false
+  try {
+    const stat = fs.lstatSync(text)
+    return stat.isFile() || stat.isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
 // Tools the plugin can provide to the Python CLI. FFmpeg may be installed after
 // the app started (PATH is a snapshot), so the setup card records where winget/brew
 // put it and every CLI spawn gets FFMPEG_BIN/FFPROBE_BIN.
@@ -134,15 +161,361 @@ function managedToolEnv(baseEnv = process.env) {
 // pip can install the console script into a Scripts dir this app does not have on
 // PATH. Record the interpreter that runs "python -m video2agent" (a .cmd wrapper
 // cannot be spawned without a shell, and shell quoting breaks Chinese paths).
-function saveManagedCli(pythonCommand, pythonPrefix) {
+// The optional provenance fields are what authorize an upgrade. A bare record is
+// deliberately ambiguous: old versions wrote it after a mere detection, so it
+// must not authorize anything.
+function saveManagedCli(pythonCommand, pythonPrefix, extra = {}) {
   try {
+    const tools = readManagedTools()
+    const previous = tools.cli && typeof tools.cli === 'object' ? tools.cli : {}
     fs.mkdirSync(path.dirname(managedToolsPath()), { recursive: true })
-    const tools = { ...readManagedTools(), cli: { python: pythonCommand, prefix: pythonPrefix || [], at: new Date().toISOString() } }
-    fs.writeFileSync(managedToolsPath(), JSON.stringify(tools, null, 2), 'utf8')
+    const cli = {
+      ...previous,
+      python: pythonCommand,
+      prefix: pythonPrefix || [],
+      at: new Date().toISOString(),
+      ...(extra && typeof extra === 'object' ? extra : {}),
+    }
+    fs.writeFileSync(managedToolsPath(), JSON.stringify({ ...tools, cli }, null, 2), 'utf8')
     return true
   } catch {
     return false
   }
+}
+
+// Detection only proves that this interpreter can run the CLI; it does not prove
+// who installed it. Never let a probe overwrite a provenance record.
+function recordDetectedCli(pythonCommand, pythonPrefix) {
+  const existing = readManagedTools().cli
+  if (existing && typeof existing === 'object' && existing.source === 'plugin-install') return false
+  return saveManagedCli(pythonCommand, pythonPrefix, { source: 'detected', auto_update: false })
+}
+
+// detectCli has already proven that this launcher can run "python -m
+// video2agent". Store the actual interpreter so every later tool call can use
+// the record; if that resolution fails, keep the verified launcher (cliCommand
+// knows how to invoke a detected bare command). Detection never authorizes
+// automatic updates.
+async function recordVerifiedCli(pythonCommand, pythonPrefix) {
+  const launcher = {
+    command: String(pythonCommand || ''),
+    prefix: Array.isArray(pythonPrefix) ? pythonPrefix.map(String) : [],
+  }
+  const absolute = launcher.command ? await probeEngineInterpreter(launcher) : ''
+  return recordDetectedCli(absolute || launcher.command, absolute ? [] : launcher.prefix)
+}
+
+// The Python package that does the video work. The npm package and the CLI are
+// released together (0.3.5 <-> 0.3.5), so a managed engine upgrade has exactly
+// one target: this plugin's loaded version.
+const CLI_PACKAGE = 'video2agent'
+// Automatic pip must finish well inside a normal tool budget. A manual click may
+// use the full setup budget.
+const ENGINE_AUTO_PIP_TIMEOUT_MS = 90000
+const ENGINE_WORKER_QUIESCE_MS = 15000
+const ENGINE_UPDATE = { state: 'idle', target: '', message: '' }
+// Test-only seams. The Node harness must never run a real pip against the
+// machine; injected probes keep the eligibility/validation logic honest.
+const ENGINE_TEST_HOOKS = {
+  pipInstall: null,
+  probeVersion: null,
+  probeDistribution: null,
+  probeInterpreter: null,
+  probeEnvironment: null,
+  onDiskVersion: null,
+}
+let ENGINE_READY_GATE = null
+let ENGINE_READY_RESOLVE = null
+let ENGINE_AUTO_STARTED = false
+// A manual engine pip temporarily replaces the package files. New tool, GC and
+// /video calls wait here instead of spawning the CLI that pip is rewriting. The
+// updater's own probes never take this barrier, so it cannot deadlock itself.
+let ENGINE_INSTALL_GATE = null
+let ENGINE_INSTALL_RESOLVE = null
+// The settings page polls /setup while an update is in flight. A full probe
+// starts Python, the CLI, FFmpeg, OCR and browser checks; do not repeat that on
+// every poll. Three seconds covers a page that mounts twice, while any engine
+// state change invalidates the entry immediately.
+const SETUP_STATUS_CACHE_TTL_MS = 3000
+let SETUP_STATUS_CACHE = null
+// A warm worker is never killed while a request is in flight. After an update
+// the next idle moment stops it so the next call spawns the new CLI.
+let WORKER_STALE = false
+
+function onDiskPluginVersion() {
+  if (ENGINE_TEST_HOOKS.onDiskVersion) return String(ENGINE_TEST_HOOKS.onDiskVersion)
+  try {
+    // The sibling package.json is the only disk evidence available by default.
+    // When the module is loaded from a .pnpm path that is the loaded package, not
+    // necessarily the active profile alias, so this is reported as observed and
+    // is never turned into a guess about some other directory. A launch context
+    // that knows the active profile can supply VIDEO2AGENT_PLUGIN_MANIFEST; then
+    // that manifest is the authoritative on-disk version.
+    const configured = String(process.env.VIDEO2AGENT_PLUGIN_MANIFEST || '').trim()
+    const manifest = configured || new URL('./package.json', import.meta.url)
+    return String(JSON.parse(fs.readFileSync(manifest, 'utf8')).version || '').trim()
+  } catch {
+    return ''
+  }
+}
+
+function pluginRestartRequired() {
+  const installed = onDiskPluginVersion()
+  // Evidence only: an unreadable manifest is unknown, not "restart". A
+  // same-version replacement cannot be detected this round; refreshing the page
+  // is not reloading the plugin and must never be reported as such.
+  return Boolean(installed && PLUGIN_VERSION && installed !== PLUGIN_VERSION)
+}
+
+function setEngineUpdate(state, target = '', message = '') {
+  ENGINE_UPDATE.state = ['idle', 'updating', 'ready', 'failed'].includes(state) ? state : 'idle'
+  ENGINE_UPDATE.target = ENGINE_UPDATE.state === 'idle' ? '' : String(target || '')
+  ENGINE_UPDATE.message = String(message || '')
+  // A polling client must see the state change immediately. Keep the probe
+  // snapshot while updating so GET never re-runs a CLI probe against a package
+  // pip is replacing; ready/failed clear it so the next read is fresh.
+  if (state !== 'updating') SETUP_STATUS_CACHE = null
+}
+
+function engineUpdatePublic() {
+  const out = { state: ENGINE_UPDATE.state }
+  if (ENGINE_UPDATE.target) out.target = ENGINE_UPDATE.target
+  if (ENGINE_UPDATE.message) out.message = ENGINE_UPDATE.message
+  return out
+}
+
+function createEngineReadyGate() {
+  // The gate is a startup barrier. Once it has settled, later applies reuse it
+  // (and a manual update never re-blocks an already-running Host).
+  if (ENGINE_READY_GATE && !ENGINE_READY_RESOLVE) return
+  ENGINE_READY_GATE = new Promise((resolve) => { ENGINE_READY_RESOLVE = resolve })
+}
+
+function resolveEngineReadyGate() {
+  const resolve = ENGINE_READY_RESOLVE
+  ENGINE_READY_RESOLVE = null
+  if (resolve) resolve()
+}
+
+function beginEngineInstall() {
+  if (ENGINE_INSTALL_RESOLVE) return
+  ENGINE_INSTALL_GATE = new Promise((resolve) => { ENGINE_INSTALL_RESOLVE = resolve })
+}
+
+function finishEngineInstall() {
+  const resolve = ENGINE_INSTALL_RESOLVE
+  ENGINE_INSTALL_RESOLVE = null
+  ENGINE_INSTALL_GATE = null
+  if (resolve) resolve()
+}
+
+async function waitForEngineReady() {
+  const gate = ENGINE_READY_GATE
+  if (gate) {
+    try { await gate } catch {}
+  }
+  const install = ENGINE_INSTALL_GATE
+  if (install) {
+    try { await install } catch {}
+  }
+}
+
+function engineUpdateMarkerPath() {
+  return path.join(v2aHomePath(), 'engine-update.json')
+}
+
+function readEngineUpdateMarker() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(engineUpdateMarkerPath(), 'utf8'))
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function writeEngineUpdateMarker(marker) {
+  try {
+    fs.mkdirSync(path.dirname(engineUpdateMarkerPath()), { recursive: true })
+    fs.writeFileSync(engineUpdateMarkerPath(), JSON.stringify(marker, null, 2), 'utf8')
+    return true
+  } catch {
+    return false
+  }
+}
+
+function clearEngineUpdateMarker() {
+  try { fs.rmSync(engineUpdateMarkerPath(), { force: true }) } catch {}
+}
+
+// Test-only reset, used after the first gate settles. It is deliberately
+// separate from normal runtime state so a harness can exercise fail/retry paths.
+function resetEngineUpdateForTest() {
+  ENGINE_AUTO_STARTED = false
+  ENGINE_READY_GATE = null
+  ENGINE_READY_RESOLVE = null
+  finishEngineInstall()
+  WORKER_STALE = false
+  setEngineUpdate('idle')
+  clearEngineUpdateMarker()
+  for (const key of Object.keys(ENGINE_TEST_HOOKS)) ENGINE_TEST_HOOKS[key] = null
+}
+
+// A managed CLI target is the interpreter that really runs "python -m
+// video2agent". It is never inferred from a different Python probe: only the
+// recorded interpreter counts, which is what makes an upgrade safe.
+function managedCliTarget({ requireAuthorization = true } = {}) {
+  const cli = readManagedTools().cli
+  if (!cli || typeof cli !== 'object' || !cli.python) return { ok: false, reason: 'no-managed-cli' }
+  if (!usableInterpreterPath(cli.python)) return { ok: false, reason: 'interpreter-missing' }
+  if (requireAuthorization && (cli.source !== 'plugin-install' || cli.auto_update !== true)) {
+    return { ok: false, reason: 'not-authorized' }
+  }
+  return {
+    ok: true,
+    command: String(cli.python),
+    prefix: Array.isArray(cli.prefix) ? cli.prefix.map(String) : [],
+    record: cli,
+  }
+}
+
+function engineAutoTarget() {
+  // An explicit path/Python pin is the user's choice. Never overwrite or update
+  // it automatically, even when a managed record also exists.
+  if (process.env.VIDEO2AGENT_BIN) return { ok: false, reason: 'explicit-bin' }
+  if (process.env.VIDEO2AGENT_PYTHON) return { ok: false, reason: 'explicit-python' }
+  return managedCliTarget({ requireAuthorization: true })
+}
+
+// A legacy record can name the launcher ("py", "python3") instead of an
+// absolute interpreter. Only a manual action may resolve that name; automatic
+// updates must never treat it as an authorized target.
+function isBareCommandName(command) {
+  const text = String(command || '').trim()
+  return Boolean(text) && !path.isAbsolute(text) && !text.includes('/') && !text.includes('\\')
+}
+
+function engineOutputVersion(text) {
+  const line = String(text || '').trim().split('\n').pop() || ''
+  return (line.match(/(\d+\.\d+\.\d+)/) || [])[1] || ''
+}
+
+async function probeEngineVersion(target) {
+  if (ENGINE_TEST_HOOKS.probeVersion) return await ENGINE_TEST_HOOKS.probeVersion(target)
+  const r = await runCommand(target.command, [...(target.prefix || []), '-m', CLI_PACKAGE, '--version'], 30000)
+  if (r.code !== 0) {
+    return { ok: false, version: '', detail: String(r.err || r.out || 'version probe failed').slice(0, 300) }
+  }
+  const version = engineOutputVersion(r.out)
+  return { ok: Boolean(version), version, detail: String(r.out || '').slice(0, 300) }
+}
+
+async function probeEngineDistribution(target) {
+  if (ENGINE_TEST_HOOKS.probeDistribution) return await ENGINE_TEST_HOOKS.probeDistribution(target)
+  const code = [
+    'import importlib.metadata as m, json',
+    'try:',
+    '    d = m.distribution("video2agent")',
+    '    try:',
+    '        du = d.read_text("direct_url.json") or ""',
+    '    except Exception:',
+    '        du = ""',
+    '    print(json.dumps({"ok": True, "version": d.version, "direct_url": du}))',
+    'except Exception as e:',
+    '    print(json.dumps({"ok": False, "error": str(e)}))',
+  ].join('\n')
+  const r = await runCommand(target.command, [...(target.prefix || []), '-c', code], 30000)
+  const line = String(r.out || '').trim().split('\n').pop() || ''
+  try {
+    const data = JSON.parse(line)
+    const directUrl = String(data.direct_url || '')
+    return {
+      ok: data.ok === true,
+      version: String(data.version || ''),
+      direct_url: directUrl,
+      editable: /"editable"\s*:\s*true/.test(directUrl),
+      detail: String(data.error || '').slice(0, 300),
+    }
+  } catch {
+    return { ok: false, version: '', direct_url: '', editable: false, detail: line.slice(0, 300) }
+  }
+}
+
+async function probeEngineEnvironment(target) {
+  if (ENGINE_TEST_HOOKS.probeEnvironment) return await ENGINE_TEST_HOOKS.probeEnvironment(target)
+  const code = [
+    'import json, os, sys, sysconfig',
+    'venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)',
+    'stdlib = sysconfig.get_path("stdlib") or ""',
+    'marker = os.path.join(stdlib, "EXTERNALLY-MANAGED") if stdlib else ""',
+    'print(json.dumps({"ok": True, "venv": bool(venv), "externally_managed": bool(marker and os.path.exists(marker)), "marker": marker}))',
+  ].join('\n')
+  const r = await runCommand(target.command, [...(target.prefix || []), '-c', code], 30000)
+  const line = String(r.out || '').trim().split('\n').pop() || ''
+  try {
+    const data = JSON.parse(line)
+    return {
+      ok: data.ok === true,
+      venv: data.venv === true,
+      externally_managed: data.externally_managed === true,
+      marker: String(data.marker || ''),
+      detail: String(data.error || '').slice(0, 300),
+    }
+  } catch {
+    return { ok: false, venv: false, externally_managed: false, marker: '', detail: line.slice(0, 300) }
+  }
+}
+
+async function probeEngineInterpreter(target) {
+  if (ENGINE_TEST_HOOKS.probeInterpreter) return await ENGINE_TEST_HOOKS.probeInterpreter(target)
+  const r = await runCommand(target.command, [...(target.prefix || []), '-c', 'import sys; print(sys.executable)'], 30000)
+  const line = String(r.out || '').trim().split('\n').pop() || ''
+  return r.code === 0 && line && usableInterpreterPath(line) ? line : ''
+}
+
+async function pipInstallEngine(target, { spec, timeoutMs, mirror = false }) {
+  if (ENGINE_TEST_HOOKS.pipInstall) return await ENGINE_TEST_HOOKS.pipInstall(target, { spec, timeoutMs, mirror })
+  const base = [...(target.prefix || []), '-m', 'pip', 'install', '--upgrade', '--no-input', spec]
+  let r = await runCommand(target.command, base, timeoutMs)
+  let note = ''
+  if (r.code !== 0 && mirror) {
+    note = '默认 PyPI 源安装失败，改用清华镜像重试…\n'
+    r = await runCommand(target.command, [...base, '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'], timeoutMs)
+  }
+  return {
+    code: r.code,
+    output: (note + ((String(r.out || '') + '\n' + String(r.err || '')).trim())).slice(-8000),
+    detail: String(r.err || r.out || '').slice(0, 300),
+  }
+}
+
+function workerBusy() {
+  return Boolean(WORKER && WORKER.pending)
+}
+
+async function waitForWorkerQuiescence(timeoutMs) {
+  if (!workerBusy()) return true
+  let timer = null
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs)
+    timer.unref?.()
+  })
+  const settled = WORKER_QUEUE.then(() => true, () => true)
+  const result = await Promise.race([settled, timeout])
+  if (timer) clearTimeout(timer)
+  return result === true
+}
+
+function markWorkerStale() {
+  if (!WORKER) {
+    WORKER_STALE = false
+    return
+  }
+  if (WORKER.pending) {
+    WORKER_STALE = true
+    return
+  }
+  WORKER_STALE = false
+  stopWorker()
 }
 
 // Spawn any helper command (python, pip, winget, ffmpeg) with the same capture and
@@ -347,6 +720,10 @@ function _workerStart() {
         err: String(message.err || '').slice(0, MAX_CAPTURE),
       })
       _workerIdle(worker)
+      // The engine changed while this request was in flight. Do not kill it;
+      // stop the old process only now that it is idle, so the next call starts
+      // the new CLI.
+      if (WORKER_STALE && WORKER === worker && !worker.pending) stopWorker()
     }
   })
   child.stderr.on('data', (chunk) => {
@@ -393,6 +770,9 @@ function runWorker(args, timeoutMs = 600000) {
 }
 
 async function runToolCommand(args, argv, timeoutMs) {
+  // Startup is gated on the one engine probe/update. The gate is resolved even
+  // when no update is eligible, so this never blocks a normal host forever.
+  await waitForEngineReady()
   if (workerEligible(args)) {
     try {
       return await runWorker(argv, timeoutMs)
@@ -407,6 +787,7 @@ async function runToolCommand(args, argv, timeoutMs) {
 function stopWorker() {
   const worker = WORKER
   WORKER = null
+  WORKER_STALE = false
   if (worker) _workerFail(worker, 'worker stopped')
 }
 
@@ -1120,11 +1501,35 @@ function jobFromCliPayload(parsed) {
 
 // Cache policy is applied in the background: expiry/capacity is not allowed to
 // block a settings save or a model call. Timers are unref'd so a test host exits.
+// The Host hands the CLI the plugin-row Config layer (four cache keys only). The
+// CLI reads ui-settings.json itself and lets it win, so a settings save that
+// lands mid-tick cannot be half-applied from here, and a corrupt file still
+// fails closed. Without this layer an unset file key fell back to the built-in
+// 7-day default while the settings page showed the row Config's 关闭.
 let CACHE_CLEANUP_TIMER = null
+function cacheCleanupArgs() {
+  const row = sanitizeUiSettings(ROW_CONFIG || {})
+  return [
+    'gc', '--auto', '--json',
+    '--cache-defaults', JSON.stringify({
+      cacheExpire: row.cacheExpire,
+      cacheDays: row.cacheDays,
+      cacheLimitEnabled: row.cacheLimitEnabled,
+      cacheLimitGb: row.cacheLimitGb,
+    }),
+  ]
+}
+
 function runCacheCleanupSoon(delayMs = 30000) {
   if (CACHE_CLEANUP_TIMER) return
   const tick = () => {
-    runCli(['gc', '--auto', '--json'], 120000).catch(() => {})
+    // Same startup barrier as a tool call: never sweep with a CLI that is being
+    // replaced, and never run while an engine update is in flight. A skipped
+    // tick is picked up by the interval; it is safe to miss one.
+    waitForEngineReady().then(() => {
+      if (ENGINE_UPDATE.state === 'updating') return
+      runCli(cacheCleanupArgs(), 120000).catch(() => {})
+    }).catch(() => {})
   }
   // The old code ran once and never again, so cacheExpire/cacheLimit silently
   // stopped applying in a long-lived desktop process. Re-check periodically.
@@ -1155,6 +1560,7 @@ export function apply(ctx, config) {
         hint: '<doctor|discover|resolve|ingest|jobs|overview|search|evidence|export> [args]',
       },
       handler: async (invocation) => {
+        await waitForEngineReady()
         const args = tokenize(invocation?.rawInput || '')
         const r = await runCli(['help'].includes(args[0]) ? ['--help'] : args)
         return { kind: r.code === 0 ? 'success' : 'error', text: (r.out || r.err || 'no output').slice(0, 24000) }
@@ -1221,20 +1627,32 @@ export function apply(ctx, config) {
   // what is missing. Only the page can start an install (loopback JSON POST,
   // guardWrite); the model-facing tool has no command that reaches it.
   const SETUP_INSTALL_TIMEOUT = 15 * 60 * 1000
-  // Two settings tabs must not run pip/winget at the same time (site-packages or
-  // the installer can break mid-write); a second click gets E_BUSY instead.
-  const SETUP_INFLIGHT = new Map()
+  // One global install/update lock, not one per button. Auto-update, a manual
+  // engine update, and install-all all mutate the same interpreter/site-packages,
+  // so two of them must never run at once. A second caller gets E_BUSY.
+  let SETUP_INFLIGHT = null
+
+  function setupBusy() {
+    return Boolean(SETUP_INFLIGHT)
+  }
 
   async function withInstallLock(action, runner) {
-    if (SETUP_INFLIGHT.has(action)) {
-      return { ok: false, error: { code: 'E_BUSY', message: '安装已在进行中，请等它结束再试。' }, status: await setupStatus() }
+    if (SETUP_INFLIGHT) {
+      return {
+        ok: false,
+        error: { code: 'E_BUSY', message: '安装或更新已在进行中，请等它结束再试。' },
+        // Reuse the last probe rather than starting another full one while the
+        // owner of the lock is running pip. The state fields are refreshed from
+        // memory, so the UI still sees updating/ready/failed immediately.
+        status: await setupStatus({ cache: true }),
+      }
     }
     const task = (async () => runner())()
-    SETUP_INFLIGHT.set(action, task)
+    SETUP_INFLIGHT = { action, task }
     try {
       return await task
     } finally {
-      SETUP_INFLIGHT.delete(action)
+      if (SETUP_INFLIGHT && SETUP_INFLIGHT.task === task) SETUP_INFLIGHT = null
     }
   }
 
@@ -1359,7 +1777,10 @@ export function apply(ctx, config) {
     if (python.ok) {
       const moduleRun = await runCommand(python.command, [...python.prefix, '-m', 'video2agent', '--version'], 30000)
       if (moduleRun.code === 0) {
-        saveManagedCli(python.command, python.prefix)
+        // A detection is not an install: remember how to reach the CLI, but do
+        // not turn it into an auto-update authorization. Resolve a bare launcher
+        // to the actual interpreter so the record also works for tool calls.
+        await recordVerifiedCli(python.command, python.prefix)
         return { ok: true, detail: versionLine(moduleRun), via: 'python' }
       }
     }
@@ -1485,7 +1906,62 @@ export function apply(ctx, config) {
     }
   }
 
-  async function setupStatus() {
+  async function setupStatus({ cache = false } = {}) {
+    const installedPluginVersion = onDiskPluginVersion()
+    const pluginStatus = {
+      loaded: PLUGIN_VERSION,
+      installed: installedPluginVersion,
+      restart_required: Boolean(installedPluginVersion && PLUGIN_VERSION && installedPluginVersion !== PLUGIN_VERSION),
+    }
+    // GET is allowed to reuse a very short probe. During an update, reuse it
+    // until the state changes (ready/failed) so polling does not spawn a new
+    // Python/CLI/FFmpeg/browser probe every five seconds.
+    if (cache && SETUP_STATUS_CACHE) {
+      const age = Date.now() - SETUP_STATUS_CACHE.at
+      if (age < SETUP_STATUS_CACHE_TTL_MS || ENGINE_UPDATE.state === 'updating') {
+        return {
+          ...SETUP_STATUS_CACHE.data,
+          plugin: pluginStatus,
+          engine_update: engineUpdatePublic(),
+        }
+      }
+    }
+    // If the snapshot could not be taken before pip (a probe threw), do not run
+    // a CLI/doctor probe now: the package files are being replaced. Report the
+    // safe transient shape and let the state change invalidate it.
+    if (cache && ENGINE_UPDATE.state === 'updating' && !SETUP_STATUS_CACHE) {
+      const record = managedCliTarget({ requireAuthorization: false })
+      const version = record.ok ? String(record.record.version || '') : ''
+      const transient = {
+        ok: true,
+        platform: process.platform,
+        home: v2aHomePath(),
+        plugin: pluginStatus,
+        engine_update: engineUpdatePublic(),
+        python: { ok: true, detail: '更新中…', tooOld: false },
+        cli: {
+          ok: true,
+          detail: '更新中…',
+          bin: binPath(),
+          via: 'managed',
+          version,
+          latest: PLUGIN_VERSION,
+          update_available: false,
+        },
+        ffmpeg: { ok: true, detail: '更新中…', managed: true, path: '' },
+        hints: {
+          python: '安装 Python 3.11+：https://www.python.org/downloads/',
+          cli: 'pip install video2agent',
+          ffmpeg: 'winget install Gyan.FFmpeg',
+          browser: 'pip install "video2agent[browser]"',
+        },
+        ocr: { ok: false, supported: false, detail: '更新中…', engine: '', version: '' },
+        browser: { ok: false, supported: false, detail: '更新中…', version: '', interpreter: '' },
+        canInstall: { cli: false, updateCli: false, ffmpeg: false, ocr: false, browser: false },
+      }
+      SETUP_STATUS_CACHE = { at: Date.now(), data: transient }
+      return transient
+    }
     const python = await detectPython()
     const cli = await detectCli()
     const cliOk = cli.ok
@@ -1502,10 +1978,15 @@ export function apply(ctx, config) {
     const ffmpegHint = process.platform === 'win32'
       ? 'winget install Gyan.FFmpeg'
       : process.platform === 'darwin' ? 'brew install ffmpeg' : 'sudo apt install ffmpeg'
-    return {
+    // GET is a probe. It never starts, retries, or waits for an engine update;
+    // it only reports the loaded version, the on-disk version and the state the
+    // background updater last published.
+    const result = {
       ok: true,
       platform: process.platform,
       home: v2aHomePath(),
+      plugin: pluginStatus,
+      engine_update: engineUpdatePublic(),
       python: { ok: runtimePython.ok, detail: runtimePython.version ? 'Python ' + runtimePython.version : '未找到', tooOld: !!runtimePython.tooOld },
       cli: {
         ok: cliOk,
@@ -1535,11 +2016,302 @@ export function apply(ctx, config) {
         browser: (runtimePython.ok || !!cliInterpreter()) && browser.supported && !browser.ok,
       },
     }
+    SETUP_STATUS_CACHE = { at: Date.now(), data: result }
+    return result
+  }
+
+  // ---- Managed engine update ------------------------------------------------
+  // Only an interpreter this plugin installed into can be upgraded automatically.
+  // A probe of some other Python is not authorization, and an explicit path/Python
+  // pin, an editable checkout, or a direct-URL install is never touched.
+  async function engineManualTarget({ preferred = '', allowDetect = false } = {}) {
+    if (process.env.VIDEO2AGENT_BIN) return { ok: false, reason: 'explicit-bin' }
+    // A legacy record (no provenance) is still the CLI this Host runs; a manual
+    // click may update it once and that successful install records provenance.
+    const managed = managedCliTarget({ requireAuthorization: false })
+    if (managed.ok) return managed
+    // Older records may store the launcher ("py", "python3") instead of the
+    // interpreter. Resolve exactly that recorded command with its prefix, but
+    // do not write the result back: the bare record stays unauthorized for
+    // automatic updates until the explicit clean install below records it.
+    if (managed.reason === 'interpreter-missing' && !process.env.VIDEO2AGENT_PYTHON) {
+      const record = readManagedTools().cli
+      if (record && isBareCommandName(record.python)) {
+        const launcher = {
+          command: String(record.python),
+          prefix: Array.isArray(record.prefix) ? record.prefix.map(String) : [],
+        }
+        const absolute = await probeEngineInterpreter(launcher)
+        if (absolute) return { ok: true, command: absolute, prefix: [], record }
+      }
+    }
+    // setup/doctor reports the interpreter that actually ran the CLI (pipx and
+    // other wrappers included). Prefer it over an unrelated Python on PATH.
+    if (preferred && usableInterpreterPath(preferred)) return { ok: true, command: preferred, prefix: [] }
+    if (process.env.VIDEO2AGENT_PYTHON) {
+      const command = String(process.env.VIDEO2AGENT_PYTHON)
+      if (usableInterpreterPath(command)) return { ok: true, command, prefix: command === 'py' ? ['-3'] : [] }
+      return { ok: false, reason: 'python-pin-missing' }
+    }
+    if (allowDetect) {
+      const python = await detectPython()
+      if (python.ok) return { ok: true, command: python.command, prefix: python.prefix }
+      return { ok: false, reason: 'no-python' }
+    }
+    // The CLI is running but no managed record or doctor interpreter exists.
+    // Installing into a different Python would update a package this Host never
+    // calls, so refuse instead of guessing.
+    return { ok: false, reason: 'interpreter-unknown' }
+  }
+
+  async function saveInstalledEngine(target, version, dist, { authorize = true } = {}) {
+    // Prefer the exact interpreter pip was told to use (a pipx/venv wrapper path)
+    // over sys.executable, which can point at the base interpreter behind it.
+    const absolute = path.isAbsolute(String(target.command || '')) && usableInterpreterPath(target.command)
+      ? String(target.command)
+      : await probeEngineInterpreter(target)
+    if (!absolute) return false
+    const clean = Boolean(dist && dist.ok && !dist.editable && !dist.direct_url)
+    return saveManagedCli(absolute, [], {
+      source: 'plugin-install',
+      // Authorization is granted only after the whole install path succeeded and
+      // the actual probed version meets this plugin's version.
+      auto_update: authorize && clean && Boolean(version) && compareVersions(version, PLUGIN_VERSION) >= 0,
+      version,
+      plugin_version: PLUGIN_VERSION,
+      installed_at: new Date().toISOString(),
+    })
+  }
+
+  async function failEngineUpdate(message, { output = '', persist = true } = {}) {
+    setEngineUpdate('failed', PLUGIN_VERSION, message)
+    // Persist only the fact that this plugin version already tried and failed.
+    // GET/refresh must not retry; a manual update clears this marker.
+    if (persist && PLUGIN_VERSION) {
+      writeEngineUpdateMarker({
+        plugin_version: PLUGIN_VERSION,
+        target: PLUGIN_VERSION,
+        state: 'failed',
+        message,
+        at: new Date().toISOString(),
+      })
+    }
+    return {
+      ok: false,
+      error: { code: 'E_ENGINE_UPDATE', message },
+      output,
+      status: await setupStatus(),
+    }
+  }
+
+  // A manual click is the explicit one-time agreement for a legacy record, but
+  // it still must not overwrite an environment the user owns another way.
+  async function manualEngineGuard(target) {
+    const dist = await probeEngineDistribution(target)
+    if (dist.ok && (dist.editable || dist.direct_url)) {
+      return {
+        ok: false,
+        code: 'E_ENGINE_EDITABLE',
+        message: '视频引擎来自可编辑或本地路径安装，DSH 不会覆盖它。',
+        remedy: '请在原来的项目/环境中更新这个安装，不要用 DSH 覆盖。',
+      }
+    }
+    // PEP 668 marks a system Python that pip must not manage in place. A venv
+    // has its own site-packages, so its updates stay ordinary.
+    const env = await probeEngineEnvironment(target)
+    if (env.ok && env.externally_managed && !env.venv) {
+      return {
+        ok: false,
+        code: 'E_ENGINE_MANAGED',
+        message: '视频引擎所在的 Python 由系统管理，DSH 不能直接更新。',
+        remedy: '请在对应的系统 Python 环境中维护它，不要安装到用户目录（--user）。',
+      }
+    }
+    return { ok: true }
+  }
+
+  // Runs under the global install lock. It does not take the lock itself, so
+  // install-all can call it without deadlocking.
+  async function performEngineUpdate(target, { manual = false, currentVersion = '' } = {}) {
+    if (!PLUGIN_VERSION) {
+      return { ok: false, error: { code: 'E_VERSION', message: '插件版本未知，无法更新视频引擎。' }, output: '', status: await setupStatus() }
+    }
+    if (currentVersion && compareVersions(currentVersion, PLUGIN_VERSION) >= 0) {
+      clearEngineUpdateMarker()
+      setEngineUpdate('ready', PLUGIN_VERSION)
+      return { ok: true, already: true, output: '', status: await setupStatus() }
+    }
+    // The old warm worker must not keep running while pip replaces its package.
+    // If a read is still in flight, wait briefly; a manual click can be retried,
+    // and an automatic attempt is simply deferred instead of killing that work.
+    const quiescent = await waitForWorkerQuiescence(ENGINE_WORKER_QUIESCE_MS)
+    if (!quiescent) {
+      if (manual) {
+        setEngineUpdate('failed', PLUGIN_VERSION, '有视频正在处理，请稍后再更新。')
+        return {
+          ok: false,
+          error: { code: 'E_BUSY', message: '有视频正在处理，请稍后再更新。' },
+          output: '',
+          status: await setupStatus(),
+        }
+      }
+      setEngineUpdate('idle')
+      return { ok: false, deferred: true, error: { code: 'E_ENGINE_DEFERRED', message: '视频引擎正在使用中，本次自动更新已跳过。' }, output: '' }
+    }
+    // New tool/GC/command calls wait from here until the package replacement and
+    // its validation finish. Existing work has already drained above. The
+    // updater's own probes stay outside this barrier, so it cannot self-deadlock.
+    beginEngineInstall()
+    try {
+    if (manual) {
+      const guard = await manualEngineGuard(target)
+      if (!guard.ok) {
+        // The explicit click is refused, not silently retried: keep that
+        // environment under its owner. No failed marker is persisted, so other
+        // eligible installs/versions are not blocked by this answer.
+        setEngineUpdate('failed', PLUGIN_VERSION, guard.message)
+        return {
+          ok: false,
+          error: { code: guard.code, message: guard.message, remedy: guard.remedy },
+          output: '',
+          status: await setupStatus(),
+        }
+      }
+    }
+    // Take one normal snapshot before pip starts. GET polls during the update
+    // reuse this instead of probing the package pip is replacing.
+    try { await setupStatus({ cache: true }) } catch {}
+    if (!workerBusy()) stopWorker()
+    setEngineUpdate('updating', PLUGIN_VERSION)
+    try {
+      // Automatic updates are one exact, bounded step to the loaded plugin
+      // version: never "latest", never a downgrade, never a long mirror fallback.
+      const spec = manual
+        ? CLI_PACKAGE + '>=' + PLUGIN_VERSION
+        : CLI_PACKAGE + '==' + PLUGIN_VERSION
+      const timeoutMs = manual ? SETUP_INSTALL_TIMEOUT : ENGINE_AUTO_PIP_TIMEOUT_MS
+      const pip = await pipInstallEngine(target, { spec, timeoutMs, mirror: manual })
+      if (pip.code !== 0) {
+        return await failEngineUpdate('视频引擎更新失败，请检查网络后重试。', { output: pip.output || '' })
+      }
+      // Strict validation: pip exiting 0 is not success. Re-probe the actual
+      // interpreter and refuse to report success for an older version.
+      const probe = await probeEngineVersion(target)
+      if (!probe.ok) {
+        return await failEngineUpdate('无法确认更新后的视频引擎版本，请手动更新。', { output: pip.output || '' })
+      }
+      if (compareVersions(probe.version, PLUGIN_VERSION) < 0) {
+        return await failEngineUpdate('视频引擎版本仍低于插件要求，请手动更新。', { output: pip.output || '' })
+      }
+      const dist = await probeEngineDistribution(target)
+      const saved = await saveInstalledEngine(target, probe.version, dist)
+      if (!saved) {
+        return await failEngineUpdate('无法记录视频引擎位置，请手动更新。', { output: pip.output || '' })
+      }
+      clearEngineUpdateMarker()
+      // The worker was stopped before pip; mark stale as a second guard in case
+      // a request slipped in. A pending request is never killed.
+      markWorkerStale()
+      setEngineUpdate('ready', PLUGIN_VERSION)
+      return { ok: true, output: pip.output || '', status: await setupStatus() }
+    } catch (e) {
+      return await failEngineUpdate('视频引擎更新失败，请手动重试。', { output: String((e && e.message) || e).slice(0, 1000) })
+    }
+    } finally {
+      // Covers the pip path, a guard refusal, and a probe failure before pip.
+      finishEngineInstall()
+    }
+  }
+
+  async function runEngineAutoUpdate() {
+    if (!PLUGIN_VERSION) { setEngineUpdate('idle'); return }
+    // The code that is running may not match the package.json on disk. Until a
+    // restart, do not guess which engine version belongs to which plugin.
+    if (pluginRestartRequired()) { setEngineUpdate('idle'); return }
+    const target = engineAutoTarget()
+    if (!target.ok) { setEngineUpdate('idle'); return }
+    const probe = await probeEngineVersion(target)
+    if (!probe.ok) {
+      await failEngineUpdate('无法确认视频引擎版本，请手动更新。')
+      return
+    }
+    if (compareVersions(probe.version, PLUGIN_VERSION) >= 0) {
+      // A stale failure marker must not outlive a manually fixed engine.
+      clearEngineUpdateMarker()
+      setEngineUpdate('idle')
+      return
+    }
+    const marker = readEngineUpdateMarker()
+    if (marker && marker.plugin_version === PLUGIN_VERSION && marker.target === PLUGIN_VERSION && marker.state === 'failed') {
+      setEngineUpdate('failed', PLUGIN_VERSION, String(marker.message || '视频引擎更新失败，请手动重试。'))
+      return
+    }
+    const dist = await probeEngineDistribution(target)
+    if (!dist.ok || dist.editable || dist.direct_url) {
+      // The record says plugin-install, but the live environment is now editable
+      // or a direct checkout. Do not overwrite it silently; the manual button
+      // remains the explicit path.
+      setEngineUpdate('idle')
+      return
+    }
+    const result = await withInstallLock('engine-auto-update', () => performEngineUpdate(target, { manual: false, currentVersion: probe.version }))
+    if (result && result.ok !== true && result.error && result.error.code === 'E_BUSY') {
+      // A manual install/update owns the lock. Do not overwrite its state and do
+      // not queue a second pip attempt.
+      if (ENGINE_UPDATE.state !== 'updating') setEngineUpdate('idle')
+    }
+  }
+
+  function scheduleEngineAutoUpdate() {
+    // A repeated apply() must not skip the first update's startup barrier. Only
+    // the run that armed the gate may settle it (in the finally below); settling
+    // here would let tool/command/cache paths run the old CLI while pip is still
+    // replacing it.
+    if (ENGINE_AUTO_STARTED) return
+    ENGINE_AUTO_STARTED = true
+    createEngineReadyGate()
+    ;(async () => {
+      try {
+        await runEngineAutoUpdate()
+      } catch (e) {
+        try {
+          await failEngineUpdate('视频引擎更新失败，请手动重试。', { output: String((e && e.message) || e).slice(0, 1000) })
+        } catch {}
+      } finally {
+        // The gate must settle on every path, including a thrown probe. A tool
+        // waiting on it then proceeds with the old (still truthful) state.
+        resolveEngineReadyGate()
+      }
+    })()
   }
 
   async function installCli(force = false) {
     const before = await setupStatus()
     if (before.cli.ok && !force && !before.cli.update_available) return { ok: true, already: true, output: '', status: before }
+    if (before.cli.ok) {
+      // An installed CLI is updated in place, using the interpreter this Host
+      // actually runs. Do not fall through to a different Python: that would
+      // install a package the Host never calls and report a false success.
+      const target = await engineManualTarget({
+        preferred: (before.browser && before.browser.interpreter) || '',
+        allowDetect: false,
+      })
+      if (!target.ok) {
+        const message = target.reason === 'explicit-bin'
+          ? '视频引擎由外部路径指定，请在对应环境手动更新。'
+          : target.reason === 'python-pin-missing'
+            ? 'VIDEO2AGENT_PYTHON 指向不存在的解释器。'
+            : target.reason === 'interpreter-unknown'
+              ? '无法确认视频引擎所在的 Python 环境（例如 pipx），请在对应环境中更新。'
+              : '没有找到可更新的 Python 解释器。'
+        return {
+          ok: false,
+          error: { code: 'E_MANUAL_UPDATE', message, remedy: '修正视频引擎路径/解释器设置后重试。' },
+          status: before,
+        }
+      }
+      return performEngineUpdate(target, { manual: true, currentVersion: before.cli.version })
+    }
     const python = await detectPython()
     if (!python.ok) {
       return {
@@ -1598,6 +2370,30 @@ export function apply(ctx, config) {
       ? '\n本地 OCR（可选，读画面上的字）可在环境检查里单独安装：pip install "video2agent[ocr]"'
       : '\nPython ' + (python.version || '') + ' 没有本地 OCR 的 wheel；核心转写/检索可用，本地 OCR 需要 Python 3.11/3.12。'
     const output = (coreOutput + '\n' + extraOutput).trim().slice(-8000)
+    // Record provenance only after this plugin's own install succeeded. The
+    // version/metadata re-probe also decides whether future releases may update
+    // it automatically (never an editable or direct-URL install).
+    const installedTarget = {
+      command: python.command,
+      prefix: python.prefix,
+    }
+    let managedEngineTarget = null
+    let installedDist = null
+    let probedVersion = ''
+    const absolute = await probeEngineInterpreter(installedTarget)
+    if (absolute) {
+      const candidate = { command: absolute, prefix: [] }
+      const probed = await probeEngineVersion(candidate)
+      if (probed.ok) {
+        managedEngineTarget = candidate
+        probedVersion = probed.version
+        installedDist = await probeEngineDistribution(candidate)
+        // Record how to reach the new CLI so this probe and every later call use
+        // it, but do not grant auto-update authorization yet. The full install
+        // path below still has to confirm the CLI starts and the version matches.
+        await saveInstalledEngine(candidate, probedVersion, installedDist, { authorize: false })
+      }
+    }
     const after = await setupStatus()
     if (!after.cli.ok) {
       return {
@@ -1610,6 +2406,25 @@ export function apply(ctx, config) {
         output,
         status: after,
       }
+    }
+    // A version below the loaded plugin is not a usable install. Saying
+    // "success" here would make the next tool call fail against an old engine.
+    if (after.cli.version && compareVersions(after.cli.version, PLUGIN_VERSION) < 0) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_CLI_VERSION',
+          message: '安装的视频引擎版本低于插件要求',
+          remedy: '确认 PyPI 上已有 video2agent ' + PLUGIN_VERSION + ' 后重试，或稍后再更新。',
+        },
+        output,
+        status: after,
+      }
+    }
+    // The install path succeeded and the version is not older than this plugin:
+    // now the managed record may authorize future automatic updates.
+    if (managedEngineTarget) {
+      await saveInstalledEngine(managedEngineTarget, after.cli.version || probedVersion, installedDist, { authorize: true })
     }
     // A warm worker keeps the environment it started with; restart it so the new
     // CLI/env is what the next tool call uses.
@@ -1934,7 +2749,17 @@ export function apply(ctx, config) {
       path: '/api/video2agent/setup',
       handler: async (req, res) => {
         try {
-          if (req.method === 'GET') return sendJson(res, 200, await setupStatus())
+          if (req.method === 'GET') {
+            // The page's own polling uses the short cache. A manual "重新检测"
+            // appends refresh=1 (or uses POST {action:'refresh'}) to force a
+            // real probe even inside the cache window.
+            let forceFresh = false
+            try {
+              const query = new URL(req.url || '', 'http://localhost').searchParams
+              forceFresh = query.get('refresh') === '1' || query.get('fresh') === '1' || query.get('cache') === '0'
+            } catch {}
+            return sendJson(res, 200, await setupStatus({ cache: !forceFresh }))
+          }
           if (!guardWrite(req, res)) return
           const body = await readBody(req, 8 * 1024)
           let incoming = null
@@ -2306,11 +3131,21 @@ export function apply(ctx, config) {
           try { parsed = JSON.parse(raw || '{}') } catch {}
           const sid = String(parsed && parsed.session || '').slice(0, 128)
           if (!sid) return sendJson(res, 400, { error: 'missing session' })
+          // The client sends the exact `at` (and `phase`) of the line it is
+          // hiding. A delayed clear that arrives after a newer search was
+          // written must not delete that newer line, so only an exact match may
+          // clear. A request without a selector is a no-op: it must not become
+          // another unconditional clear path.
+          const at = Number(parsed && parsed.at)
+          const phase = String(parsed && parsed.phase || '')
+          if (!Number.isFinite(at) || at <= 0) return sendJson(res, 200, { ok: true, cleared: false })
           const status = readDiscoveryStatus()
           if (!status) return sendJson(res, 200, { ok: true, cleared: false })
           if (status.session_id && status.session_id !== sid) {
             return sendJson(res, 200, { ok: true, cleared: false })
           }
+          if (Number(status.at || 0) !== at) return sendJson(res, 200, { ok: true, cleared: false })
+          if (phase && String(status.phase || '') !== phase) return sendJson(res, 200, { ok: true, cleared: false })
           clearDiscoveryStatus()
           return sendJson(res, 200, { ok: true, cleared: true })
         } catch (e) {
@@ -2813,7 +3648,10 @@ export function apply(ctx, config) {
   }
 
   function writeDiscoveryStatus(payload, sessionId = '') {
-    const record = { ...payload, at: Date.now() }
+    // `at` is the moment the search reached this phase, not the moment the line
+    // was last persisted. Polling a status claims the line and used to re-stamp
+    // `at`, which silently restarted the client's age budget for that line.
+    const record = { ...payload, at: Number(payload && payload.at) || Date.now() }
     if (sessionId) record.session_id = sessionId
     atomicJson(discoveryPaths().status, record)
   }
@@ -3431,6 +4269,8 @@ function guardWrite(req, res) {
   __test.timeoutPayload = timeoutPayload
   __test.setupStatus = setupStatus
   __test.installCli = installCli
+  __test.withInstallLock = withInstallLock
+  __test.setupBusy = setupBusy
   __test.installBrowser = installBrowser
   __test.installAll = installAll
   __test.detectBrowser = detectBrowser
@@ -3443,6 +4283,30 @@ function guardWrite(req, res) {
   __test.saveManagedCli = saveManagedCli
   __test.cliCommand = cliCommand
   __test.managedToolsPath = managedToolsPath
+  __test.cacheCleanupArgs = cacheCleanupArgs
+  __test.engineUpdatePublic = engineUpdatePublic
+  __test.setEngineUpdate = setEngineUpdate
+  __test.clearSetupStatusCache = () => { SETUP_STATUS_CACHE = null }
+  __test.onDiskPluginVersion = onDiskPluginVersion
+  __test.pluginRestartRequired = pluginRestartRequired
+  __test.managedCliTarget = managedCliTarget
+  __test.engineAutoTarget = engineAutoTarget
+  __test.engineManualTarget = engineManualTarget
+  __test.probeEngineVersion = probeEngineVersion
+  __test.probeEngineDistribution = probeEngineDistribution
+  __test.probeEngineEnvironment = probeEngineEnvironment
+  __test.probeEngineInterpreter = probeEngineInterpreter
+  __test.recordVerifiedCli = recordVerifiedCli
+  __test.pipInstallEngine = pipInstallEngine
+  __test.performEngineUpdate = performEngineUpdate
+  __test.runEngineAutoUpdate = runEngineAutoUpdate
+  __test.scheduleEngineAutoUpdate = scheduleEngineAutoUpdate
+  __test.waitForEngineReady = waitForEngineReady
+  __test.workerBusy = workerBusy
+  __test.markWorkerStale = markWorkerStale
+  __test.engineUpdateMarkerPath = engineUpdateMarkerPath
+  __test.resetEngineUpdate = resetEngineUpdateForTest
+  __test.setEngineTestHooks = (hooks) => { Object.assign(ENGINE_TEST_HOOKS, hooks || {}) }
 
 
   // Register a plain registry-ready definition instead of importing
@@ -3922,6 +4786,9 @@ function guardWrite(req, res) {
     },
     execute: async (args, exec) => {
       const sessionId = String(exec?.agent?.session?.id || '')
+      // Every tool path (including shortlist/campaign starts) waits for the one
+      // startup engine probe/update. While it runs, no old CLI is spawned.
+      await waitForEngineReady()
       if (String(args.command || '') === 'campaign') return executeCampaign(args, sessionId)
       if (String(args.command || '') === 'shortlist') return executeShortlist(args, sessionId)
       if (String(args.command || '') === 'ingest' && args.campaign_id) return executeCampaign(args, sessionId)
@@ -4262,6 +5129,13 @@ function guardWrite(req, res) {
     } catch (e) {
       ctx.logger?.info?.('[dsh-video2agent] routing prompt skipped: ' + (e?.message || e))
     }
+  }
+
+  // Probe once per Host load, in the background. It never runs from GET and
+  // never repeats on refresh; a failed attempt needs an explicit manual retry.
+  try { scheduleEngineAutoUpdate() } catch (e) {
+    ctx.logger?.info?.('[dsh-video2agent] engine auto-update skipped: ' + (e?.message || e))
+    resolveEngineReadyGate()
   }
 }
 // Test-only surface: the Node harness asserts the argv the tool would run and the

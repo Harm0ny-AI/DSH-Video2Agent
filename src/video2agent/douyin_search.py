@@ -15,6 +15,7 @@ import requests
 from ._abogus import ABogus
 from .config import Config
 from .discover import apply_filters
+from .douyin import is_image_post
 from .text import normalize_text
 from .util import Video2AgentError
 
@@ -173,6 +174,10 @@ def _published(ts: Any) -> tuple[str | None, int | None]:
 def _candidate(item: dict[str, Any]) -> dict[str, Any] | None:
     info = item.get("aweme_info") if isinstance(item.get("aweme_info"), dict) else item
     if not isinstance(info, dict):
+        return None
+    # 图文 posts carry images instead of a playable mp4; presenting them as video
+    # candidates led to an opaque download failure (their play_addr is the music).
+    if is_image_post(info):
         return None
     aweme_id = str(info.get("aweme_id") or "").strip()
     if not aweme_id.isdigit():
@@ -411,6 +416,7 @@ def discover_douyin(
     pages = 0
     has_more = False
     interrupted = False
+    image_posts_skipped = 0
     for page in range(_MAX_PAGES):
         try:
             data = _fetch_page(query, cookie_header, cookies, offset=offset, search_id=search_id)
@@ -460,6 +466,10 @@ def discover_douyin(
         for item in items:
             if not isinstance(item, dict):
                 continue
+            info = item.get("aweme_info") if isinstance(item.get("aweme_info"), dict) else item
+            if is_image_post(info):
+                image_posts_skipped += 1
+                continue
             candidate = _candidate(item)
             if candidate and candidate["video_id"] not in seen:
                 seen.add(candidate["video_id"])
@@ -489,6 +499,12 @@ def discover_douyin(
         "pages": pages,
         "has_more": has_more,
     }
+    if image_posts_skipped:
+        result["warnings"].append({
+            "code": "IMAGE_POSTS_SKIPPED",
+            "message": f"已跳过 {image_posts_skipped} 条图文作品（抖音图文没有可分析的视频）",
+            "remedy": "换一个关键词，或在抖音里直接看图文。",
+        })
     if requested > _MAX_RESULTS:
         result["warnings"].append({
             "code": "LIMIT_CAPPED",

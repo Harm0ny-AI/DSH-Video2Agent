@@ -110,6 +110,54 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-dangerous-ps.ps1
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-live-home.ps1
 
+  # The upgrade gate: a real public 0.3.3 wheel -> this commit's candidate wheel,
+  # through the plugin's own startup path, in an isolated venv + isolated home.
+  # macOS is the leg the other jobs do not cover (Linux/Windows mock the upgrade).
+  # No real pip runs on a developer machine; this job is the isolated environment.
+  # The harness needs Python + Node + PyPI egress only (no npm/ffmpeg/Playwright/
+  # schemastery); it pins the public 0.3.3 wheel by sha256 and keeps every artifact
+  # under .promo/upgrade-smoke-*.
+  macos-upgrade:
+    name: macOS upgrade smoke (real 0.3.3 -> candidate)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build the candidate wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Real managed upgrade (public 0.3.3 -> candidate)
+        env:
+          # The harness auto-detects python3.11/3.12/3.13; pin the setup-python
+          # interpreter so the venv is built by the same Python the job installed.
+          VIDEO2AGENT_TEST_PYTHON: python
+        run: |
+          version=$(node -p "require('./packages/dsh-video2agent/package.json').version")
+          wheel=$(ls "dist/video2agent-${version}-"*.whl | head -n 1)
+          VIDEO2AGENT_UPGRADE_WHEEL="$wheel" node tests/test_plugin_upgrade_smoke.mjs
+
+      - name: Legacy record needs one explicit update
+        env:
+          VIDEO2AGENT_TEST_PYTHON: python
+          VIDEO2AGENT_SMOKE_LEGACY: "1"
+        run: |
+          version=$(node -p "require('./packages/dsh-video2agent/package.json').version")
+          wheel=$(ls "dist/video2agent-${version}-"*.whl | head -n 1)
+          VIDEO2AGENT_UPGRADE_WHEEL="$wheel" node tests/test_plugin_upgrade_smoke.mjs
+
   package:
     name: package (wheel + plugin tarball)
     runs-on: ubuntu-latest

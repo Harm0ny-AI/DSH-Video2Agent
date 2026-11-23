@@ -202,13 +202,19 @@ def find_downloaded_subtitles(directory: str | Path) -> list[Path]:
 
 def _douyin_source(ref: dict[str, Any], cfg: Config) -> dict[str, Any]:
     """Build an ingest source from one Douyin video (SSR metadata + direct mp4)."""
-    from .douyin import download, get_item
+    from .douyin import download, get_item, is_image_post
 
     item = get_item(
         str(ref["aweme_id"]),
         attempts=6,
         cache_dir=cfg.home / "cache" / "douyin",
     )
+    if is_image_post(item):
+        raise Video2AgentError(
+            "E_DOUYIN_IMAGE",
+            "这是抖音图文作品（图片合集），没有可分析的视频",
+            "贴视频作品的链接（douyin.com/video/<数字id> 或 v.douyin.com 短链）。",
+        )
     canonical = str(ref["url"])
     vid = stable_id("vid", canonical)
     out_dir = ensure_dir(cfg.media_dir / vid)

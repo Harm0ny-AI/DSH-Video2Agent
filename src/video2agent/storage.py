@@ -33,8 +33,15 @@ CACHE_DEFAULTS = {
 }
 
 
-def cache_policy(cfg: Config) -> dict[str, Any]:
-    """Read the settings-page cache policy; defaults are safe for a fresh home."""
+def cache_policy(cfg: Config, row_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read the settings-page cache policy; defaults are safe for a fresh home.
+
+    `row_config` is the DSH plugin-row Config layer. The Host passes it to the
+    background `gc --auto` so the effective policy is the one the settings page
+    shows: ui-settings.json > row Config > built-in defaults. The file is still
+    read here in one open; an unreadable or torn/corrupt file fails closed
+    instead of applying a default that could free a cache the user kept.
+    """
     raw: dict[str, Any] = {}
     corrupt = False
     path = cfg.home / "ui-settings.json"
@@ -64,18 +71,30 @@ def cache_policy(cfg: Config) -> dict[str, Any]:
             return fallback
 
     # A corrupt settings file must not silently apply the 7-day default: that
-    # deletes a cache the user explicitly kept (the file said 关闭).
+    # deletes a cache the user explicitly kept (the file said 关闭). The row
+    # Config is ignored too: it is the layer below a working file, and a partial
+    # write must never expire on a stale/unknown value.
     if corrupt:
         return {
             "expire": False, "days": CACHE_DEFAULTS["days"],
             "limit_enabled": False, "limit_gb": CACHE_DEFAULTS["limit_gb"],
             "corrupt": True,
         }
+    # Whitelist the four UI keys: a malformed/hostile extra key in the argv
+    # JSON must not become a policy field. File keys win, including an explicit
+    # null (the existing clamp then falls back to the built-in value); missing
+    # keys fall through to the row Config.
+    defaults: dict[str, Any] = {}
+    if isinstance(row_config, dict):
+        for key in ("cacheExpire", "cacheDays", "cacheLimitEnabled", "cacheLimitGb"):
+            if key in row_config:
+                defaults[key] = row_config[key]
+    policy = {**defaults, **raw}
     return {
-        "expire": raw.get("cacheExpire", CACHE_DEFAULTS["expire"]) is not False,
-        "days": clamp(raw.get("cacheDays"), CACHE_DEFAULTS["days"], 1, 365),
-        "limit_enabled": raw.get("cacheLimitEnabled", CACHE_DEFAULTS["limit_enabled"]) is True,
-        "limit_gb": clamp(raw.get("cacheLimitGb"), int(CACHE_DEFAULTS["limit_gb"]), 1, 20),
+        "expire": policy.get("cacheExpire", CACHE_DEFAULTS["expire"]) is not False,
+        "days": clamp(policy.get("cacheDays"), CACHE_DEFAULTS["days"], 1, 365),
+        "limit_enabled": policy.get("cacheLimitEnabled", CACHE_DEFAULTS["limit_enabled"]) is True,
+        "limit_gb": clamp(policy.get("cacheLimitGb"), int(CACHE_DEFAULTS["limit_gb"]), 1, 20),
     }
 
 

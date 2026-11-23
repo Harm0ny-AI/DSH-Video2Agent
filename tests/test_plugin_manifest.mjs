@@ -4,6 +4,14 @@ import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+// Keep any state this harness can create inside the repo's .promo subtree.
+const manifestTemp = path.join(root, '.promo', 'tmp', 'vp-manifest-' + process.pid)
+fs.mkdirSync(manifestTemp, { recursive: true })
+process.env.TEMP = manifestTemp
+process.env.TMP = manifestTemp
+process.env.TMPDIR = manifestTemp
+process.env.HF_HOME = path.join(manifestTemp, 'hf')
+process.env.VIDEO2AGENT_HOME = path.join(manifestTemp, 'home')
 const pkgPath = path.join(root, 'packages/dsh-video2agent/package.json')
 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
 
@@ -142,4 +150,85 @@ function fakeCtx({ withWebServer = false, provideWebServer = null } = {}) {
   ])
 }
 
-console.log('plugin manifest ok: bundle, client, peers, files, slots, headless activation')
+// --- Background cache sweep gets the row Config layer -----------------------
+// The settings page shows settings file > plugin-row Config > defaults. The
+// Host must pass the row Config to gc --auto so an unset file key does not fall
+// back to the built-in 7-day policy; the CLI reads the file itself, keeps it on
+// top, and fails closed on a corrupt file.
+{
+  const { ctx } = fakeCtx()
+  mod.apply(ctx, { cacheExpire: false, cacheDays: 30, cacheLimitEnabled: true, cacheLimitGb: 5 })
+  assert.ok(index.includes('runCli(cacheCleanupArgs(), 120000)'),
+    'the background timer must use the row-Config argv')
+  const args = mod.__test.cacheCleanupArgs()
+  assert.deepEqual(args.slice(0, 3), ['gc', '--auto', '--json'])
+  assert.equal(args[3], '--cache-defaults')
+  assert.deepEqual(JSON.parse(args[4]), {
+    cacheExpire: false, cacheDays: 30, cacheLimitEnabled: true, cacheLimitGb: 5,
+  }, 'only the four cache keys are handed to the CLI')
+  assert.deepEqual(Object.keys(JSON.parse(args[4])).sort(),
+    ['cacheDays', 'cacheExpire', 'cacheLimitEnabled', 'cacheLimitGb'])
+  assert.ok(!args.includes('--purge'), 'the background sweep must not delete knowledge')
+  assert.ok(!args.includes('--sources') && !args.includes('--max-gb'), 'the saved policy is the only selector')
+  // The settings file is the CLI's top layer; the Host must not merge it into
+  // argv (that read could race a save). A file value must not change argv.
+  fs.mkdirSync(process.env.VIDEO2AGENT_HOME, { recursive: true })
+  fs.writeFileSync(path.join(process.env.VIDEO2AGENT_HOME, 'ui-settings.json'), JSON.stringify({ cacheExpire: true }))
+  assert.equal(JSON.parse(mod.__test.cacheCleanupArgs()[4]).cacheExpire, false,
+    'the CLI, not the Host, reads ui-settings.json')
+
+  const { ctx: defaultCtx } = fakeCtx()
+  mod.apply(defaultCtx, {})
+  assert.deepEqual(JSON.parse(mod.__test.cacheCleanupArgs()[4]), {
+    cacheExpire: true, cacheDays: 7, cacheLimitEnabled: false, cacheLimitGb: 20,
+  }, 'a fresh row keeps the existing 7-day default behaviour')
+}
+
+// --- Managed engine auto-update contract -------------------------------------
+{
+  // The startup path must use one readiness gate, one global install lock, and
+  // the exact loaded version for an automatic pip. A long manual budget or a
+  // "latest" auto install would violate the compatibility contract.
+  assert.ok(index.includes('await waitForEngineReady()'), 'tool/cache paths must gate on engine readiness')
+  assert.ok(index.includes('SETUP_INFLIGHT = { action, task }'), 'one global install lock must cover auto and manual')
+  assert.ok(index.includes("CLI_PACKAGE + '==' + PLUGIN_VERSION"), 'automatic update must pin the loaded version')
+  assert.ok(index.includes("CLI_PACKAGE + '>=' + PLUGIN_VERSION"), 'manual update may require at least the loaded version')
+  assert.ok(index.includes('ENGINE_AUTO_PIP_TIMEOUT_MS = 90000'), 'automatic pip must have a short bound')
+  assert.ok(index.includes("source: 'plugin-install'"), 'provenance must be recorded on install')
+  assert.ok(index.includes('auto_update: authorize && clean &&'), 'authorization depends on the full install path and clean metadata')
+  assert.ok(index.includes('engine_update: engineUpdatePublic()'), 'setupStatus must report engine auto state')
+  assert.ok(index.includes('plugin: pluginStatus'), 'setupStatus must report loaded/on-disk plugin versions')
+  assert.ok(index.includes("query.get('refresh') === '1'"), 'manual refresh must bypass the setup probe cache')
+  assert.ok(index.includes('VIDEO2AGENT_PLUGIN_MANIFEST'), 'a launch context can supply the active profile manifest')
+
+  // A legacy record is a path, not an authorization. Applying the plugin with
+  // such a record must resolve the startup gate without probing or pip.
+  const oldBin = process.env.VIDEO2AGENT_BIN
+  const oldPython = process.env.VIDEO2AGENT_PYTHON
+  delete process.env.VIDEO2AGENT_BIN
+  delete process.env.VIDEO2AGENT_PYTHON
+  mod.__test.resetEngineUpdate()
+  let probes = 0
+  mod.__test.setEngineTestHooks({
+    probeVersion: async () => { probes += 1; return { ok: true, version: '0.0.1' } },
+    pipInstall: async () => { throw new Error('auto pip must not run for an ambiguous record') },
+  })
+  const managedPath = mod.__test.managedToolsPath()
+  fs.mkdirSync(path.dirname(managedPath), { recursive: true })
+  fs.writeFileSync(managedPath, JSON.stringify({
+    cli: { python: process.execPath, prefix: [], at: new Date().toISOString() },
+  }), 'utf8')
+  const { ctx: autoCtx } = fakeCtx()
+  mod.apply(autoCtx)
+  await mod.__test.waitForEngineReady()
+  assert.equal(probes, 0, 'an ambiguous legacy record must not be probed for upgrade')
+  assert.equal(mod.__test.engineUpdatePublic().state, 'idle')
+  fs.rmSync(managedPath, { force: true })
+  mod.__test.resetEngineUpdate()
+  if (oldBin === undefined) delete process.env.VIDEO2AGENT_BIN
+  else process.env.VIDEO2AGENT_BIN = oldBin
+  if (oldPython === undefined) delete process.env.VIDEO2AGENT_PYTHON
+  else process.env.VIDEO2AGENT_PYTHON = oldPython
+}
+
+console.log('plugin manifest ok: bundle, client, peers, files, slots, headless activation, gc policy defaults, engine safety')

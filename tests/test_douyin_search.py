@@ -90,6 +90,30 @@ class DouyinSearchTest(unittest.TestCase):
         })
         self.assertEqual(len(result["candidates"]), 1)
 
+    def test_image_post_candidate_is_skipped(self):
+        # Live 2026-11-23: a 图文 post (images, aweme_type 68, no duration) came back
+        # first for "蓝莓" and ingesting it failed with a 404 on its music mp3.
+        candidate = _candidate({"aweme_info": {
+            "aweme_id": "7628547330606783739",
+            "desc": "蓝莓发霉",
+            "aweme_type": 68,
+            "images": [{"url_list": ["https://example.invalid/a.jpg"]}],
+        }})
+        self.assertIsNone(candidate)
+
+    def test_image_posts_are_skipped_with_a_warning(self):
+        result = self._search_with_body({
+            "status_code": 0,
+            "has_more": 0,
+            "data": [
+                {"aweme_info": {"aweme_id": "7628547330606783739", "desc": "蓝莓发霉",
+                                "images": [{"url_list": ["https://example.invalid/a.jpg"]}]}},
+                {"aweme_info": {"aweme_id": "7619596768929484075", "desc": "蓝莓视频"}},
+            ],
+        })
+        self.assertEqual([c["video_id"] for c in result["candidates"]], ["7619596768929484075"])
+        self.assertIn("IMAGE_POSTS_SKIPPED", [w["code"] for w in result["warnings"]])
+
     def test_pagination_uses_cursor_and_search_id(self):
         first = MagicMock(status_code=200)
         first.json.return_value = {

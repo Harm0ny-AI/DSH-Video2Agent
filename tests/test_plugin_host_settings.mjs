@@ -9,14 +9,25 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const oldHome = process.env.VIDEO2AGENT_HOME
 const oldBin = process.env.VIDEO2AGENT_BIN
 const oldPython = process.env.VIDEO2AGENT_PYTHON
-const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-host-settings-'))
+const here = path.dirname(fileURLToPath(import.meta.url))
+const root = path.resolve(here, '..')
+// Keep every artifact this harness can create inside the repo's .promo subtree.
+// Tests must never touch the live Video2Agent home, a real pip environment, or
+// the host's default temp directory.
+const tempRoot = path.join(root, '.promo', 'tmp', 'vp-host-settings-' + process.pid + '-' + Date.now())
+fs.mkdirSync(tempRoot, { recursive: true })
+const home = path.join(tempRoot, 'home')
+fs.mkdirSync(home, { recursive: true })
+process.env.TEMP = tempRoot
+process.env.TMP = tempRoot
+process.env.TMPDIR = tempRoot
+process.env.HF_HOME = path.join(tempRoot, 'hf')
 process.env.VIDEO2AGENT_HOME = home
 process.env.VIDEO2AGENT_SHORTLIST_WAIT_MS = '50'
 process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
 // The setup card falls back to `python -m video2agent`; point that at a missing
 // interpreter too so the missing-CLI assertions still test the failure path.
 process.env.VIDEO2AGENT_PYTHON = path.join(home, 'missing-python')
-const here = path.dirname(fileURLToPath(import.meta.url))
 const pluginUrl = pathToFileURL(path.join(here, '..', 'packages', 'dsh-video2agent', 'index.js')).href
 const { apply, __test } = await import(pluginUrl)
 const routes = new Map()
@@ -162,6 +173,21 @@ for (const key of ['python', 'cli', 'ffmpeg']) {
 assert.equal(typeof setupData.cli.version, 'string', 'the installed CLI version must be reported')
 assert.equal(typeof setupData.cli.update_available, 'boolean', 'an outdated CLI must be detectable from the card')
 assert.equal(typeof setupData.canInstall.updateCli, 'boolean', 'the card needs to know whether an update is offered')
+// UI contract: loaded/on-disk plugin versions and the auto-update state are
+// top-level fields. GET only reports; it never starts the update.
+assert.equal(typeof setupData.plugin, 'object', 'plugin version state must be reported')
+assert.equal(setupData.plugin.loaded, setupData.cli.latest, 'loaded must be the running PLUGIN_VERSION')
+assert.equal(typeof setupData.plugin.installed, 'string', 'on-disk version must be reported as a string')
+assert.equal(typeof setupData.plugin.restart_required, 'boolean', 'restart_required must be a boolean')
+assert.equal(typeof setupData.engine_update, 'object', 'engine update state must be reported')
+assert.ok(['idle', 'updating', 'ready', 'failed'].includes(setupData.engine_update.state),
+  'engine_update.state must use the agreed enum')
+if (setupData.engine_update.target !== undefined) {
+  assert.equal(typeof setupData.engine_update.target, 'string')
+}
+if (setupData.engine_update.message !== undefined) {
+  assert.equal(typeof setupData.engine_update.message, 'string')
+}
 assert.equal(typeof setupData.ocr, 'object', 'the optional local-OCR status must be reported')
 assert.equal(typeof setupData.ocr.supported, 'boolean', 'OCR support depends on the Python version')
 assert.equal(typeof setupData.canInstall.ocr, 'boolean', 'the card needs to know whether an OCR install makes sense')
@@ -550,6 +576,443 @@ assert.equal(managedInvocation.command, process.execPath)
 assert.deepEqual(managedInvocation.prefix, ['-m', 'video2agent'])
 process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
 fs.rmSync(managedTools, { force: true })
+
+// --- Managed engine auto-update ---------------------------------------------
+// These tests never run pip. Every side effect is injected, and every path is
+// under the isolated .promo home created above. They cover the safety boundary:
+// unknown/legacy records and pins never auto-upgrade; a successful managed
+// update is the only thing that grants authorization for the next release.
+await __test.waitForEngineReady()
+{
+  const targetVersion = setupData.cli.latest
+  const writeEngineRecord = (extra = {}) => {
+    fs.mkdirSync(path.dirname(managedTools), { recursive: true })
+    fs.writeFileSync(managedTools, JSON.stringify({
+      cli: { python: process.execPath, prefix: [], at: new Date().toISOString(), ...extra },
+    }), 'utf8')
+  }
+  const readEngineRecord = () => JSON.parse(fs.readFileSync(managedTools, 'utf8')).cli
+  const cleanDist = (version) => ({ ok: true, version, direct_url: '', editable: false, detail: '' })
+  let pipCalls = []
+  let probeCalls = 0
+  let engineVersion = '0.3.4'
+  const installCleanly = (nextVersion = targetVersion) => {
+    engineVersion = nextVersion
+    return { code: 0, output: 'installed cleanly' }
+  }
+  const installHooks = (overrides = {}) => __test.setEngineTestHooks({
+    probeVersion: async () => { probeCalls += 1; return { ok: true, version: engineVersion, detail: 'video2agent ' + engineVersion } },
+    probeDistribution: async () => cleanDist(engineVersion),
+    probeInterpreter: async () => process.execPath,
+    // Ordinary managed installs are treated as venv updates; the guard tests
+    // override this to simulate a system Python or a venv inheriting its marker.
+    probeEnvironment: async () => ({ ok: true, venv: true, externally_managed: false, marker: '', detail: '' }),
+    pipInstall: async (target, options) => { pipCalls.push({ target, ...options }); return installCleanly() },
+    ...overrides,
+  })
+  const reset = () => {
+    __test.resetEngineUpdate()
+    pipCalls = []
+    probeCalls = 0
+    engineVersion = '0.3.4'
+    installHooks()
+  }
+
+  delete process.env.VIDEO2AGENT_BIN
+  delete process.env.VIDEO2AGENT_PYTHON
+
+  // 1. A legacy record (detection or an old install) is ambiguous. It must not
+  // be probed for upgrade eligibility, let alone updated.
+  reset()
+  writeEngineRecord()
+  await __test.runEngineAutoUpdate()
+  assert.equal(probeCalls, 0, 'an unverified record must not even be probed for an upgrade')
+  assert.equal(pipCalls.length, 0, 'an unverified record must never trigger pip')
+  assert.equal(__test.engineUpdatePublic().state, 'idle')
+  assert.equal(readEngineRecord().source, undefined, 'a bare legacy record must stay bare')
+
+  // 2. The exact managed update: version is older, the record is authorized,
+  // the pip spec is the loaded plugin version (not latest), and success records
+  // the new provenance only after a re-probe.
+  reset()
+  writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+  await __test.runEngineAutoUpdate()
+  const updated = __test.engineUpdatePublic()
+  assert.equal(updated.state, 'ready')
+  assert.equal(updated.target, targetVersion)
+  assert.equal(pipCalls.length, 1, 'one managed attempt, not a loop')
+  assert.equal(pipCalls[0].spec, 'video2agent==' + targetVersion, 'automatic update must pin the loaded version exactly')
+  assert.equal(pipCalls[0].mirror, false, 'automatic pip must not take a second mirror path')
+  assert.ok(pipCalls[0].timeoutMs <= 120000, 'automatic pip must stay inside the short budget')
+  const recorded = readEngineRecord()
+  assert.equal(recorded.source, 'plugin-install')
+  assert.equal(recorded.auto_update, true)
+  assert.equal(recorded.version, targetVersion, 'the record carries the actually probed version')
+  assert.equal(recorded.python, process.execPath, 'the record points at the interpreter that was updated')
+  assert.equal(fs.existsSync(__test.engineUpdateMarkerPath()), false)
+
+  // 2b. The explicit manual action uses the same validator but may ask for at
+  // least the loaded version and keeps the mirror fallback for a slow network.
+  reset()
+  writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+  installHooks({
+    pipInstall: async (target, options) => {
+      pipCalls.push({ target, ...options })
+      engineVersion = targetVersion
+      return { code: 0, output: 'manual install' }
+    },
+  })
+  const manualResult = await __test.performEngineUpdate({ command: process.execPath, prefix: [] }, { manual: true, currentVersion: '0.3.4' })
+  assert.equal(manualResult.ok, true, 'a manual update to a valid version must succeed')
+  assert.equal(pipCalls.length, 1)
+  assert.equal(pipCalls[0].spec, 'video2agent>=' + targetVersion, 'manual update may accept at least the loaded version')
+  assert.equal(pipCalls[0].mirror, true, 'manual update keeps the mirror fallback')
+  assert.ok(pipCalls[0].timeoutMs > 120000, 'manual update keeps the longer setup budget')
+  assert.equal(__test.engineUpdatePublic().state, 'ready')
+
+  // 3. A successful pip exit with an older version is not success. The failure
+  // is persisted, and a second pass (a refresh or another load) must not pip.
+  reset()
+  writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+  installHooks({
+    pipInstall: async (target, options) => { pipCalls.push({ target, ...options }); return { code: 0, output: 'nothing changed' } },
+  })
+  await __test.runEngineAutoUpdate()
+  const stuck = __test.engineUpdatePublic()
+  assert.equal(stuck.state, 'failed', 'an old version must never be reported ready')
+  assert.equal(stuck.target, targetVersion)
+  assert.match(String(stuck.message), /版本/)
+  assert.equal(pipCalls.length, 1)
+  assert.equal(fs.existsSync(__test.engineUpdateMarkerPath()), true, 'the failed attempt is persisted')
+  await __test.runEngineAutoUpdate()
+  assert.equal(pipCalls.length, 1, 'refresh/reload must not retry a failed managed update')
+  const manualRetry = await __test.performEngineUpdate({ command: process.execPath, prefix: [] }, { manual: true, currentVersion: '0.3.4' })
+  assert.equal(manualRetry.ok, false, 'manual retry still refuses an old installed version')
+  assert.match(String(manualRetry.error.message), /版本/)
+
+  // 4. Editable and direct-URL installs are never auto-upgraded, even when the
+  // record looks authorized (the environment can change after the install).
+  for (const dist of [
+    { ok: true, version: '0.3.4', editable: true, direct_url: '{"dir_info":{"editable":true}}' },
+    { ok: true, version: '0.3.4', editable: false, direct_url: '{"url":"file:///tmp/video2agent.whl"}' },
+  ]) {
+    __test.resetEngineUpdate()
+    pipCalls = []
+    probeCalls = 0
+    engineVersion = '0.3.4'
+    writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+    installHooks({ probeDistribution: async () => dist })
+    await __test.runEngineAutoUpdate()
+    assert.equal(pipCalls.length, 0, 'editable/direct installs must not be auto-updated')
+    assert.equal(__test.engineUpdatePublic().state, 'idle')
+  }
+
+  // 5. An explicit path/Python pin disables automatic updates entirely.
+  for (const [key, value] of [['VIDEO2AGENT_BIN', 'pinned-video2agent'], ['VIDEO2AGENT_PYTHON', 'pinned-python']]) {
+    __test.resetEngineUpdate()
+    pipCalls = []
+    probeCalls = 0
+    writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+    process.env[key] = value
+    installHooks()
+    await __test.runEngineAutoUpdate()
+    assert.equal(probeCalls, 0, key + ' must stop the probe before any child process')
+    assert.equal(pipCalls.length, 0)
+    assert.equal(__test.engineUpdatePublic().state, 'idle')
+    delete process.env[key]
+  }
+
+  // 6. Auto and manual installs share one global lock. An automatic attempt that
+  // arrives while a manual install holds it must not start a second pip.
+  __test.resetEngineUpdate()
+  pipCalls = []
+  probeCalls = 0
+  engineVersion = '0.3.4'
+  writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+  installHooks()
+  let release = null
+  const hold = __test.withInstallLock('qa-hold', () => new Promise((resolve) => { release = resolve }))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(__test.setupBusy(), true, 'the test hold owns the global install lock')
+  await __test.runEngineAutoUpdate()
+  assert.equal(pipCalls.length, 0, 'automatic update must not run while the lock is held')
+  assert.notEqual(__test.engineUpdatePublic().state, 'updating')
+  release()
+  await hold
+  assert.equal(__test.setupBusy(), false)
+
+  // 7. Restart detection has evidence only when the on-disk version differs;
+  // the same version is not claimed as a replacement, and GET remains a probe.
+  __test.resetEngineUpdate()
+  __test.setEngineTestHooks({ onDiskVersion: '9.9.9' })
+  assert.equal(__test.pluginRestartRequired(), true)
+  const restartSetup = JSON.parse((await call('GET', undefined, { path: '/api/video2agent/setup' })).body)
+  assert.equal(restartSetup.plugin.loaded, targetVersion)
+  assert.equal(restartSetup.plugin.installed, '9.9.9')
+  assert.equal(restartSetup.plugin.restart_required, true)
+  assert.equal(restartSetup.engine_update.state, 'idle', 'a restart requirement pauses automatic updates')
+  __test.setEngineTestHooks({ onDiskVersion: targetVersion })
+  assert.equal(__test.pluginRestartRequired(), false, 'the same version is not a detectable replacement')
+  __test.setEngineTestHooks({ onDiskVersion: null })
+
+  // 8. A manual update must use the interpreter setup/doctor actually found
+  // (pipx included), never an unrelated Python on PATH just because it exists.
+  __test.resetEngineUpdate()
+  fs.rmSync(managedTools, { force: true })
+  const preferredInterpreter = path.join(home, 'preferred-python')
+  fs.writeFileSync(preferredInterpreter, '')
+  process.env.VIDEO2AGENT_PYTHON = process.execPath
+  const preferredTarget = await __test.engineManualTarget({ preferred: preferredInterpreter, allowDetect: false })
+  assert.equal(preferredTarget.ok, true)
+  assert.equal(preferredTarget.command, preferredInterpreter, 'the doctor/setup interpreter wins')
+  delete process.env.VIDEO2AGENT_PYTHON
+  const unknownTarget = await __test.engineManualTarget({ allowDetect: false })
+  assert.equal(unknownTarget.ok, false, 'no known actual interpreter must not fall through to detectPython')
+  assert.equal(unknownTarget.reason, 'interpreter-unknown')
+
+  // 9. A launch context that knows the active profile can supply an authoritative
+  // manifest; without it the sibling package.json is the only observed evidence.
+  const activeManifest = path.join(home, 'active-package.json')
+  fs.writeFileSync(activeManifest, JSON.stringify({ version: '8.8.8' }))
+  process.env.VIDEO2AGENT_PLUGIN_MANIFEST = activeManifest
+  assert.equal(__test.onDiskPluginVersion(), '8.8.8')
+  assert.equal(__test.pluginRestartRequired(), true)
+  delete process.env.VIDEO2AGENT_PLUGIN_MANIFEST
+
+  // 10. While pip replaces the package, a GET without a pre-pip snapshot must
+  // not spawn a CLI/doctor probe. The transient shape is read-only and cleared
+  // by the next ready/failed state.
+  __test.resetEngineUpdate()
+  __test.clearSetupStatusCache()
+  __test.setEngineUpdate('updating', targetVersion)
+  const transient = await __test.setupStatus({ cache: true })
+  assert.equal(transient.engine_update.state, 'updating')
+  assert.equal(transient.cli.detail, '更新中…', 'polling during pip must not probe the CLI')
+  assert.equal(transient.canInstall.updateCli, false)
+  __test.setEngineUpdate('idle')
+
+  // 11. A duplicate apply()/schedule while the first automatic update is still
+  // running must not settle the startup gate early. Tool/command/cache paths
+  // would otherwise run the CLI that pip is still replacing. Only the run that
+  // armed the gate may settle it, in its own finally.
+  __test.resetEngineUpdate()
+  writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+  let releaseStartupPip = null
+  let markStartupPipStarted = null
+  const startupPipStarted = new Promise((resolve) => { markStartupPipStarted = resolve })
+  installHooks({
+    pipInstall: async (target, options) => {
+      pipCalls.push({ target, ...options })
+      markStartupPipStarted()
+      await new Promise((resolve) => { releaseStartupPip = resolve })
+      return installCleanly()
+    },
+  })
+  __test.scheduleEngineAutoUpdate()
+  await startupPipStarted
+  let startupGateSettled = false
+  const startupGate = __test.waitForEngineReady().then(() => { startupGateSettled = true })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(startupGateSettled, false, 'the first automatic update must hold the startup gate')
+  __test.scheduleEngineAutoUpdate()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(startupGateSettled, false, 'a duplicate apply must not settle the gate while pip runs')
+  releaseStartupPip()
+  await startupGate
+  assert.equal(startupGateSettled, true, 'the first run settles the gate itself when it finishes')
+
+  // 12. A legacy record may store the launcher ("py", "python3") instead of an
+  // absolute interpreter. A manual update resolves exactly that recorded command
+  // with its prefix; the bare record stays ineligible for automatic updates until
+  // the clean explicit install records provenance.
+  __test.resetEngineUpdate()
+  writeEngineRecord({ python: 'py', prefix: ['-3'] })
+  const launcherProbes = []
+  installHooks({
+    probeInterpreter: async (target) => {
+      launcherProbes.push({ command: String(target.command), prefix: [...(target.prefix || [])] })
+      return process.execPath
+    },
+  })
+  const legacyManual = await __test.engineManualTarget({ allowDetect: false })
+  assert.equal(legacyManual.ok, true, 'a recorded launcher must resolve for a manual update')
+  assert.equal(legacyManual.command, process.execPath, 'the launcher resolves to the interpreter it actually runs')
+  assert.deepEqual(legacyManual.prefix, [], 'the launcher prefix is consumed while resolving')
+  assert.deepEqual(launcherProbes, [{ command: 'py', prefix: ['-3'] }],
+    'probe the recorded command with its prefix, nothing else')
+  assert.equal(readEngineRecord().source, undefined, 'resolving a launcher must not grant provenance')
+  assert.equal(readEngineRecord().auto_update, undefined, 'resolving a launcher must not grant automatic eligibility')
+  assert.equal(__test.engineAutoTarget().ok, false, 'a bare legacy record stays ineligible for automatic updates')
+
+  // Only the explicit clean install writes back the resolved interpreter and
+  // grants the next automatic update; pip must use that interpreter, not "py".
+  const legacyPipCalls = []
+  installHooks({
+    pipInstall: async (target, options) => {
+      legacyPipCalls.push({ target, ...options })
+      engineVersion = targetVersion
+      return { code: 0, output: 'clean install' }
+    },
+  })
+  const legacyUpdate = await __test.performEngineUpdate(legacyManual, { manual: true, currentVersion: '0.3.4' })
+  assert.equal(legacyUpdate.ok, true, 'the explicit manual update of a legacy launcher must succeed')
+  assert.equal(legacyPipCalls.length, 1)
+  assert.equal(legacyPipCalls[0].target.command, process.execPath, 'pip runs in the resolved interpreter')
+  assert.deepEqual(legacyPipCalls[0].target.prefix, [], 'the resolved interpreter needs no launcher prefix')
+  const legacyInstalled = readEngineRecord()
+  assert.equal(legacyInstalled.source, 'plugin-install')
+  assert.equal(legacyInstalled.auto_update, true, 'only the clean explicit install grants automatic eligibility')
+  assert.equal(legacyInstalled.python, process.execPath)
+  assert.equal(legacyInstalled.version, targetVersion)
+
+  // An explicit binary pin is preserved: no launcher probe, and the record is not
+  // turned into a manual update target.
+  __test.resetEngineUpdate()
+  writeEngineRecord({ python: 'py', prefix: ['-3'] })
+  process.env.VIDEO2AGENT_BIN = 'pinned-video2agent'
+  let pinnedProbes = 0
+  __test.setEngineTestHooks({ probeInterpreter: async () => { pinnedProbes += 1; return process.execPath } })
+  const pinnedTarget = await __test.engineManualTarget({ allowDetect: false })
+  assert.equal(pinnedTarget.ok, false)
+  assert.equal(pinnedTarget.reason, 'explicit-bin')
+  assert.equal(pinnedProbes, 0, 'a pin must not probe the legacy launcher')
+  delete process.env.VIDEO2AGENT_BIN
+
+  // An explicit Python pin is preserved too: it still disables automatic
+  // updates, and the legacy launcher must not quietly replace it for a manual
+  // action. A missing pin is reported, never guessed around.
+  __test.resetEngineUpdate()
+  writeEngineRecord({ python: 'py', prefix: ['-3'] })
+  process.env.VIDEO2AGENT_PYTHON = path.join(home, 'missing-python')
+  let pythonPinProbes = 0
+  __test.setEngineTestHooks({ probeInterpreter: async () => { pythonPinProbes += 1; return process.execPath } })
+  assert.equal(__test.engineAutoTarget().reason, 'explicit-python', 'a Python pin disables automatic updates')
+  const pinnedManual = await __test.engineManualTarget({ allowDetect: false })
+  assert.equal(pinnedManual.ok, false)
+  assert.equal(pinnedManual.reason, 'python-pin-missing', 'a Python pin is not replaced by the legacy launcher')
+  assert.equal(pythonPinProbes, 0, 'a Python pin must not probe the legacy launcher')
+  delete process.env.VIDEO2AGENT_PYTHON
+
+  // 13. A manual click never overwrites a known editable/direct-url install.
+  for (const dist of [
+    { ok: true, version: '0.3.4', editable: true, direct_url: '{"dir_info":{"editable":true}}', detail: '' },
+    { ok: true, version: '0.3.4', editable: false, direct_url: '{"url":"file:///tmp/video2agent.whl"}', detail: '' },
+  ]) {
+    __test.resetEngineUpdate()
+    writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+    pipCalls = []
+    installHooks({ probeDistribution: async () => dist })
+    const refused = await __test.performEngineUpdate({ command: process.execPath, prefix: [] }, { manual: true, currentVersion: '0.3.4' })
+    assert.equal(refused.ok, false)
+    assert.equal(refused.error.code, 'E_ENGINE_EDITABLE')
+    assert.equal(pipCalls.length, 0, 'a known editable/direct install must not be overwritten')
+    assert.match(String(refused.error.message), /可编辑|本地路径/)
+  }
+
+  // 14. PEP 668 outside a venv is refused with maintain-your-environment
+  // guidance; an ordinary venv (even inheriting the host marker) still updates.
+  __test.resetEngineUpdate()
+  writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+  pipCalls = []
+  installHooks({
+    probeEnvironment: async () => ({ ok: true, venv: false, externally_managed: true, marker: '/usr/lib/python3.11/EXTERNALLY-MANAGED', detail: '' }),
+  })
+  const managedPython = await __test.performEngineUpdate({ command: process.execPath, prefix: [] }, { manual: true, currentVersion: '0.3.4' })
+  assert.equal(managedPython.ok, false)
+  assert.equal(managedPython.error.code, 'E_ENGINE_MANAGED')
+  assert.equal(pipCalls.length, 0, 'an externally managed system Python must not be pip-installed')
+  assert.match(String(managedPython.error.message), /系统管理/)
+  assert.match(String(managedPython.error.remedy), /--user/)
+
+  __test.resetEngineUpdate()
+  writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+  pipCalls = []
+  engineVersion = '0.3.4'
+  installHooks({
+    probeEnvironment: async () => ({ ok: true, venv: true, externally_managed: true, marker: '/usr/lib/python3.11/EXTERNALLY-MANAGED', detail: '' }),
+  })
+  const venvUpdate = await __test.performEngineUpdate({ command: process.execPath, prefix: [] }, { manual: true, currentVersion: '0.3.4' })
+  assert.equal(venvUpdate.ok, true, 'an ordinary venv update must still run')
+  assert.equal(pipCalls.length, 1)
+
+  // 15. Manual pip blocks new tool/GC/command entry points; the updater's own
+  // probes still complete (no self-deadlock), and the barrier lifts when the
+  // package replacement and validation finish.
+  __test.resetEngineUpdate()
+  writeEngineRecord({ source: 'plugin-install', auto_update: true, version: '0.3.4' })
+  pipCalls = []
+  engineVersion = '0.3.4'
+  let releaseManualPip = null
+  let markManualPipStarted = null
+  const manualPipStarted = new Promise((resolve) => { markManualPipStarted = resolve })
+  installHooks({
+    pipInstall: async (target, options) => {
+      pipCalls.push({ target, ...options })
+      markManualPipStarted()
+      await new Promise((resolve) => { releaseManualPip = resolve })
+      return installCleanly()
+    },
+  })
+  const manualUpdate = __test.performEngineUpdate({ command: process.execPath, prefix: [] }, { manual: true, currentVersion: '0.3.4' })
+  await manualPipStarted
+  let entryPointResolved = false
+  const entryPoint = __test.waitForEngineReady().then(() => { entryPointResolved = true })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(entryPointResolved, false, 'tool/GC/command entry points must wait for the manual pip')
+  releaseManualPip()
+  const barrierResult = await manualUpdate
+  await entryPoint
+  assert.equal(barrierResult.ok, true, 'the update itself must finish while the barrier is held')
+  assert.equal(entryPointResolved, true, 'entry points resume after the engine install finishes')
+  assert.equal(pipCalls.length, 1)
+
+  // 16. A verified bare launcher becomes effective for tool calls: detectCli
+  // stores the absolute interpreter when available; otherwise cliCommand uses
+  // the recorded verified launcher. Detection never grants auto eligibility.
+  __test.resetEngineUpdate()
+  fs.rmSync(managedTools, { force: true })
+  const engineSource = fs.readFileSync(path.join(root, 'packages', 'dsh-video2agent', 'index.js'), 'utf8')
+  assert.ok(engineSource.includes('await recordVerifiedCli(python.command, python.prefix)'),
+    'detectCli must store the verified interpreter for tool calls')
+  const verifiedProbes = []
+  __test.setEngineTestHooks({
+    probeInterpreter: async (target) => {
+      verifiedProbes.push({ command: String(target.command), prefix: [...(target.prefix || [])] })
+      return process.execPath
+    },
+  })
+  const verifiedRecorded = await __test.recordVerifiedCli('py', ['-3'])
+  assert.equal(verifiedRecorded, true)
+  assert.deepEqual(verifiedProbes, [{ command: 'py', prefix: ['-3'] }],
+    'resolve the verified launcher itself')
+  const verifiedRecord = readEngineRecord()
+  assert.equal(verifiedRecord.python, process.execPath, 'store the verified absolute interpreter')
+  assert.deepEqual(verifiedRecord.prefix, [])
+  assert.equal(verifiedRecord.source, 'detected')
+  assert.equal(verifiedRecord.auto_update, false, 'detection must not grant automatic eligibility')
+  assert.equal(__test.cliCommand().command, process.execPath, 'tool calls use the stored interpreter')
+
+  // Falling back to a verified bare invocation must not trust an unverified
+  // legacy record: only source "detected" gets the direct launcher path.
+  __test.resetEngineUpdate()
+  fs.rmSync(managedTools, { force: true })
+  writeEngineRecord({ python: 'py', prefix: ['-3'], source: 'detected', auto_update: false })
+  const bareInvocation = __test.cliCommand()
+  assert.equal(bareInvocation.command, 'py')
+  assert.deepEqual(bareInvocation.prefix, ['-3', '-m', 'video2agent'])
+  __test.resetEngineUpdate()
+  fs.rmSync(managedTools, { force: true })
+  writeEngineRecord({ python: 'py', prefix: ['-3'] })
+  assert.equal(__test.cliCommand().command, 'video2agent', 'an unverified legacy launcher is not trusted')
+
+
+  // Restore the harness environment for the remaining tool tests.
+  __test.resetEngineUpdate()
+  fs.rmSync(managedTools, { force: true })
+  process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
+  process.env.VIDEO2AGENT_PYTHON = path.join(home, 'missing-python')
+}
+
 const flagValue = (argv, flag) => argv[argv.indexOf(flag) + 1]
 assert.equal(flagValue(commandArgs({ command: 'evidence', video_id: 'v', at: '00:10', images: 500 }), '--images'), '6')
 assert.equal(flagValue(commandArgs({ command: 'evidence', video_id: 'v', at: '00:10', images: -3 }), '--images'), '0')
@@ -1188,22 +1651,47 @@ assert.match(structuredFailed.failed[0].error_message, /no asr model/)
 assert.equal(structuredFailed.failed[0].remedy, 'download one')
 
 // Search status route: one conversation claims the line; another sees nothing.
-fs.writeFileSync(path.join(home, 'discovery', 'status.json'), JSON.stringify({ phase: 'curating', query: 'x', at: Date.now() }), 'utf8')
+// Claiming must not re-stamp `at`: that field is the age origin the client's
+// six-second no-result budget is measured from.
+const statusLine = path.join(home, 'discovery', 'status.json')
+const claimAt = Date.now() - 3000
+fs.writeFileSync(statusLine, JSON.stringify({ phase: 'curating', query: 'x', at: claimAt }), 'utf8')
 const statusA = JSON.parse((await call('GET', undefined, { path: '/api/video2agent/discovery/status', url: '/api/video2agent/discovery/status?session=alpha' })).body)
 assert.equal(statusA.status.phase, 'curating')
 assert.equal(statusA.status.session_id, 'alpha')
+assert.equal(statusA.status.at, claimAt, 'the claimed line reports its own at')
+const claimedOnDisk = JSON.parse(fs.readFileSync(statusLine, 'utf8'))
+assert.equal(claimedOnDisk.at, claimAt, 'claiming the search line must not rewrite its at on disk')
 const statusB = JSON.parse((await call('GET', undefined, { path: '/api/video2agent/discovery/status', url: '/api/video2agent/discovery/status?session=beta' })).body)
 assert.equal(statusB.status, null, 'another session must not see the search status')
 const statusNoSession = JSON.parse((await call('GET', undefined, { path: '/api/video2agent/discovery/status', url: '/api/video2agent/discovery/status' })).body)
 assert.equal(statusNoSession.status, null, 'a request without a session must not read a claimed search')
-// A find-only client clears the Host status at turn end; another session cannot.
-fs.writeFileSync(path.join(home, 'discovery', 'status.json'), JSON.stringify({ phase: 'curating', query: 'x', at: Date.now(), session_id: 'alpha' }), 'utf8')
-const clearOther = await call('POST', JSON.stringify({ session: 'beta' }), { path: '/api/video2agent/discovery/clear' })
+// The clear is a compare-and-swap on the exact line the client hid: a delayed
+// clear from the previous turn must not delete this one, and a request without
+// a selector must not become another unconditional clear path.
+const clearOther = await call('POST', JSON.stringify({ session: 'beta', at: claimAt, phase: 'curating' }), { path: '/api/video2agent/discovery/clear' })
 assert.equal(JSON.parse(clearOther.body).cleared, false, 'another session must not clear the search status')
-const clearOwn = await call('POST', JSON.stringify({ session: 'alpha' }), { path: '/api/video2agent/discovery/clear' })
-assert.equal(JSON.parse(clearOwn.body).cleared, true, 'the owning session must clear the search status')
+const clearStale = await call('POST', JSON.stringify({ session: 'alpha', at: claimAt - 1, phase: 'curating' }), { path: '/api/video2agent/discovery/clear' })
+assert.equal(JSON.parse(clearStale.body).cleared, false, 'a delayed clear must not delete the newer search line')
+const clearWrongPhase = await call('POST', JSON.stringify({ session: 'alpha', at: claimAt, phase: 'searching' }), { path: '/api/video2agent/discovery/clear' })
+assert.equal(JSON.parse(clearWrongPhase.body).cleared, false, 'the same at with another phase must not clear')
+const clearNoSelector = await call('POST', JSON.stringify({ session: 'alpha' }), { path: '/api/video2agent/discovery/clear' })
+assert.equal(JSON.parse(clearNoSelector.body).cleared, false, 'a clear without at/phase must be a no-op')
+const lineStillThere = JSON.parse((await call('GET', undefined, { path: '/api/video2agent/discovery/status', url: '/api/video2agent/discovery/status?session=alpha' })).body)
+assert.equal(lineStillThere.status.phase, 'curating', 'rejected clears must leave the line alone')
+const clearOwn = await call('POST', JSON.stringify({ session: 'alpha', at: claimAt, phase: 'curating' }), { path: '/api/video2agent/discovery/clear' })
+assert.equal(JSON.parse(clearOwn.body).cleared, true, 'the owning session must clear the exact search line')
 const afterClear = JSON.parse((await call('GET', undefined, { path: '/api/video2agent/discovery/status', url: '/api/video2agent/discovery/status?session=alpha' })).body)
 assert.equal(afterClear.status, null, 'a cleared search status must not come back')
+// The in-flight clear case: a new search written while the old clear was on the
+// wire is unclaimed and has its own at; the late clear must not delete it.
+const newerAt = Date.now() + 10
+fs.writeFileSync(statusLine, JSON.stringify({ phase: 'searching', query: 'new search', at: newerAt }), 'utf8')
+const lateClear = await call('POST', JSON.stringify({ session: 'alpha', at: newerAt - 5000, phase: 'curating' }), { path: '/api/video2agent/discovery/clear' })
+assert.equal(JSON.parse(lateClear.body).cleared, false, 'a late clear must not delete a newer search')
+const survivor = JSON.parse((await call('GET', undefined, { path: '/api/video2agent/discovery/status', url: '/api/video2agent/discovery/status?session=alpha' })).body)
+assert.equal(survivor.status && survivor.status.phase, 'searching', 'the newer search must survive a late clear')
+assert.equal(survivor.status && survivor.status.at, newerAt, 'the newer search keeps its own at after claiming')
 assert.equal(routes.has('/api/video2agent/discovery/confirm'), false, 'the old confirm route must be gone')
 assert.equal(routes.has('/api/video2agent/discovery/pending'), false, 'the old pending route must be gone')
 assert.equal(routes.has('/api/video2agent/discovery/status'), true, 'the status route must exist')

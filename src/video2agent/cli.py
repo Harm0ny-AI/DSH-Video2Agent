@@ -738,6 +738,11 @@ def _make_parser() -> argparse.ArgumentParser:
     gc.add_argument("--max-gb", type=float, default=None, help="Evict oldest cached URL videos until media+derived is under this size")
     gc.add_argument("--keep-logs-days", type=int, default=None,
                     help="Delete job logs older than N days (default 7; 0 = all)")
+    # Internal: the DSH Host's plugin-row Config is the default layer below
+    # ui-settings.json, so its background gc --auto must not fall back to the
+    # built-in 7-day policy while the settings page shows 关闭.
+    gc.add_argument("--cache-defaults", default=None, metavar="JSON",
+                    help=argparse.SUPPRESS)
 
     # Bilibili account/library tools. Reads are safe; every write action requires
     # --confirm and is intentionally a separate call from the plan/preview.
@@ -2018,7 +2023,18 @@ def main(argv: list[str] | None = None) -> int:
             # The cache policy is read (and validated) before any deletion too: a
             # corrupt/Infinity limit used to fail E_INTERNAL after old temp files
             # and logs were already gone.
-            auto_policy = cache_policy(cfg) if args.auto else None
+            row_defaults = None
+            if args.auto and args.cache_defaults is not None:
+                try:
+                    row_defaults = json.loads(args.cache_defaults)
+                except ValueError:
+                    row_defaults = None
+                if not isinstance(row_defaults, dict):
+                    raise Video2AgentError(
+                        "E_CACHE_DEFAULTS", "--cache-defaults 必须是 JSON 对象",
+                        "这是 DSH 宿主内部参数；手动运行 gc --auto 时不要传。",
+                    )
+            auto_policy = cache_policy(cfg, row_defaults) if args.auto else None
             removed = []
             removed_bytes = 0
             for d, pattern in ((cfg.derived_dir, "*.tmp"), (cfg.covers_dir, "*.jpg")):

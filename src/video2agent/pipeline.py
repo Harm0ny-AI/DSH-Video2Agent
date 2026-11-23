@@ -1734,12 +1734,18 @@ def resolve_info(cfg: Config, url: str) -> dict[str, Any]:
             "Paste a Bilibili URL, 'BV1xx411c7mD', an av link, a b23.tv short link, or a Douyin video URL.",
         )
     if ref.get("platform") == "douyin":
-        from .douyin import get_item
+        from .douyin import get_item, is_image_post
 
         item = get_item(
             str(ref["aweme_id"]),
             cache_dir=cfg.home / "cache" / "douyin",
         )
+        if is_image_post(item):
+            raise Video2AgentError(
+                "E_DOUYIN_IMAGE",
+                "这是抖音图文作品（图片合集），没有可分析的视频",
+                "贴视频作品的链接（douyin.com/video/<数字id> 或 v.douyin.com 短链）。",
+            )
         duration_ms = item.get("duration_ms")
         author = item.get("author") or {}
         return {

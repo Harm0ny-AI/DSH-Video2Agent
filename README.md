@@ -125,7 +125,9 @@ pip install video2agent
 dsh plugin --profile web add dsh-video2agent
 ```
 
-想先试 0.3.5，或者参与开发，走下面的源码方式。
+更新插件后，重开 DSH。由插件管理的视频引擎会自动更新。旧安装如果显示「更新引擎」，点一次即可。初次安装或缺少组件时，可以在设置页的「环境检查」里补齐。
+
+想从源码安装或参与开发，走下面的方式。
 ```bash
 git clone https://github.com/Harm0ny-AI/DSH-Video2Agent.git
 cd DSH-Video2Agent

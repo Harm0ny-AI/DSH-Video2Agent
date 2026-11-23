@@ -184,6 +184,18 @@ class DouyinSourceTests(unittest.TestCase):
         self.assertEqual(source["subtitles"], [])
         self.assertTrue(source["uri"].startswith("https://www.douyin.com/video/"))
 
+    def test_image_post_source_is_rejected(self):
+        from video2agent import sources
+
+        item = {"aweme_id": "7628547330606783739", "kind": "image", "title": "图文"}
+        ref = {"kind": "douyin", "platform": "douyin", "aweme_id": item["aweme_id"],
+               "url": links.canonical_douyin_url(item["aweme_id"]), "input_kind": "url"}
+        with patch.object(douyin, "get_item", return_value=item):
+            with self.assertRaises(Video2AgentError) as ctx:
+                sources._douyin_source(ref, self.cfg)
+        self.assertEqual(ctx.exception.code, "E_DOUYIN_IMAGE")
+        self.assertIn("图文", ctx.exception.message)
+
     def test_resolve_info_returns_douyin_metadata(self):
         from video2agent import pipeline
 

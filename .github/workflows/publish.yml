@@ -1,17 +1,67 @@
-﻿name: publish
+name: publish
 
 # Publishing is token-free: PyPI and npm exchange a GitHub OIDC token for a
 # short-lived publish credential (trusted publishing). No API keys in secrets.
+#
+# Order is part of the contract: PyPI first, npm only after this version's wheel
+# is publicly downloadable, then the GitHub Release. The plugin updates a managed
+# engine to its own version from PyPI, so an npm-first release would hand users
+# 0.3.6 with a 0.3.5 engine.
 on:
   push:
     tags: ['v*']
+  # Manual runs must start from the release tag: a branch dispatch fails in the
+  # verify job, because main may already be ahead of the latest tag. Re-running a
+  # failed job of the tag run keeps that tag's ref and needs no dispatch.
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Versions agree, tag matches, CHANGELOG is dated
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, re, sys, tomllib
+
+          root = pathlib.Path('.')
+          versions = {
+              'pyproject.toml': tomllib.loads(
+                  (root / 'pyproject.toml').read_text(encoding='utf-8'))['project']['version'],
+              'src/video2agent/__init__.py': re.search(
+                  r'__version__\s*=\s*"([^"]+)"',
+                  (root / 'src/video2agent/__init__.py').read_text(encoding='utf-8')).group(1),
+              'packages/dsh-video2agent/package.json': json.loads(
+                  (root / 'packages/dsh-video2agent/package.json').read_text(encoding='utf-8'))['version'],
+          }
+          version = versions['pyproject.toml']
+          if set(versions.values()) != {version}:
+              sys.exit('version mismatch: ' + ', '.join(f'{k}={v}' for k, v in versions.items()))
+
+          ref_type = os.environ.get('REF_TYPE', '')
+          ref_name = os.environ.get('REF_NAME', '')
+          if ref_type != 'tag' or ref_name != f'v{version}':
+              sys.exit(
+                  f'publishing needs the release tag v{version}; got {ref_type or "no ref"} '
+                  f'{ref_name or "?"}. Re-run the tag workflow or dispatch it from tag v{version}.')
+          print(f'publishing video2agent {version} from {ref_name}')
+          PY
+      - name: CHANGELOG has this release's dated section
+        run: python scripts/release-notes.py --check
+
   build:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,8 +110,9 @@ jobs:
           skip-existing: true
 
   npm:
-    needs: build
+    needs: [build, pypi]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       id-token: write
       contents: read
@@ -72,18 +123,66 @@ jobs:
           node-version: '24'
       - name: Use the npm CLI that supports trusted publishing
         run: npm install -g npm@latest
+      - name: Wait until this version's wheel is public on PyPI
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys, time, urllib.error, urllib.request
+
+          version = json.loads(
+              pathlib.Path('packages/dsh-video2agent/package.json').read_text(encoding='utf-8'))['version']
+          meta = f'https://pypi.org/pypi/video2agent/{version}/json'
+          deadline = time.monotonic() + 10 * 60
+
+          def wheel_url():
+              with urllib.request.urlopen(meta, timeout=20) as response:
+                  data = json.load(response)
+              for item in data.get('urls') or []:
+                  if item.get('packagetype') == 'bdist_wheel' and item.get('url'):
+                      return item['url']
+              return ''
+
+          def is_public(url):
+              request = urllib.request.Request(url, method='HEAD')
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  return response.status == 200
+
+          while True:
+              try:
+                  url = wheel_url()
+                  if url and is_public(url):
+                      print(f'video2agent {version} wheel is public: {url}')
+                      break
+              except (urllib.error.URLError, TimeoutError, ValueError) as error:
+                  print(f'PyPI not ready yet: {error}', file=sys.stderr)
+              if time.monotonic() >= deadline:
+                  sys.exit(f'timed out waiting for the public video2agent {version} wheel on PyPI')
+              time.sleep(15)
+          PY
+      - name: Check whether npm already has this version
+        id: npm_state
+        run: |
+          version=$(node -p "require('./packages/dsh-video2agent/package.json').version")
+          if npm view "dsh-video2agent@$version" version > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "dsh-video2agent $version is already on npm; publish skipped"
+          fi
       - name: Publish to npm (trusted publishing + provenance)
+        if: steps.npm_state.outputs.published != 'true'
         run: |
           cd packages/dsh-video2agent
           npm publish --access public --provenance
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build]
+    needs: [build, pypi, npm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           name: python-dist
@@ -92,8 +191,13 @@ jobs:
         with:
           name: plugin-dist
           path: dist
+      # The body is this release's own CHANGELOG section, never the generated
+      # commit list or older versions. verify already proved the section exists.
+      - name: Release body is this version's CHANGELOG section
+        run: python scripts/release-notes.py > release-body.md
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: release-body.md
           files: |
             dist/*.whl
             dist/*.tar.gz

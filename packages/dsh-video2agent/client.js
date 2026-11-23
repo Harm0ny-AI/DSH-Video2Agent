@@ -1998,6 +1998,17 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // The Host may update the engine in the background. The card follows that
+    // with a short poll, but every budget is finite: a broken or stuck Host must
+    // not turn the settings page into a polling loop.
+    // GET /setup probes the whole environment, so this is a slow-ish short poll:
+    // often enough to finish an update promptly, rare enough not to spawn a probe
+    // storm. A hidden page skips the read entirely.
+    const ENGINE_POLL_MS = 5000
+    const ENGINE_POLL_MAX_FAILURES = 4
+    const ENGINE_POLL_RECOVERY_MS = 15000
+    const ENGINE_POLL_MAX = 120
+
     // Environment check + one-click install. The plugin cannot run the Python
     // CLI by itself, so this card is where a new user finds out what is missing
     // and fixes it without a terminal. Installs are initiated here only.
@@ -2005,25 +2016,74 @@ window.__ModuleLoader__.load({
       const [setup, setSetup] = React.useState({ state: 'loading', data: null })
       const [busy, setBusy] = React.useState('')
       const [log, setLog] = React.useState('')
-      const load = async () => {
-        if (busy) return
-        setBusy('refresh')
+      // A late answer must not write into a card that was closed, and a slow
+      // answer from an older request must not replace a newer one (poll vs.
+      // manual refresh or update). The request token owns both rules.
+      const aliveRef = React.useRef(true)
+      const requestRef = React.useRef(0)
+      const inflightRef = React.useRef(0)
+      const busyRef = React.useRef('')
+      const sawUpdatingRef = React.useRef(false)
+      // The manual update writes a progress line into the log; a background
+      // update settles through the poll, so that stale progress line is cleared
+      // there instead of sitting under the finished status forever.
+      const engineProgressRef = React.useRef(false)
+      const [updateResult, setUpdateResult] = React.useState(null)
+      React.useEffect(() => () => { aliveRef.current = false }, [])
+      const beginBusy = (value) => { busyRef.current = value; setBusy(value) }
+      const endBusy = (value) => {
+        if (!aliveRef.current || busyRef.current !== value) return
+        busyRef.current = ''
+        setBusy('')
+      }
+      const noteEngine = (data) => {
+        const engine = data && data.engine_update
+        if (engine && String(engine.state || '') === 'updating') sawUpdatingRef.current = true
+      }
+      // A read only asks; it never starts an install. A manual re-check bypasses
+      // the Host's short status cache; the background poll uses the cached read.
+      const readSetup = async (id, refresh) => {
+        inflightRef.current = id
         try {
-          const response = await fetch('/api/video2agent/setup')
+          const response = await fetch('/api/video2agent/setup' + (refresh ? '?refresh=1' : ''))
           const data = await response.json().catch(() => null)
           if (!response.ok || !data || data.ok === false) throw new Error('read failed')
+          return data
+        } finally {
+          if (inflightRef.current === id) inflightRef.current = 0
+        }
+      }
+      const load = async (refresh) => {
+        if (busyRef.current) return
+        beginBusy('refresh')
+        const id = ++requestRef.current
+        try {
+          const data = await readSetup(id, refresh === true)
+          if (!aliveRef.current || id !== requestRef.current) return
+          noteEngine(data)
           setSetup({ state: 'ready', data })
           setLog('')
         } catch {
-          setSetup((current) => ({ ...current, state: 'error' }))
+          if (aliveRef.current && id === requestRef.current) setSetup((current) => ({ ...current, state: 'error' }))
         } finally {
-          setBusy('')
+          endBusy('refresh')
         }
       }
       React.useEffect(() => { load() }, [])
       const install = async (action) => {
-        setBusy(action)
-        setLog('正在安装…首次约 1–3 分钟，请保持这个页面打开；失败时会显示原因。')
+        if (busyRef.current) return
+        beginBusy(action)
+        // The install answer is newer than any poll that was already running.
+        const id = ++requestRef.current
+        inflightRef.current = id
+        if (action === 'update-cli') {
+          sawUpdatingRef.current = true
+          engineProgressRef.current = true
+          setUpdateResult(null)
+          setLog('正在更新视频引擎…，请保持这个页面打开。')
+        } else {
+          setLog('正在安装…首次约 1–3 分钟，请保持这个页面打开；失败时会显示原因。')
+        }
         try {
           const response = await fetch('/api/video2agent/setup', {
             method: 'POST',
@@ -2031,19 +2091,49 @@ window.__ModuleLoader__.load({
             body: JSON.stringify({ action }),
           })
           const data = await response.json().catch(() => null)
-          if (data && data.status) setSetup({ state: 'ready', data: data.status })
-          if (!response.ok || !data || data.ok !== true) {
+          if (!aliveRef.current) return
+          if (data && data.status) {
+            noteEngine(data.status)
+            setSetup({ state: 'ready', data: data.status })
+          }
+          const statusFailed = !!(data && data.status && data.status.engine_update
+            && String(data.status.engine_update.state || '') === 'failed')
+          // A busy install lock is not a failed engine update: another install is
+          // running. The returned status decides whether the card keeps following
+          // a background update, and the failure line must not claim otherwise.
+          const busyLock = String((data && data.error && data.error.code) || '') === 'E_BUSY'
+          const stillUpdating = !!(data && data.status && data.status.engine_update
+            && String(data.status.engine_update.state || '') === 'updating')
+          if (!response.ok || !data || data.ok !== true || statusFailed) {
             const error = (data && data.error && [data.error.message, data.error.remedy].filter(Boolean).join('：'))
               || (data && (data.error || data.detail))
-              || '安装失败，请稍后重试。'
+              || (action === 'update-cli' ? '视频引擎更新失败，可重试。' : '安装失败，请稍后重试。')
             setLog(String(error) + (data && data.output ? '\n' + data.output : ''))
+            if (action === 'update-cli') {
+              engineProgressRef.current = false
+              if (!busyLock) setUpdateResult({ state: 'failed' })
+            }
+          } else if (action === 'update-cli') {
+            if (stillUpdating) {
+              // The Host handed the update to a background run; the status line
+              // carries the progress, so the duplicate progress log is dropped.
+              setUpdateResult(null)
+              setLog('')
+            } else {
+              engineProgressRef.current = false
+              setUpdateResult({ state: 'ready' })
+              if (data.output) setLog(data.output)
+            }
           } else if (data.output) {
             setLog(data.output)
           }
         } catch (e) {
+          if (!aliveRef.current) return
           setLog(String((e && e.message) || e))
+          if (action === 'update-cli') setUpdateResult({ state: 'failed' })
         } finally {
-          setBusy('')
+          if (inflightRef.current === id) inflightRef.current = 0
+          endBusy(action)
         }
       }
       const data = setup.data
@@ -2072,6 +2162,76 @@ window.__ModuleLoader__.load({
       // build must offer an update button — otherwise the page cannot fix the
       // exact DPAPI error the user is looking at.
       const updateCli = !!(data && data.canInstall && data.canInstall.updateCli)
+      const plugin = data && data.plugin ? data.plugin : null
+      // A pending plugin reload pauses the engine-update nudge; the explicit
+      // manual action stays available below.
+      const pluginRestart = !!(plugin && plugin.restart_required)
+      const engine = data && data.engine_update ? data.engine_update : null
+      const engineState = engine ? String(engine.state || '') : ''
+      const engineUpdating = engineState === 'updating'
+      // A Host that now reports ready overrides an older local failure (e.g. the
+      // retry succeeded but the answer came from another update path).
+      const engineFailed = engineState === 'failed'
+        || (!!(updateResult && updateResult.state === 'failed') && engineState !== 'ready')
+      const engineReady = !engineFailed && !engineUpdating
+        && ((engineState === 'ready' && sawUpdatingRef.current) || !!(updateResult && updateResult.state === 'ready'))
+      const engineVersion = String((engine && engine.target) || (data && data.cli && data.cli.version) || '')
+      // A background update is Host work, not page work: follow it only while it
+      // is actually running, stop as soon as it settles, and never poll a broken
+      // Host forever. A fast failure streak is retried twice at a slower pace;
+      // after that the card keeps the last known state and 重新检测 (or opening
+      // the page again) recovers.
+      React.useEffect(() => {
+        if (engineState !== 'updating' || busy) return undefined
+        let alive = true
+        let timer = null
+        let failures = 0
+        let polls = 0
+        const stop = () => { if (timer) { clearTimeout(timer); timer = null } }
+        const schedule = (ms) => {
+          if (!alive) return
+          stop()
+          timer = setTimeout(tick, ms)
+        }
+        const tick = async () => {
+          timer = null
+          if (!alive || !aliveRef.current || busyRef.current) return
+          if (polls >= ENGINE_POLL_MAX) return
+          // A background tab does not need the probe; the next visible tick reads
+          // the real state again.
+          if (typeof document !== 'undefined' && document.hidden === true) {
+            schedule(ENGINE_POLL_MS)
+            return
+          }
+          polls += 1
+          const id = ++requestRef.current
+          try {
+            const next = await readSetup(id)
+            if (!alive || !aliveRef.current || id !== requestRef.current) return
+            failures = 0
+            noteEngine(next)
+            setSetup({ state: 'ready', data: next })
+            const nextState = next && next.engine_update ? String(next.engine_update.state || '') : ''
+            if (nextState !== 'updating') {
+              if (engineProgressRef.current) {
+                engineProgressRef.current = false
+                setLog('')
+              }
+              return
+            }
+            schedule(ENGINE_POLL_MS)
+          } catch {
+            if (!alive || !aliveRef.current || id !== requestRef.current) return
+            failures += 1
+            if (failures < ENGINE_POLL_MAX_FAILURES) schedule(ENGINE_POLL_MS)
+            else if (failures < ENGINE_POLL_MAX_FAILURES + 2) {
+              schedule(failures === ENGINE_POLL_MAX_FAILURES ? ENGINE_POLL_RECOVERY_MS : ENGINE_POLL_RECOVERY_MS * 2)
+            }
+          }
+        }
+        schedule(ENGINE_POLL_MS)
+        return () => { alive = false; stop() }
+      }, [engineState, busy])
       const actionFor = (key) => key === 'cli' ? 'install-cli' : key === 'ffmpeg' ? 'install-ffmpeg'
         : key === 'browser' ? 'install-browser' : key === 'ocr' ? 'install-ocr' : ''
       const installableMissing = data
@@ -2101,20 +2261,53 @@ window.__ModuleLoader__.load({
                 ? h('span', { style: { fontSize: '11.5px', color: '#b42318' } }, '读取失败')
                 : items.map(chip),
           ),
-          h('button', { 'data-vp-bili-btn': '', disabled: !!busy, onClick: () => load(),
+          h('button', { 'data-vp-bili-btn': '', 'data-vp-env-refresh': '', disabled: !!busy, onClick: () => load(true),
             style: { flex: 'none', padding: '2px 8px', fontSize: '11px', lineHeight: '18px' } }, busy ? '…' : '重新检测'),
         ),
-        updateCli
-          ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
-              h('span', { style: { fontSize: '11px', color: '#9a6700' } },
-                '视频引擎可更新：' + (data.cli.version || '?') + ' → ' + (data.cli.latest || '?')),
+        pluginRestart
+          ? h('div', { 'data-vp-env-plugin': 'restart', style: { marginTop: '7px', fontSize: '11.5px', color: '#9a6700' } },
+              '插件已更新，重开 DSH 后生效')
+          : null,
+        engineUpdating
+          ? h('div', { 'data-vp-env-engine': 'updating', style: { marginTop: '7px', fontSize: '11.5px', color: '#9a6700' } }, '正在更新视频引擎…')
+          : null,
+        engineFailed
+          ? h('div', { 'data-vp-env-engine': 'failed', style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
+              h('span', { style: { fontSize: '11.5px', color: '#b42318' } }, '视频引擎更新失败，可重试。'),
               h('button', {
                 'data-vp-bili-btn': '',
+                'data-vp-env-engine-retry': '',
                 disabled: !!busy,
                 onClick: () => install('update-cli'),
                 style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' },
-              }, busy === 'update-cli' ? '更新中…' : '更新引擎'),
-            )
+              }, busy === 'update-cli' ? '更新中…' : '更新引擎'))
+          : null,
+        engineReady
+          ? h('div', { 'data-vp-env-engine': 'ready', style: { marginTop: '7px', fontSize: '11.5px', color: '#1a7f37' } },
+              '视频引擎已更新' + (engineVersion ? '至 ' + engineVersion : ''))
+          : null,
+        updateCli && !engineUpdating && !engineFailed
+          ? (pluginRestart
+            // While a plugin reload is pending the card must not push an engine
+            // update, but the explicit manual action stays available.
+            ? h('div', { style: { marginTop: '7px' } },
+                h('button', {
+                  'data-vp-bili-btn': '',
+                  'data-vp-env-engine-manual': '',
+                  disabled: !!busy,
+                  onClick: () => install('update-cli'),
+                  style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' },
+                }, busy === 'update-cli' ? '更新中…' : '更新引擎'))
+            : h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
+                h('span', { style: { fontSize: '11px', color: '#9a6700' } },
+                  '视频引擎可更新：' + (data.cli.version || '?') + ' → ' + (data.cli.latest || '?')),
+                h('button', {
+                  'data-vp-bili-btn': '',
+                  disabled: !!busy,
+                  onClick: () => install('update-cli'),
+                  style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' },
+                }, busy === 'update-cli' ? '更新中…' : '更新引擎'),
+              ))
           : null,
         missing.length
           ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
@@ -3997,6 +4190,18 @@ window.__ModuleLoader__.load({
     }
 
     const HIDDEN_SEARCH_BY_SESSION = new Map()
+    // A search line is a brief answer or progress, never a stage that may stay
+    // above the composer. Each phase owns its own budget, measured from that
+    // status's own `at`: empty/error are short notices, while a slow network may
+    // legitimately keep "正在找视频" for longer.
+    const SEARCH_LINE_MAX_AGE_MS = {
+      searching: 45000,
+      curating: 12000,
+      starting: 12000,
+      empty: 6000,
+      error: 6000,
+    }
+    const SEARCH_LINE_PHASES = ['searching', 'curating', 'starting', 'empty', 'error']
     // The only discovery surface left. The old candidate picker is gone: the
     // Host starts the model's shortlist and the table shows the jobs. This card
     // only says what the search is doing, in the same glass shell as before.
@@ -4006,12 +4211,88 @@ window.__ModuleLoader__.load({
       const queue = useQueue(sid)
       const [status, setStatus] = React.useState(null)
       const holdRef = React.useRef(null)
+      const expireRef = React.useRef(null)
+      // The status in state belongs to the session that polled it. A conversation
+      // switch re-renders before the next poll, so without this guard the previous
+      // chat's line ("没有找到候选") stayed visible in the new one, and the 6s hold
+      // kept it there even after the new session answered with no status.
+      const statusSidRef = React.useRef(null)
+      // The independent expiry timer reads the shown status without re-running
+      // the effect on every poll.
+      const shownRef = React.useRef(null)
       const settings = useSettings()
       React.useEffect(() => {
-        if (!settings.enabled) return undefined
         let alive = true
         let timer = null
         let lastPhase = null
+
+        const dropShown = () => {
+          shownRef.current = null
+          statusSidRef.current = null
+          if (holdRef.current) { clearTimeout(holdRef.current); holdRef.current = null }
+          if (expireRef.current) { clearTimeout(expireRef.current); expireRef.current = null }
+          setStatus(null)
+        }
+        // Remove the Host line too, remembering the exact status so a later poll
+        // cannot resurrect it. `at`+`phase` identify the line: a delayed clear
+        // must not delete a newer search that was written while it was in flight.
+        const hideHost = (target) => {
+          HIDDEN_SEARCH_BY_SESSION.set(sid, { at: Number(target.at || 0) || Date.now(), phase: String(target.phase || '') })
+          try {
+            fetch('/api/video2agent/discovery/clear', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ session: sid, at: Number(target.at || 0), phase: String(target.phase || '') }),
+            }).catch(() => {})
+          } catch {}
+        }
+        const disarmExpiry = () => {
+          if (expireRef.current) { clearTimeout(expireRef.current); expireRef.current = null }
+        }
+        // The age budget is enforced by this timer, not by the next poll: a
+        // throttled poll (or a turn that keeps thinking) used to leave the line
+        // on screen until the Host's two-minute expiry.
+        const armExpiry = (target) => {
+          disarmExpiry()
+          const budget = Number(SEARCH_LINE_MAX_AGE_MS[target.phase] || 0)
+          if (!budget) return
+          const remaining = Math.max(0, Number(target.at || 0) + budget - Date.now())
+          expireRef.current = setTimeout(() => {
+            expireRef.current = null
+            if (!alive || shownRef.current !== target) return
+            hideHost(target)
+            dropShown()
+          }, remaining)
+        }
+        const show = (target) => {
+          disarmExpiry()
+          // A short-lived null from the Host arms the hold; a real new line
+          // arriving inside that window must cancel it, or the old timer would
+          // wipe the new line out. The null branch itself keeps the hold when
+          // the poll still returns no line.
+          if (holdRef.current) { clearTimeout(holdRef.current); holdRef.current = null }
+          shownRef.current = target
+          statusSidRef.current = sid
+          setStatus(target)
+          armExpiry(target)
+        }
+
+        if (!settings.enabled) {
+          // Disabling the plugin must not leave the last line frozen above the
+          // composer: the poll stops, so nothing else would ever remove it.
+          if (shownRef.current) dropShown()
+          return undefined
+        }
+        // A conversation switch must not carry the previous chat's line (or its
+        // pending clear) into the new one.
+        if (statusSidRef.current !== null && statusSidRef.current !== sid) dropShown()
+        // The turn ended: the line is turn state, so drop it now instead of
+        // waiting for a fetch that may be slow or throttled.
+        if (!running && shownRef.current && SEARCH_LINE_PHASES.includes(shownRef.current.phase)) {
+          hideHost(shownRef.current)
+          dropShown()
+        }
+
         const poll = async () => {
           if (!alive) return
           const hidden = typeof document !== 'undefined' && document.hidden === true
@@ -4019,59 +4300,57 @@ window.__ModuleLoader__.load({
             const url = '/api/video2agent/discovery/status' + (sid ? '?session=' + encodeURIComponent(sid) : '')
             const response = await fetch(url)
             const data = await response.json()
+            // A response that lands after an unmount, a turn change or a
+            // conversation switch must not touch the new effect's state.
+            if (!alive) return
             const next = data && data.status ? data.status : null
-            // A find-only turn ends with "curating" and no shortlist. That card is
-            // model input, not a result: drop it as soon as the turn ends instead
-            // of leaving a spinner until the Host's status expires. Remember the
-            // hidden status so the next turn cannot resurrect the same card; a
-            // newer find has a newer at and shows normally.
             // Find-only lines and terminal no-result/error lines are turn state,
             // not permanent chat content. Hiding them at turn end prevents the
-            // empty card from becoming a 10-minute resident and from appearing
-            // again when the user scrolls or returns to the session.
-            const transient = !!next && ['searching', 'curating', 'empty', 'error'].includes(next.phase)
-            const hiddenAt = Number(HIDDEN_SEARCH_BY_SESSION.get(sid) || 0)
-            const hiddenStatus = transient && Number((next && next.at) || 0) <= hiddenAt
-            // A search line is progress, not a permanent state: after the CLI has
-            // returned (curating) a long model thinking block must not leave it
-            // on screen forever. searching gets a little longer for slow networks.
+            // empty card from becoming a resident and from appearing again when
+            // the user scrolls or returns to the session.
+            const transient = !!next && SEARCH_LINE_PHASES.includes(next.phase)
+            const hiddenLine = HIDDEN_SEARCH_BY_SESSION.get(sid)
+            const hiddenAt = Number((hiddenLine && hiddenLine.at) || 0)
+            const nextAt = Number((next && next.at) || 0)
+            // Same-millisecond writes are possible; comparing the phase as well
+            // keeps a newer line from being swallowed by the previous latch.
+            const hiddenStatus = transient && !!hiddenLine
+              && (nextAt < hiddenAt || (nextAt === hiddenAt && String(next.phase || '') === String(hiddenLine.phase || '')))
             const age = next ? Date.now() - Number(next.at || 0) : 0
-            const staleBusy = !!next && (
-              (next.phase === 'curating' && age > 12000)
-              || (next.phase === 'searching' && age > 45000)
-              || (next.phase === 'starting' && age > 12000)
-            )
-            const dropTransient = transient && (!running || hiddenStatus || staleBusy)
-            const firstHide = transient && (!running || staleBusy) && !hiddenStatus
-            if (firstHide && next) {
-              HIDDEN_SEARCH_BY_SESSION.set(sid, Number(next.at || 0) || Date.now())
-              // Clear the Host status as well: the in-page latch covers this tab,
-              // but a reload or a later turn must not read the stale curating
-              // line. Fire-and-forget; the card is already hidden.
-              try {
-                fetch('/api/video2agent/discovery/clear', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ session: sid }),
-                }).catch(() => {})
-              } catch {}
-            }
+            const budget = next ? Number(SEARCH_LINE_MAX_AGE_MS[next.phase] || 0) : 0
+            const staleLine = budget > 0 && age > budget
+            const dropTransient = transient && (!running || hiddenStatus || staleLine)
+            const firstHide = transient && (!running || staleLine) && !hiddenStatus
+            if (firstHide && next) hideHost(next)
             lastPhase = dropTransient ? null : next && next.phase
-            if (alive) {
-              if (dropTransient) {
-                if (holdRef.current) { clearTimeout(holdRef.current); holdRef.current = null }
-                setStatus(null)
-              } else if (next) {
-                if (holdRef.current) { clearTimeout(holdRef.current); holdRef.current = null }
-                setStatus(next)
-              } else if (!holdRef.current) {
-                // A shortlist clears the status before the batch table paints.
-                // Hold the last search card briefly so it does not blink out and
-                // immediately come back as a new card.
-                holdRef.current = setTimeout(() => {
-                  holdRef.current = null
-                  setStatus(null)
-                }, 6000)
+            if (dropTransient) {
+              dropShown()
+            } else if (next) {
+              show(next)
+            } else {
+              // A shortlist clears the status before the batch table paints:
+              // hold a busy line briefly so it does not blink out, but never
+              // past that phase's hard budget and never by cancelling that
+              // expiry. A no-result/error line is not waiting for a queue, so
+              // it gets no new hold at all.
+              const shown = shownRef.current
+              if (!shown) {
+                disarmExpiry()
+              } else if (shown.phase === 'empty' || shown.phase === 'error') {
+                dropShown()
+              } else {
+                const shownBudget = Number(SEARCH_LINE_MAX_AGE_MS[shown.phase] || 0)
+                const shownRemaining = shownBudget > 0
+                  ? Math.max(0, Number(shown.at || 0) + shownBudget - Date.now())
+                  : 0
+                if (!shownBudget || shownRemaining <= 0) {
+                  dropShown()
+                } else if (!holdRef.current) {
+                  holdRef.current = setTimeout(() => {
+                    holdRef.current = null
+                    dropShown()
+                  }, Math.min(6000, shownRemaining))
+                }
               }
             }
           } catch {}
@@ -4085,12 +4364,16 @@ window.__ModuleLoader__.load({
         return () => {
           alive = false
           if (timer) clearTimeout(timer)
+          disarmExpiry()
           if (holdRef.current) { clearTimeout(holdRef.current); holdRef.current = null }
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [sid, running, settings.enabled])
       const jobs = queue && Array.isArray(queue.jobs) ? queue.jobs : []
       if (jobs.length) return null
+      // A disabled plugin or a status belonging to another conversation must not
+      // render: the dock is one instance whose session prop can change.
+      if (!settings.enabled || !status || statusSidRef.current !== sid) return null
       const phase = status && status.phase
       if (!status) return null
       if (phase === 'error' && (status.kind === 'start' || status.kind === 'selection')) return null

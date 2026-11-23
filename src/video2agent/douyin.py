@@ -145,9 +145,26 @@ def parse_share_html(html: str) -> dict[str, Any] | None:
     return normalize_item(items[0])
 
 
+def is_image_post(item: dict[str, Any]) -> bool:
+    """True for a 图文 (image carousel) aweme, which has no playable mp4."""
+    if not isinstance(item, dict):
+        return False
+    if item.get("kind") == "image":
+        return True
+    if item.get("images"):
+        return True
+    if _as_int(item.get("aweme_type")) == 68:
+        return True
+    # A cache written before this guard has no images/kind, but its play uri is
+    # the background-music file (ies-music/<id>.mp3) instead of a video id.
+    play_uri = str(item.get("play_uri") or "").lower()
+    return "ies-music" in play_uri or play_uri.endswith(".mp3")
+
+
 def normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     """Map one aweme JSON object onto the fields the source layer needs."""
     video = item.get("video") or {}
+    images = item.get("images") or []
     author = item.get("author") or {}
     stats = item.get("statistics") or {}
     play = video.get("play_addr") or {}
@@ -156,6 +173,8 @@ def normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     aweme_id = str(item.get("aweme_id") or "")
     return {
         "aweme_id": aweme_id,
+        "kind": "image" if is_image_post(item) else "video",
+        "image_count": len(images) if isinstance(images, list) else 0,
         "title": desc,
         "description": desc,
         "author": {
