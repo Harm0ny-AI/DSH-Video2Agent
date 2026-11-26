@@ -45,6 +45,7 @@ try:
     from .db import Database
     from .export import export_html, export_json, export_knowledge, export_markdown
     from .pipeline import (
+        CAPTION_READY_WARNING,
         _fit_request_times,
         _require_in_range,
         _stored_caption_mismatch,
@@ -613,6 +614,8 @@ def _make_parser() -> argparse.ArgumentParser:
     # The caller (a plugin tool) has its own process timeout; let it ask for a
     # shorter wait instead of being killed mid-wait.
     j.add_argument("--wait-timeout", type=int, default=1800, help="Seconds to wait with --wait (default 1800).")
+    j.add_argument("--wait-for", choices=("ready", "transcript"), default="ready",
+                   help="With --wait, return when subtitles are readable or the job ends.")
 
     o = cmd("overview", "Video metadata, chapters, capabilities, warnings")
     o.add_argument("video_id")
@@ -808,7 +811,8 @@ def _run_ingest(args: argparse.Namespace, cfg: Any) -> dict[str, Any]:
     }
     with Database(cfg.db_path) as db:
         job = db.create_job("ingest", args.source, options=options)
-        db.update_job(job, state="running", stage="queued", started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        db.update_job(job, state="running", stage="queued", pid=None if args.detach else os.getpid(),
+                      started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
     if args.detach:
         env = os.environ.copy()
         env["VIDEO2AGENT_HOME"] = str(cfg.home)
@@ -853,6 +857,7 @@ def _run_job(job_id: str, cfg: Any) -> dict[str, Any]:
             db.update_job(job_id, state="running", stage=stage, progress=pct, message=msg)
 
     try:
+        _raise_if_canceled(cfg, job_id)
         result = analyze(
             cfg, source,
             profile=options.get("profile", "standard"),
@@ -863,7 +868,6 @@ def _run_job(job_id: str, cfg: Any) -> dict[str, Any]:
             progress=progress,
             reselect_ocr=bool(options.get("reselect_ocr", False)),
         )
-        _raise_if_canceled(cfg, job_id)
         video_id = result.get("video_id")
         with Database(cfg.db_path) as db:
             # Dedupe paths used to return an existing overview without writing its
@@ -1219,16 +1223,19 @@ def _merge_evidence_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     return first
 
 
-def _wait_job(cfg: Any, job_id: str, timeout: float = 1800) -> dict[str, Any]:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+def _wait_job(cfg: Any, job_id: str, timeout: float = 1800, *, wait_for: str = "ready") -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         with Database(cfg.db_path) as db:
-            job = db.get_job(job_id)
-        if not job:
-            raise Video2AgentError("E_JOB", f"Job not found: {job_id}")
-        if job["state"] in ("ready", "failed", "canceled"):
-            return job
-        time.sleep(1.0)
+            job = db.reconcile_job(job_id)
+            if not job:
+                raise Video2AgentError("E_JOB", f"Job not found: {job_id}")
+            if job["state"] in ("ready", "failed", "canceled"):
+                return job
+            if wait_for == "transcript" and job["state"] == "running" and job.get("video_id"):
+                if db.active_caption_job(db.get_video(job["video_id"])) == job_id:
+                    return {**job, "transcript_ready": True}
+        time.sleep(max(0, min(1.0, deadline - time.monotonic())))
     raise Video2AgentError("E_TIMEOUT", f"Job still running after {timeout}s", "Use video2agent jobs --id to check later.")
 
 
@@ -1640,7 +1647,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "jobs":
             if args.id:
                 if args.wait:
-                    job = _wait_job(cfg, args.id, timeout=max(1, int(getattr(args, "wait_timeout", 1800))))
+                    job = _wait_job(cfg, args.id, timeout=max(1, int(args.wait_timeout)), wait_for=args.wait_for)
                 else:
                     with Database(cfg.db_path) as db:
                         job = db.reconcile_job(args.id)
@@ -1731,7 +1738,10 @@ def main(argv: list[str] | None = None) -> int:
             start = parse_time_ms(args.start) if args.start else None
             end = parse_time_ms(args.end) if args.end else None
             with Database(cfg.db_path) as db:
-                video = require_ready(db.get_video(args.video_id), args.video_id)
+                db.conn.execute("BEGIN")
+                video = db.get_video(args.video_id)
+                caption_pending = bool(db.active_caption_job(video))
+                video = require_ready(video, args.video_id, allow_transcript=caption_pending)
                 if _stored_caption_mismatch(db, video):
                     source = video.get("source_uri") or args.video_id
                     raise Video2AgentError(
@@ -1743,7 +1753,7 @@ def main(argv: list[str] | None = None) -> int:
                 start, end = fitted["start_ms"], fitted["end_ms"]
                 _require_in_range(video, start_ms=start, end_ms=end)
                 segs = db.get_segments(args.video_id, start, end, limit=10000)
-            warnings = []
+            warnings = [*(video.get("warnings") or []), CAPTION_READY_WARNING] if caption_pending else []
             if fitted["unit_fixed"]:
                 warnings.append({
                     "code": "TIME_UNIT_FIXED",
@@ -2052,8 +2062,16 @@ def main(argv: list[str] | None = None) -> int:
             removed = []
             removed_bytes = 0
             for d, pattern in ((cfg.derived_dir, "*.tmp"), (cfg.covers_dir, "*.jpg")):
+                owned_root = cfg.home.resolve() / d.name
+                try:
+                    if d.resolve() != owned_root:
+                        continue
+                except (OSError, RuntimeError):
+                    continue
                 for p in d.rglob(pattern):
                     try:
+                        if p.is_symlink() or not p.resolve().is_relative_to(owned_root):
+                            continue
                         if time.time() - p.stat().st_mtime < 7 * 86400:
                             continue
                         size = p.stat().st_size
@@ -2063,7 +2081,7 @@ def main(argv: list[str] | None = None) -> int:
                         # used to be reported as freed bytes.
                         removed.append(str(p))
                         removed_bytes += size
-                    except OSError:
+                    except (OSError, RuntimeError):
                         pass
 
             # Job logs carry the source title/URL and local paths. They are pruned by
@@ -2088,6 +2106,7 @@ def main(argv: list[str] | None = None) -> int:
                         if args.dry_run:
                             evicted.append(item)
                             freed = int(item.get("bytes") or 0)
+                            cache_freed = freed
                         else:
                             # Expiry frees disk, not knowledge: the transcript and
                             # OCR index must stay searchable. --purge is the
@@ -2095,9 +2114,10 @@ def main(argv: list[str] | None = None) -> int:
                             act = purge_video if args.purge else release_media
                             result = act(cfg, db, item["video_id"], reason=item.get("reason", "expiry"))
                             evicted.append(result)
-                            freed = int(result.get("bytes") or 0) if not result.get("error") else 0
+                            freed = int(result.get("bytes") or 0) if "cache_bytes" in result or not result.get("error") else 0
+                            cache_freed = int(result.get("cache_bytes", freed))
                         removed_bytes += freed
-                        cache_after -= freed
+                        cache_after -= cache_freed
                 cache_after = max(0, cache_after)
             elif args.sources or args.max_gb is not None:
                 if args.sources:
@@ -2108,16 +2128,17 @@ def main(argv: list[str] | None = None) -> int:
                         if args.dry_run:
                             evicted.append(item)
                             freed = int(item.get("bytes") or 0)
+                            cache_freed = freed
                         else:
                             # Same rule as expiry: freeing cache never deletes the
                             # transcript/OCR index unless --purge was asked for.
                             act = purge_video if args.purge else release_media
                             result = act(cfg, db, item["video_id"], reason=item.get("reason", "retention"))
                             evicted.append(result)
-                            # files_busy kept the row; nothing was actually freed.
-                            freed = int(result.get("bytes") or 0) if not result.get("error") else 0
+                            freed = int(result.get("bytes") or 0) if "cache_bytes" in result or not result.get("error") else 0
+                            cache_freed = int(result.get("cache_bytes", freed))
                         removed_bytes += freed
-                        cache_after -= freed
+                        cache_after -= cache_freed
                 cache_after = max(0, cache_after)
             payload = {"ok": True, "dry_run": args.dry_run, "removed": removed,
                        "logs_removed": logs_removed, "logs_retention_days": log_days,

@@ -73,7 +73,7 @@ class StorageTests(unittest.TestCase):
 
 
     def test_cache_policy_defaults_and_clamps(self):
-        self.assertEqual(cache_policy(self.cfg), {"expire": True, "days": 7, "limit_enabled": False, "limit_gb": 20})
+        self.assertEqual(cache_policy(self.cfg), {"expire": True, "days": 7, "limit_enabled": True, "limit_gb": 20})
         (self.home / "ui-settings.json").write_text('{"cacheExpire":false,"cacheDays":999,"cacheLimitEnabled":true,"cacheLimitGb":99}', encoding="utf-8")
         self.assertEqual(cache_policy(self.cfg), {"expire": False, "days": 365, "limit_enabled": True, "limit_gb": 20})
 

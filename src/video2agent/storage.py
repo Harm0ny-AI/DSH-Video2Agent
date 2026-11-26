@@ -8,7 +8,7 @@ from typing import Any
 
 from .config import Config
 from .db import Database
-from .util import now_iso
+from .util import now_iso, pid_alive
 
 
 def dir_size(path: str | Path) -> int:
@@ -18,7 +18,7 @@ def dir_size(path: str | Path) -> int:
     total = 0
     for child in p.rglob("*"):
         try:
-            if child.is_file():
+            if not child.is_symlink() and child.is_file():
                 total += child.stat().st_size
         except OSError:
             pass
@@ -28,7 +28,7 @@ def dir_size(path: str | Path) -> int:
 CACHE_DEFAULTS = {
     "expire": True,
     "days": 7,
-    "limit_enabled": False,
+    "limit_enabled": True,
     "limit_gb": 20.0,
 }
 
@@ -99,7 +99,48 @@ def cache_policy(cfg: Config, row_config: dict[str, Any] | None = None) -> dict[
 
 
 def cached_usage(cfg: Config) -> int:
-    return dir_size(cfg.media_dir) + dir_size(cfg.derived_dir)
+    return sum(dir_size(root) for root in _cache_roots(cfg))
+
+
+def _cache_roots(cfg: Config) -> list[Path]:
+    home = cfg.home.resolve()
+    return [root for root in (cfg.media_dir, cfg.derived_dir)
+            if root.resolve() == home / root.name]
+
+
+def _video_cache_paths(cfg: Config, video: dict[str, Any]) -> list[Path]:
+    video_id = str(video["id"])
+    if video_id in {"", ".", ".."} or Path(video_id).name != video_id:
+        return []
+    local_source = video.get("source_path") if video.get("source_kind") == "local" else None
+    paths = []
+    for root in _cache_roots(cfg):
+        target = root / video_id
+        if target.resolve() != root.resolve() / video_id:
+            continue
+        if local_source and _within(Path(local_source), target):
+            continue
+        paths.append(target)
+    return paths
+
+
+def _active_media_ids(db: Database, video_id: str | None = None) -> set[str]:
+    sql = "SELECT video_id,pid FROM jobs WHERE video_id IS NOT NULL AND kind='ingest' AND state IN ('queued','running')"
+    params: list[str] = []
+    if video_id is not None:
+        sql += " AND video_id=?"
+        params.append(video_id)
+    active = set()
+    for row in db.all(sql, params):
+        try:
+            pid = int(row["pid"] or 0)
+        except (ValueError, TypeError):
+            pid = 0
+        # Foreground and newly started jobs may not have recorded a process ID.
+        # Leave their cache alone. A known dead worker cannot keep pinning media.
+        if not pid or pid_alive(pid):
+            active.add(str(row["video_id"]))
+    return active
 
 
 def purge_video(cfg: Config, db: Database, video_id: str, *, reason: str = "expiry") -> dict[str, Any]:
@@ -107,24 +148,24 @@ def purge_video(cfg: Config, db: Database, video_id: str, *, reason: str = "expi
     video = db.get_video(video_id) or {}
     # The plan filtered analyzing, but a direct call or a race must not delete a
     # video that started analyzing after the plan was built.
-    if video.get("status") == "analyzing":
+    if video.get("status") == "analyzing" or _active_media_ids(db, video_id):
         return {"video_id": video_id, "title": video.get("title"), "bytes": 0,
                 "reason": reason, "error": "busy_analyzing"}
-    media = cfg.media_dir / video_id
-    derived = cfg.derived_dir / video_id
-    paths = [p for p in (media, derived) if _within(p, cfg.home)]
-    size = sum(dir_size(p) for p in paths)
+    paths = _video_cache_paths(cfg, video) if video else []
+    cache_bytes = 0
     failed: list[str] = []
     for p in paths:
+        size = dir_size(p)
         try:
             if p.is_dir():
                 shutil.rmtree(p)
             elif p.exists():
                 p.unlink()
+            cache_bytes += size
         except OSError:
+            cache_bytes += max(0, size - dir_size(p))
             failed.append(str(p))
     cover_bytes, cover_failed = _delete_covers(cfg, db, video, video_id)
-    size += cover_bytes
     failed.extend(cover_failed)
     if failed:
         # Keeping the record is safer than "media gone, row deleted": a retry
@@ -139,16 +180,17 @@ def purge_video(cfg: Config, db: Database, video_id: str, *, reason: str = "expi
             db.clear_video_analysis(video_id)
         except Exception:
             pass
-        return {"video_id": video_id, "title": video.get("title"), "bytes": size,
-                "reason": reason, "error": "files_busy", "failed_paths": failed}
+        return {"video_id": video_id, "title": video.get("title"), "bytes": cache_bytes + cover_bytes,
+                "cache_bytes": cache_bytes, "reason": reason, "error": "files_busy", "failed_paths": failed}
     db.delete_video(video_id)
-    return {"video_id": video_id, "title": video.get("title"), "bytes": size, "reason": reason}
+    return {"video_id": video_id, "title": video.get("title"), "bytes": cache_bytes + cover_bytes,
+            "cache_bytes": cache_bytes, "reason": reason}
 
 
 def _media_released_warning() -> list[dict[str, Any]]:
     return [{"code": "MEDIA_RELEASED", "severity": "info",
              "message": "原片和抽帧已按缓存策略清理；转写和画面文字仍可搜索。",
-             "remedy": "需要看原片或取帧时，重新 ingest 一次即可恢复。"}]
+             "remedy": "需要看画面时，重新提交视频链接；若原片版本一致，可继续用已有分析结果。"}]
 
 
 def _frames_released_warning() -> list[dict[str, Any]]:
@@ -166,46 +208,46 @@ def release_media(cfg: Config, db: Database, video_id: str, *, reason: str = "ex
     rows stay, and anything that needs pixels says the media must be fetched
     again.
     """
-    video = db.get_video(video_id) or {}
-    if not video:
-        return {"video_id": video_id, "bytes": 0, "exists": False}
-    if video.get("status") == "analyzing":
-        return {"video_id": video_id, "title": video.get("title"), "bytes": 0,
-                "reason": reason, "error": "busy_analyzing"}
-    media = cfg.media_dir / video_id
-    derived = cfg.derived_dir / video_id
-    paths = [p for p in (media, derived) if _within(p, cfg.home)]
-    size = sum(dir_size(p) for p in paths)
-    failed: list[str] = []
-    for p in paths:
-        if not p.exists():
-            continue
-        try:
-            shutil.rmtree(p)
-        except OSError:
-            failed.append(str(p))
-    cover_bytes, cover_failed = _delete_covers(cfg, db, video, video_id)
-    size += cover_bytes
-    failed.extend(cover_failed)
-    if failed:
-        # Retry next gc instead of claiming the media is gone.
-        return {"video_id": video_id, "title": video.get("title"), "bytes": size,
-                "reason": reason, "error": "files_busy", "failed_paths": failed}
-    # A local file is the user's own: releasing cache never deletes it. Only a
-    # downloaded media file can actually disappear, so only then is the record
-    # marked as needing a re-ingest for pixels.
-    source_path = str(video.get("source_path") or "")
-    source_removed = bool(source_path) and _within(Path(source_path), cfg.media_dir) \
-        and not Path(source_path).exists()
-    marker = now_iso() if source_removed else None
-    warning = _media_released_warning() if source_removed else _frames_released_warning()
-    try:
-        db.set_media_released(video_id, marker, json.dumps(warning, ensure_ascii=False))
-    except Exception:
-        pass
-    return {"video_id": video_id, "title": video.get("title"), "bytes": size,
-            "media": str(media), "derived": str(derived), "reason": reason,
-            "source_removed": source_removed}
+    with db.conn:
+        # A running rebuild registers its video ID before touching these cache
+        # paths. Recheck while holding the writer slot so that claim and release
+        # cannot cross between the status read and file deletion.
+        db.conn.execute("BEGIN IMMEDIATE")
+        video = db.get_video(video_id)
+        if not video:
+            return {"video_id": video_id, "bytes": 0, "exists": False}
+        if video.get("status") == "analyzing" or _active_media_ids(db, video_id):
+            return {"video_id": video_id, "title": video.get("title"), "bytes": 0,
+                    "reason": reason, "error": "busy_analyzing"}
+        cache_bytes = 0
+        failed: list[str] = []
+        for target in _video_cache_paths(cfg, video):
+            if not target.is_dir():
+                continue
+            size = dir_size(target)
+            try:
+                shutil.rmtree(target)
+                cache_bytes += size
+            except OSError:
+                cache_bytes += max(0, size - dir_size(target))
+                failed.append(str(target))
+        cover_bytes, cover_failed = _delete_covers(cfg, db, video, video_id)
+        failed.extend(cover_failed)
+        result = {"video_id": video_id, "title": video.get("title"), "bytes": cache_bytes + cover_bytes,
+                  "cache_bytes": cache_bytes, "reason": reason}
+        if failed:
+            # Retry next gc instead of claiming the media is gone.
+            return {**result, "error": "files_busy", "failed_paths": failed}
+        source_path = str(video.get("source_path") or "")
+        source_removed = (video.get("source_kind") == "url" and bool(source_path)
+                          and _within(Path(source_path), cfg.media_dir) and not Path(source_path).exists())
+        marker = now_iso() if source_removed else None
+        warnings = [w for w in (video.get("warnings") or [])
+                    if not isinstance(w, dict) or w.get("code") not in {"MEDIA_RELEASED", "FRAMES_RELEASED"}]
+        warnings.extend(_media_released_warning() if source_removed else _frames_released_warning())
+        db.set_media_released(video_id, marker, json.dumps(warnings, ensure_ascii=False))
+        return {**result, "media": str(cfg.media_dir / video_id),
+                "derived": str(cfg.derived_dir / video_id), "source_removed": source_removed}
 
 
 def plan_cache_purge(cfg: Config, db: Database, *, older_than_days: int | None = None,
@@ -216,11 +258,12 @@ def plan_cache_purge(cfg: Config, db: Database, *, older_than_days: int | None =
     The plan names videos whose media is old/large; the caller decides whether to
     release only the media (default) or delete the record too (--purge).
     """
-    rows = db.all(
-        "SELECT id,title,created_at,updated_at FROM videos "
+    active = _active_media_ids(db)
+    rows = [row for row in db.all(
+        "SELECT id,title,created_at,updated_at,source_kind,source_path FROM videos "
         "WHERE status NOT IN ('new','queued','running','ingesting','analyzing') "
         "ORDER BY COALESCE(updated_at,created_at)"
-    )
+    ) if row["id"] not in active]
     if not rows:
         return []
     expired: list[dict[str, Any]] = []
@@ -232,7 +275,7 @@ def plan_cache_purge(cfg: Config, db: Database, *, older_than_days: int | None =
     seen: set[str] = set()
     for row in expired:
         vid = row["id"]
-        size = dir_size(cfg.media_dir / vid) + dir_size(cfg.derived_dir / vid)
+        size = sum(dir_size(p) for p in _video_cache_paths(cfg, row))
         # A record whose media was already released has nothing left to free, so
         # the media plan skips it. A purge is different: it removes the knowledge
         # itself, which still exists after a release.
@@ -250,7 +293,7 @@ def plan_cache_purge(cfg: Config, db: Database, *, older_than_days: int | None =
             vid = row["id"]
             if vid in seen:
                 continue
-            size = dir_size(cfg.media_dir / vid) + dir_size(cfg.derived_dir / vid)
+            size = sum(dir_size(p) for p in _video_cache_paths(cfg, row))
             if size <= 0:
                 continue
             chosen.append({"video_id": vid, "title": row.get("title"), "bytes": size, "reason": "capacity"})
@@ -297,10 +340,12 @@ def _delete_covers(cfg: Config, db: Database, video: dict[str, Any],
         covers = [cfg.covers_dir / name for name in names]
         covers.extend(cfg.covers_dir.glob(video_id + "*"))
         for cover in covers:
-            if not cover.is_file() or not _within(cover, cfg.home):
+            if (cover.is_symlink() or not cover.is_file()
+                    or cover.resolve() != cfg.home.resolve() / cfg.covers_dir.name / cover.name):
                 continue
-            freed += cover.stat().st_size
+            size = cover.stat().st_size
             cover.unlink()
+            freed += size
     except OSError:
         failed.append(str(cfg.covers_dir / video_id))
     return freed, failed
@@ -326,12 +371,12 @@ def evict_video(cfg: Config, db: Database, video_id: str, *, dry_run: bool = Fal
     video = db.get_video(video_id)
     if not video:
         return {"video_id": video_id, "bytes": 0, "exists": False}
-    if video.get("status") == "analyzing":
+    if video.get("status") == "analyzing" or _active_media_ids(db, video_id):
         return {"video_id": video_id, "title": video.get("title"), "bytes": 0,
                 "reason": reason, "error": "busy_analyzing"}
     media = cfg.media_dir / video_id
     derived = cfg.derived_dir / video_id
-    paths = [p for p in (media, derived) if _within(p, cfg.home)]
+    paths = _video_cache_paths(cfg, video)
     size = sum(dir_size(p) for p in paths)
     if not dry_run:
         failed: list[str] = []
@@ -362,10 +407,11 @@ def evict_video(cfg: Config, db: Database, video_id: str, *, dry_run: bool = Fal
 
 def plan_evictions(cfg: Config, db: Database, *, older_than_days: int | None = None,
                   max_gb: float | None = None) -> list[dict[str, Any]]:
-    rows = db.all(
-        "SELECT id,title,created_at FROM videos WHERE source_kind='url' "
+    active = _active_media_ids(db)
+    rows = [row for row in db.all(
+        "SELECT id,title,created_at,source_kind,source_path FROM videos WHERE source_kind='url' "
         "AND status NOT IN ('new','queued','running','ingesting','analyzing') ORDER BY created_at"
-    )
+    ) if row["id"] not in active]
     if not rows:
         return []
     eligible = rows
@@ -381,7 +427,7 @@ def plan_evictions(cfg: Config, db: Database, *, older_than_days: int | None = N
             if current <= budget:
                 break
             vid = row["id"]
-            size = dir_size(cfg.media_dir / vid) + dir_size(cfg.derived_dir / vid)
+            size = sum(dir_size(p) for p in _video_cache_paths(cfg, row))
             if size <= 0:
                 continue
             plan.append({"video_id": vid, "title": row.get("title"), "bytes": size,
@@ -391,7 +437,7 @@ def plan_evictions(cfg: Config, db: Database, *, older_than_days: int | None = N
     elif older_than_days is not None:
         for row in eligible:
             vid = row["id"]
-            size = dir_size(cfg.media_dir / vid) + dir_size(cfg.derived_dir / vid)
+            size = sum(dir_size(p) for p in _video_cache_paths(cfg, row))
             if size > 0:
                 plan.append({"video_id": vid, "title": row.get("title"), "bytes": size,
                              "media": str(cfg.media_dir / vid), "derived": str(cfg.derived_dir / vid),

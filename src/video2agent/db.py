@@ -10,7 +10,7 @@ from uuid import uuid4
 from .text import tokens_for_search
 from .util import now_iso, pid_alive, stable_id
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = r"""
 PRAGMA journal_mode=WAL;
@@ -133,6 +133,13 @@ CREATE TABLE IF NOT EXISTS evidence (
   score REAL,
   payload_json TEXT,
   created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evidence_frame_ocr (
+  video_id TEXT NOT NULL,
+  frame_key TEXT NOT NULL,
+  tracks_json TEXT NOT NULL,
+  PRIMARY KEY (video_id, frame_key)
 );
 
 CREATE TABLE IF NOT EXISTS collections (
@@ -283,7 +290,7 @@ class Database:
     def all(self, sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in self.conn.execute(sql, tuple(params)).fetchall()]
 
-    def upsert_video(self, data: dict[str, Any]) -> dict[str, Any]:
+    def upsert_video(self, data: dict[str, Any], *, commit: bool = True) -> dict[str, Any]:
         now = now_iso()
         data = dict(data)
         data.setdefault("created_at", now)
@@ -296,7 +303,8 @@ class Database:
         sql = f"INSERT INTO videos ({','.join(fields)}) VALUES ({placeholders}) ON CONFLICT(id) DO UPDATE SET {updates}"
         self.conn.execute(sql, [data.get(f) for f in fields])
         self._refresh_video_fts(data["id"])
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return self.get_video(data["id"]) or data
 
     def _refresh_video_fts(self, video_id: str) -> None:
@@ -329,11 +337,14 @@ class Database:
         return len(missing)
 
     def search_videos(self, match_query: str, limit: int = 10,
-                  video_ids: list[str] | None = None) -> list[dict[str, Any]]:
+                      video_ids: list[str] | None = None, *,
+                      ready_only: bool = False) -> list[dict[str, Any]]:
         sql = ["SELECT v.id, v.title, v.duration_ms, v.platform, bm25(video_fts) AS rank "
                "FROM video_fts JOIN videos v ON v.id=video_fts.video_id "
                "WHERE video_fts MATCH ?"]
         params: list[Any] = [match_query]
+        if ready_only:
+            sql.append("AND v.status='ready'")
         if video_ids:
             sql.append("AND video_fts.video_id IN (%s)" % ",".join("?" * len(video_ids)))
             params.extend(video_ids)
@@ -347,6 +358,19 @@ class Database:
             row["meta"] = json.loads(row.pop("meta_json") or "{}")
             row["warnings"] = json.loads(row.pop("warnings_json") or "[]")
         return row
+
+    def active_caption_job(self, video: dict[str, Any] | None) -> str | None:
+        if not video or video.get("status") != "analyzing":
+            return None
+        job_id = (video.get("meta") or {}).get("transcript_ready_job")
+        if not isinstance(job_id, str) or not job_id:
+            return None
+        job = self.get_job(job_id)
+        if not job or job["video_id"] != video["id"] or job["state"] != "running":
+            return None
+        if job.get("pid") and not pid_alive(int(job["pid"])):
+            return None
+        return job_id
 
     def find_video_by_source(self, source_uri: str) -> dict[str, Any] | None:
         row = self.one("SELECT * FROM videos WHERE source_uri = ? ORDER BY created_at DESC LIMIT 1", [source_uri])
@@ -479,12 +503,18 @@ class Database:
     def list_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.all("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", [limit])
 
-    def clear_video_analysis(self, video_id: str) -> None:
-        for table in ("segments", "scenes", "frames", "ocr_tracks", "visual_segments", "evidence", "ocr_anchors"):
+    def clear_video_analysis(self, video_id: str, *, keep_evidence: bool = False,
+                             commit: bool = True) -> None:
+        tables = ["segments", "scenes", "frames", "ocr_tracks", "visual_segments", "ocr_anchors",
+                  "evidence_frame_ocr"]
+        if not keep_evidence:
+            tables.append("evidence")
+        for table in tables:
             self.conn.execute(f"DELETE FROM {table} WHERE video_id=?", [video_id])
         for table in ("segment_fts", "ocr_fts"):
             self.conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE video_id=?)", [video_id])
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def delete_video(self, video_id: str) -> None:
         """Remove a cache entry completely; the caller owns its files."""
@@ -494,19 +524,21 @@ class Database:
         self.conn.execute("DELETE FROM videos WHERE id=?", [video_id])
         self.conn.commit()
 
-    def set_ocr_anchors(self, video_id: str, anchors: list[int]) -> None:
+    def set_ocr_anchors(self, video_id: str, anchors: list[int], *, commit: bool = True) -> None:
         """Remember which moments OCR read, so a re-ingest can read the same ones."""
         values = sorted({int(a) for a in anchors if int(a) >= 0})
         if not values:
             self.conn.execute("DELETE FROM ocr_anchors WHERE video_id=?", [video_id])
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
             return
         self.conn.execute(
             "INSERT INTO ocr_anchors (video_id, anchors_json, created_at) VALUES (?,?,?) "
             "ON CONFLICT(video_id) DO UPDATE SET anchors_json=excluded.anchors_json",
             [video_id, json.dumps(values), now_iso()],
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def get_ocr_anchors(self, video_id: str) -> list[int]:
         row = self.one("SELECT anchors_json FROM ocr_anchors WHERE video_id=?", [video_id])
@@ -518,7 +550,7 @@ class Database:
             return []
         return sorted({int(v) for v in values if isinstance(v, (int, float))})
 
-    def insert_segments(self, video_id: str, segments: list[dict[str, Any]]) -> int:
+    def insert_segments(self, video_id: str, segments: list[dict[str, Any]], *, commit: bool = True) -> int:
         count = 0
         for seg in segments:
             text = (seg.get("text") or "").strip()
@@ -537,19 +569,21 @@ class Database:
             if tokens:
                 self.conn.execute("INSERT INTO segment_fts (tokens,segment_id,video_id) VALUES (?,?,?)", [tokens, seg_id, video_id])
             count += 1
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return count
 
-    def insert_scenes(self, video_id: str, scenes: list[dict[str, Any]]) -> int:
+    def insert_scenes(self, video_id: str, scenes: list[dict[str, Any]], *, commit: bool = True) -> int:
         for s in scenes:
             self.conn.execute(
                 "INSERT INTO scenes (video_id,start_ms,end_ms,cut_score,keyframe_ms) VALUES (?,?,?,?,?)",
                 [video_id, int(s.get("start_ms", 0)), int(s.get("end_ms", 0)), s.get("cut_score"), s.get("keyframe_ms")],
             )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return len(scenes)
 
-    def insert_frames(self, video_id: str, frames: list[dict[str, Any]]) -> int:
+    def insert_frames(self, video_id: str, frames: list[dict[str, Any]], *, commit: bool = True) -> int:
         for f in frames:
             self.conn.execute(
                 """INSERT INTO frames
@@ -562,10 +596,11 @@ class Database:
                     json.dumps(f.get("meta", {}), ensure_ascii=False) if f.get("meta") else None,
                 ],
             )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return len(frames)
 
-    def insert_ocr_tracks(self, video_id: str, tracks: list[dict[str, Any]]) -> int:
+    def insert_ocr_tracks(self, video_id: str, tracks: list[dict[str, Any]], *, commit: bool = True) -> int:
         for t in tracks:
             cur = self.conn.execute(
                 "INSERT INTO ocr_tracks (video_id,text,start_ms,end_ms,bbox_json,confidence,stability,change_type) VALUES (?,?,?,?,?,?,?,?)",
@@ -578,10 +613,11 @@ class Database:
             tokens = t.get("tokens") or ""
             if tokens:
                 self.conn.execute("INSERT INTO ocr_fts (tokens,track_id,video_id) VALUES (?,?,?)", [tokens, cur.lastrowid, video_id])
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return len(tracks)
 
-    def insert_visual_segments(self, video_id: str, segments: list[dict[str, Any]]) -> int:
+    def insert_visual_segments(self, video_id: str, segments: list[dict[str, Any]], *, commit: bool = True) -> int:
         for s in segments:
             # `reason` explains an `unknown` label ("text_unmeasured" / "no_frame").
             # It has no column, and dropping it made every unknown segment look the
@@ -594,8 +630,35 @@ class Database:
                 [video_id, int(s.get("start_ms", 0)), int(s.get("end_ms", 0)), s.get("label", "unknown"),
                  float(s.get("score", 0)), json.dumps(signals, ensure_ascii=False)],
             )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return len(segments)
+
+    def get_evidence_frame_ocr(self, video_id: str, frame_key: str) -> list[dict[str, Any]] | None:
+        row = self.one("SELECT tracks_json FROM evidence_frame_ocr WHERE video_id=? AND frame_key=?",
+                       [video_id, frame_key])
+        return json.loads(row["tracks_json"]) if row else None
+
+    def save_evidence_frame_ocr(self, video: dict[str, Any], frame_key: str, pts_ms: int,
+                                tracks: list[dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            video_id = video["id"]
+            current = self.get_video(video_id)
+            if not current or (current.get("sha256"), current["meta"].get("analysis_run")) != (
+                video.get("sha256"), (video.get("meta") or {}).get("analysis_run"),
+            ):
+                return
+            inserted = self.conn.execute(
+                "INSERT OR IGNORE INTO evidence_frame_ocr VALUES (?,?,?)",
+                [video_id, frame_key, json.dumps(tracks, ensure_ascii=False)],
+            )
+            if not inserted.rowcount:
+                return
+            indexed = {(r["start_ms"], r["text"]) for r in self.get_ocr_tracks(video_id, pts_ms, pts_ms + 1)}
+            self.insert_ocr_tracks(video_id, [r for r in tracks if (r["start_ms"], r["text"]) not in indexed],
+                                   commit=False)
+            self.set_ocr_anchors(video_id, [*self.get_ocr_anchors(video_id), pts_ms], commit=False)
 
     def get_segments(self, video_id: str, start_ms: int | None = None, end_ms: int | None = None,
                      limit: int = 500) -> list[dict[str, Any]]:
@@ -750,10 +813,13 @@ class Database:
 
     def search_segments(self, match_query: str, video_id: str | None = None, limit: int = 20,
                         video_ids: list[str] | None = None,
-                        start_ms: int | None = None, end_ms: int | None = None) -> list[dict[str, Any]]:
+                        start_ms: int | None = None, end_ms: int | None = None, *,
+                        ready_only: bool = False) -> list[dict[str, Any]]:
         sql = ("SELECT s.*, bm25(segment_fts) AS rank FROM segment_fts "
                "JOIN segments s ON s.id=segment_fts.segment_id WHERE segment_fts MATCH ?")
         params: list[Any] = [match_query]
+        if ready_only:
+            sql += " AND EXISTS (SELECT 1 FROM videos v WHERE v.id=s.video_id AND v.status='ready')"
         if video_id:
             sql += " AND segment_fts.video_id=?"
             params.append(video_id)
@@ -779,10 +845,13 @@ class Database:
 
     def search_ocr(self, match_query: str, video_id: str | None = None, limit: int = 20,
                    video_ids: list[str] | None = None,
-                   start_ms: int | None = None, end_ms: int | None = None) -> list[dict[str, Any]]:
+                   start_ms: int | None = None, end_ms: int | None = None, *,
+                   ready_only: bool = False) -> list[dict[str, Any]]:
         sql = ("SELECT o.*, bm25(ocr_fts) AS rank FROM ocr_fts "
                "JOIN ocr_tracks o ON o.id=ocr_fts.track_id WHERE ocr_fts MATCH ?")
         params: list[Any] = [match_query]
+        if ready_only:
+            sql += " AND EXISTS (SELECT 1 FROM videos v WHERE v.id=o.video_id AND v.status='ready')"
         if video_id:
             sql += " AND ocr_fts.video_id=?"
             params.append(video_id)
@@ -802,16 +871,18 @@ class Database:
             r["bbox"] = json.loads(r.pop("bbox_json") or "null")
         return rows
 
-    def add_collection(self, name: str) -> str:
+    def add_collection(self, name: str, *, commit: bool = True) -> str:
         cid = stable_id("col", name)
         self.conn.execute("INSERT OR IGNORE INTO collections (id,name,created_at) VALUES (?,?,?)", [cid, name, now_iso()])
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return cid
 
-    def add_to_collection(self, collection: str, video_id: str) -> None:
-        cid = self.add_collection(collection)
+    def add_to_collection(self, collection: str, video_id: str, *, commit: bool = True) -> None:
+        cid = self.add_collection(collection, commit=False)
         self.conn.execute("INSERT OR IGNORE INTO collection_videos (collection_id,video_id) VALUES (?,?)", [cid, video_id])
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def collection_videos(self, collection: str) -> list[dict[str, Any]]:
         return self.all(

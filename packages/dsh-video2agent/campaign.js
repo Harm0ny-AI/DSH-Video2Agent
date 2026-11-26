@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 export function createCampaignManager({ home, startShortlistJobs, readJobSidecar }) {
+  const inFlight = new Map()
   const dir = () => path.join(home(), 'campaigns')
   const file = (id) => path.join(dir(), String(id) + '.json')
   function read(id) {
@@ -50,6 +51,15 @@ export function createCampaignManager({ home, startShortlistJobs, readJobSidecar
       items: campaign.items.map(row),
     }
   }
+  function failPending(campaign, code, message) {
+    for (const item of campaign.items.filter((item) => item.state === 'queued')) {
+      item.state = 'failed'
+      item.error_code = code
+      item.error_message = message
+    }
+    campaign.status = 'failed'
+    campaign.error_message = message
+  }
   async function startWave(campaign) {
     const wave = campaign.items.filter((x) => x.state === 'queued').slice(0, Math.max(1, campaign.process_limit))
     if (!wave.length) {
@@ -58,16 +68,24 @@ export function createCampaignManager({ home, startShortlistJobs, readJobSidecar
       write(campaign)
       return campaign
     }
-    let started = { jobs: [], failed: [] }
+    let started
     try {
       // Waves belong to the campaign's session: without it the anon idempotency
       // key made two conversations' campaigns reuse each other's jobs.
       started = await startShortlistJobs(wave.map((x) => ({ ...x, checked: true })), undefined, campaign.session_id || '')
     } catch (e) {
-      for (const item of wave) {
-        item.state = 'failed'
-        item.error_message = String(e && e.message || e).slice(0, 300)
-      }
+      failPending(campaign, 'E_INGEST', String(e && e.message || e).slice(0, 300))
+      campaign.updated_at = new Date().toISOString()
+      write(campaign)
+      return campaign
+    }
+    const unavailable = started.failed[0]
+    if (!started.jobs.length && started.failed.length === wave.length && unavailable
+      && ['E_SPAWN', 'E_FFMPEG'].includes(unavailable.error_code)
+      && started.failed.every((item) => item.error_code === unavailable.error_code)) {
+      // A missing engine/dependency affects the entire campaign. A video-specific
+      // failure leaves the next wave queued and eligible to advance.
+      failPending(campaign, unavailable.error_code, unavailable.error_message || 'ingest failed')
       campaign.updated_at = new Date().toISOString()
       write(campaign)
       return campaign
@@ -160,8 +178,7 @@ export function createCampaignManager({ home, startShortlistJobs, readJobSidecar
       }
     }
     if (allowStart && !campaign.items.some((x) => x.state === 'running') && campaign.items.some((x) => x.state === 'queued')) {
-      await startWave(campaign)
-      changed = true
+      return startWave(campaign)
     }
     if (!campaign.items.some((x) => ['running', 'queued'].includes(x.state))) {
       campaign.status = 'complete'
@@ -205,24 +222,26 @@ export function createCampaignManager({ home, startShortlistJobs, readJobSidecar
       items,
     }
     write(campaign)
-    await startWave(campaign)
-    return campaign
+    const promise = startWave(campaign).finally(() => inFlight.delete(campaign.id))
+    inFlight.set(campaign.id, { promise, advances: true })
+    return promise
   }
-  const inFlight = new Map()
   function tick(id) {
     // Two pollers (client route + model command) must not start the same wave
     // twice. Reuse the in-flight promise instead of duplicating jobs.
-    if (inFlight.has(id)) return inFlight.get(id)
+    const pending = inFlight.get(id)
+    if (pending) return pending.advances ? pending.promise : pending.promise.then(() => tick(id))
     const promise = tickInner(id, true).finally(() => inFlight.delete(id))
-    inFlight.set(id, promise)
+    inFlight.set(id, { promise, advances: true })
     return promise
   }
   function refresh(id) {
     // Read-only poll: reconcile finished rows but never spawn a new wave. The
     // GET route uses this so prefetch/refresh cannot start downloads.
-    if (inFlight.has(id)) return inFlight.get(id)
+    const pending = inFlight.get(id)
+    if (pending) return pending.promise
     const promise = tickInner(id, false).finally(() => inFlight.delete(id))
-    inFlight.set(id, promise)
+    inFlight.set(id, { promise, advances: false })
     return promise
   }
   function abort(id, message) {

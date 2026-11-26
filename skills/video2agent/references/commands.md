@@ -5,11 +5,11 @@ verbs onto them, so a script can use either.
 
 | verb | key params | CLI |
 |---|---|---|
-| `find` | `query`, `uploader`, `after`, `before`, `covers`, `limit`; `scope:"library"`; `url` | `discover` / `search` / `resolve` |
-| `ingest` | `source`; `video_ids` + `default_selected` + `primary`; `job_id` + `wait_ms`; `campaign_id` | `ingest` / `shortlist` / `jobs` / `campaign` |
+| `find` | `query`, `uploader`, `after`, `before`, `covers`, `limit`; `scope:"library"` with optional `start` / `end`; `url` | `discover` / `search` / `resolve` |
+| `ingest` | `source`; `video_ids` + `default_selected` + `primary`; `job_id` + `wait_ms` (optional `scope:"transcript"`); `campaign_id` | `ingest` / `shortlist` / `jobs` / `campaign` |
 | `outline` | `video_id`, `detail` (`digest` \| `overview` \| `map`), `count`, `max_chars`, `start`, `end` | `digest` / `overview` / `map` |
 | `read` | `video_id`, `scope` (`transcript` \| `compare`), `start`, `end`, `max_chars`, `aspects` | `transcript` / `compare` |
-| `evidence` | `video_id`, `at`, `images`, `max_images`, `ocr_tiles` | `evidence` |
+| `evidence` | `video_id`, `at` (time or a saved `ev_…` ID), `images`, `max_images`, `ocr_tiles` | `evidence` |
 | `frames` | `video_id`, `at` / `start`+`end`, `count`, `fps`, `max`, `mode`, `sheet`, `windows`, `crop`, `scale`; `view:"candidates"` / `"ocr"` | `frames` / `candidates` / `ocr-window` |
 | `perceive` | `video_id`, `start`, `end`, `fps`, `max_frames`, `brief` | `perceive` |
 | `admin` | `admin_action` (`list` \| `export` \| `ocr-index` \| `account` \| `douyin` \| `doctor`), `video_id`, `format`, `account_action`, `folder_id`, `days`; douyin: `douyin_action`, `douyin_url`, `douyin_urls`, `douyin_tab`, `limit` | `list` / `export` / `ocr-index` / `account` / `douyin` / `doctor` |

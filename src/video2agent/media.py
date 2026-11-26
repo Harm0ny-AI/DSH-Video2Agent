@@ -327,6 +327,9 @@ def audio_profile(path: str | Path, *, silence_db: float = -30.0, min_silence_s:
     body["has_audio"] = True
     res = run([
         _ffmpeg(), "-hide_banner", "-nostdin", "-v", "info", "-i", str(p),
+        # The null muxer selects video too unless it is disabled. A digest only
+        # needs the audio stream for these filters.
+        "-vn", "-sn", "-dn",
         "-af", f"silencedetect=noise={silence_db}dB:d={min_silence_s},volumedetect",
         "-f", "null", "-",
     ], timeout=900)

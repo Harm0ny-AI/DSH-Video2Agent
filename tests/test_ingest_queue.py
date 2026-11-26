@@ -135,11 +135,13 @@ class RepeatIngestTests(unittest.TestCase):
             # input; seed the row with the same id the repeat ingest will use.
             from video2agent.links import canonical_video_url
             vid = stable_id("vid", canonical_video_url("BV1xx411c7mD"))
+            source = Path(tmp) / "cached.mp4"
+            source.write_bytes(b"cached media")
             db = Database(cfg.db_path)
             try:
                 db.upsert_video({
                     "id": vid, "source_kind": "url", "source_uri": url,
-                    "source_path": str(Path(tmp) / "missing.mp4"), "title": "cached",
+                    "source_path": str(source), "title": "cached",
                     "duration_ms": 1000, "status": "ready",
                 })
             finally:

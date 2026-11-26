@@ -65,12 +65,10 @@ A pasted URL → `find` with `url` (title/cover/duration, no download), then
 
 ### 2. Ingest
 
-`ingest` with `source` (local path or URL) returns a job id. Never ingest a
-`find` candidate by URL again; the shortlist already started it. Must wait?
-`ingest` with `job_id` and `wait_ms` — once, one job (clamped to 90s; a program
-dies near 120s: no loops over several jobs). `queued` = the ingest slot is busy
-and the job has not started; do not poll it again. Wrong transcript language →
-`ingest` with `language`.
+`ingest(source)` starts a video. Reuse shortlist jobs. Wait with `job_id` and
+`wait_ms` (one job, max 90s; don't loop on `queued`). For speech use `scope:"transcript"`;
+`transcript_ready:true` lets `read` use that `video_id` immediately. For a full
+review wait for completion. Wrong transcript language → `ingest(language)`.
 
 ### 3. Read
 

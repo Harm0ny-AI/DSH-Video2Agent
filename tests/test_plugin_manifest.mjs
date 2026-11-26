@@ -180,8 +180,8 @@ function fakeCtx({ withWebServer = false, provideWebServer = null } = {}) {
   const { ctx: defaultCtx } = fakeCtx()
   mod.apply(defaultCtx, {})
   assert.deepEqual(JSON.parse(mod.__test.cacheCleanupArgs()[4]), {
-    cacheExpire: true, cacheDays: 7, cacheLimitEnabled: false, cacheLimitGb: 20,
-  }, 'a fresh row keeps the existing 7-day default behaviour')
+    cacheExpire: true, cacheDays: 7, cacheLimitEnabled: true, cacheLimitGb: 20,
+  }, 'a fresh row enables the existing 20 GB media limit alongside seven-day expiry')
 }
 
 // --- Managed engine auto-update contract -------------------------------------

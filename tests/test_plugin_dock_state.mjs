@@ -320,6 +320,63 @@ async function runBatch(sessionId, jobId, terminalState) {
   debug.__video2agentClearQueue(sid)
 }
 
+// Opening an old chat restores the original "running" rows. Neither a failed
+// status read nor an old Host snapshot proves that any work is still active.
+{
+  for (const fromHost of [false, true]) {
+    const sid = 'restored-unverified-' + fromHost
+    const createdAt = clock.t - 16 * 86400000
+    const jobs = [{ job_id: 'job_stale_' + fromHost, title: '历史视频', state: 'running' }]
+    if (!fromHost) storage.set('video2agent.queue.' + sid, JSON.stringify({ createdAt, jobs }))
+    fetchImpl = async (url) => {
+      if (url.includes('/api/video2agent/queue') && fromHost) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, queue: { started_at: createdAt, jobs } }) }
+      }
+      if (url.includes('/api/video2agent/job?')) return { ok: false, status: fromHost ? 404 : 503 }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    }
+    const inst = mount(table, { session: { id: sid, running: false } })
+    await flush()
+    expect(textOf(inst.tree) === '', 'an unverified historical queue rendered: ' + textOf(inst.tree))
+    expect(!debug.__video2agentLiveState().sessions.some(([id]) => id === sid),
+      'the historical Host snapshot published an unverified live card')
+    await advance(5100)
+    expect(textOf(inst.tree) === '', 'an unverified historical queue returned after retries')
+    unmount(inst)
+    debug.__video2agentClearQueue(sid)
+  }
+}
+
+// A transient failure can recover. Keep an unverified neighbour hidden while
+// the independently confirmed background job stays visible.
+{
+  const sid = 'restored-verified-job'
+  const current = { job_id: 'job_verified', title: '后台在跑', state: 'running' }
+  const unknown = { job_id: 'job_not_verified', title: '未核实的旧视频', state: 'running' }
+  storage.set('video2agent.queue.' + sid, JSON.stringify({ createdAt: clock.t - 3600000, jobs: [unknown, current] }))
+  let verified = false
+  fetchImpl = async (url) => {
+    if (url.includes('/api/video2agent/job?')) {
+      if (verified && url.includes('id=job_verified&')) return jobPayload(current.job_id, 'running')
+      return { ok: false, status: 503 }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const inst = mount(table, { session: { id: sid, running: false } })
+  await flush()
+  expect(textOf(inst.tree) === '', 'the queue became visible before verification')
+  verified = true
+  await advance(2600)
+  expect(textOf(inst.tree).includes('后台在跑'), 'a verified background job did not appear')
+  expect(!textOf(inst.tree).includes('未核实的旧视频'), 'an unrelated, unverified row appeared')
+  collectByAttr(inst.tree, 'data-vp-queue-collapse')[0].props.onClick()
+  await flush()
+  expect(collectByAttr(inst.tree, 'data-vp-queue-pill-job')[0].props['data-vp-queue-pill-job'] === current.job_id,
+    'the collapsed table showed the unverified job')
+  unmount(inst)
+  debug.__video2agentClearQueue(sid)
+}
+
 // A narrower, newer client row must not hide the batch the Host started. This
 // was the reported "only one card for five minutes" while ten videos ran.
 {
@@ -1255,33 +1312,75 @@ expect(narrowMedia.includes('[data-vp-queue-ring-wrap],[data-vp-queue-ring]{widt
     unmount(page)
   }
 
-  // C. restart_required: say what to do, pause the engine-update nudge, keep the
-  // explicit manual update action working.
+  // C. restart_required with an older engine: only the restart notice. No
+  // manual update button and no engine-update nudge while the reload is pending.
   {
-    const posts = []
-    serve((method, opts) => {
-      if (method === 'POST') {
-        posts.push(JSON.parse(String((opts && opts.body) || '{}')))
-        return payload({ ok: true, output: 'ok', status: basePayload({
-          cli: { ok: true, detail: 'video2agent 0.3.6', version: '0.3.6', latest: '0.3.6', update_available: false },
-          canInstall: { cli: false, updateCli: false, ffmpeg: false, ocr: false, browser: false },
-          engine_update: { state: 'ready', target: '0.3.6' },
-        }) })
-      }
+    let posts = 0
+    serve((method) => {
+      if (method === 'POST') { posts += 1; return payload({ ok: true }) }
       return payload(basePayload({ plugin: { loaded: '0.3.5', installed: '0.3.6', restart_required: true } }))
     })
     const page = mount(settingsPage, {})
     await flush()
-    let text = textOf(page.tree)
+    const text = textOf(page.tree)
     expect(text.includes('插件已更新，重开 DSH 后生效'), 'restart notice missing: ' + text.slice(0, 300))
     expect(!text.includes('视频引擎可更新'), 'a pending plugin reload still nudged an engine update')
-    const manual = findByAttr(page.tree, 'data-vp-env-engine-manual')
-    expect(manual, 'a pending plugin reload removed the manual update button')
-    manual.props.onClick()
+    expect(!findByAttr(page.tree, 'data-vp-env-engine-manual'), 'an older engine still shows the manual update button during restart')
+    expect(posts === 0, 'restart pending offered an engine update action')
+    unmount(page)
+  }
+
+  // C2. Restart pending, engine already at the target: no manual update button
+  // and no old update nudge (the restart notice is the only extra line).
+  {
+    serve(() => payload(basePayload({
+      plugin: { loaded: '0.3.5', installed: '0.3.6', restart_required: true },
+      cli: { ok: true, detail: 'video2agent 0.3.6', version: '0.3.6', latest: '0.3.6', update_available: true },
+      canInstall: { cli: false, updateCli: true, ffmpeg: false, ocr: false, browser: false },
+      engine_update: { state: 'ready', target: '0.3.6' },
+    })))
+    const page = mount(settingsPage, {})
     await flush()
-    expect(posts.length === 1 && posts[0].action === 'update-cli', 'manual update did not POST update-cli: ' + JSON.stringify(posts))
-    text = textOf(page.tree)
-    expect(text.includes('视频引擎已更新至 0.3.6'), 'manual update result is not shown: ' + text.slice(0, 300))
+    const text = textOf(page.tree)
+    expect(text.includes('插件已更新，重开 DSH 后生效'), 'restart notice missing: ' + text.slice(0, 300))
+    expect(!findByAttr(page.tree, 'data-vp-env-engine-manual'), 'a current engine still shows the manual update button')
+    expect(!text.includes('视频引擎可更新'), 'a current engine still shows the update nudge: ' + text.slice(0, 300))
+    unmount(page)
+  }
+
+  // C3. Restart pending, engine current, but the Host still carries a failed
+  // marker: the stale failure, retry and manual update all stay hidden.
+  {
+    serve(() => payload(basePayload({
+      plugin: { loaded: '0.3.5', installed: '0.3.6', restart_required: true },
+      cli: { ok: true, detail: 'video2agent 0.3.6', version: '0.3.6', latest: '0.3.6', update_available: true },
+      canInstall: { cli: false, updateCli: true, ffmpeg: false, ocr: false, browser: false },
+      engine_update: { state: 'failed', target: '0.3.6' },
+    })))
+    const page = mount(settingsPage, {})
+    await flush()
+    const text = textOf(page.tree)
+    expect(text.includes('插件已更新，重开 DSH 后生效'), 'restart notice missing: ' + text.slice(0, 300))
+    expect(!text.includes('视频引擎更新失败'), 'a stale failure survived a current engine: ' + text.slice(0, 300))
+    expect(!findByAttr(page.tree, 'data-vp-env-engine-retry'), 'a stale retry survived a current engine')
+    expect(!findByAttr(page.tree, 'data-vp-env-engine-manual'), 'a current engine still shows the manual update button')
+    unmount(page)
+  }
+
+  // C4. Restart pending with an older engine and a failed marker: no failure
+  // copy or retry may push an engine update while the reload is pending.
+  {
+    serve(() => payload(basePayload({
+      plugin: { loaded: '0.3.5', installed: '0.3.6', restart_required: true },
+      engine_update: { state: 'failed', target: '0.3.6' },
+    })))
+    const page = mount(settingsPage, {})
+    await flush()
+    const text = textOf(page.tree)
+    expect(!text.includes('视频引擎更新失败'), 'a failed marker leaked into the restart card: ' + text.slice(0, 300))
+    expect(!findByAttr(page.tree, 'data-vp-env-engine-retry'), 'a retry is shown during restart')
+    expect(!findByAttr(page.tree, 'data-vp-env-engine-manual'), 'a manual update is shown during restart')
+    expect(!text.includes('视频引擎可更新'), 'the nudge is shown during restart: ' + text.slice(0, 300))
     unmount(page)
   }
 
@@ -1517,6 +1616,56 @@ expect(narrowMedia.includes('[data-vp-queue-ring-wrap],[data-vp-queue-ring]{widt
     expect(!findByAttr(page.tree, 'data-vp-env-engine-retry'), 'a retry is offered while the Host is already updating')
     unmount(page)
   }
+
+  // L. No restart, engine already current, but a failed manual result and stale
+  // update flags remain: a re-check suppresses the stale failure, retry and offer.
+  {
+    let current = false
+    serve((method) => {
+      if (method === 'POST') {
+        return payload({ ok: false, error: { message: '更新没有完成' }, status: basePayload({ engine_update: { state: 'failed', target: '0.3.6' } }) })
+      }
+      if (!current) return payload(basePayload({ engine_update: { state: 'idle' } }))
+      return payload(basePayload({
+        cli: { ok: true, detail: 'video2agent 0.3.6', version: '0.3.6', latest: '0.3.6', update_available: true },
+        canInstall: { cli: false, updateCli: true, ffmpeg: false, ocr: false, browser: false },
+        engine_update: { state: 'failed', target: '0.3.6' },
+      }))
+    })
+    const page = mount(settingsPage, {})
+    await flush()
+    const update = collectByAttr(page.tree, 'data-vp-bili-btn').find((node) => textOf(node) === '更新引擎')
+    expect(update, 'no engine update button before the failed manual update')
+    update.props.onClick()
+    await flush()
+    expect(textOf(page.tree).includes('视频引擎更新失败，可重试。'), 'the failed manual update was not reported')
+    current = true
+    const refresh = findByAttr(page.tree, 'data-vp-env-refresh')
+    refresh.props.onClick()
+    await flush()
+    const text = textOf(page.tree)
+    expect(!text.includes('视频引擎更新失败'), 'a stale failure survived the current engine: ' + text.slice(0, 300))
+    expect(!findByAttr(page.tree, 'data-vp-env-engine-retry'), 'a stale retry survived the current engine')
+    expect(!text.includes('视频引擎可更新'), 'a stale update offer survived the current engine: ' + text.slice(0, 300))
+    expect(!collectByAttr(page.tree, 'data-vp-bili-btn').some((node) => textOf(node) === '更新引擎'), 'a stale update button survived the current engine')
+    unmount(page)
+  }
+
+  // M. Unknown versions and updateCli false must not hide a real failure: only
+  // two comparable numeric versions can prove an update is stale.
+  {
+    serve(() => payload(basePayload({
+      cli: { ok: true, detail: 'video2agent', version: '', latest: '', update_available: false },
+      canInstall: { cli: false, updateCli: false, ffmpeg: false, ocr: false, browser: false },
+      engine_update: { state: 'failed', target: '' },
+    })))
+    const page = mount(settingsPage, {})
+    await flush()
+    const text = textOf(page.tree)
+    expect(text.includes('视频引擎更新失败，可重试。'), 'an unknown version hid a real failure: ' + text.slice(0, 300))
+    expect(findByAttr(page.tree, 'data-vp-env-engine-retry'), 'an unknown version hid the retry action')
+    unmount(page)
+  }
 }
 
-console.log('dock state ok: clear removes card, canceled is not ready, auto-clear, late poll cannot revive the closing card, batch owns turn end, search line budget/hold/session/disable guards, environment card restart notice/manual update/updating poll/failed retry/bounded reads, stale failure/busy copy cleared by a newer update, slow first queue read not duplicated, failed save persists, debounce keeps both keys')
+console.log('dock state ok: clear removes card, canceled is not ready, auto-clear, late poll cannot revive the closing card, batch owns turn end, search line budget/hold/session/disable guards, environment card restart notice/current-engine suppression/updating poll/failed retry/bounded reads, stale failure/busy copy cleared by a newer update, slow first queue read not duplicated, failed save persists, debounce keeps both keys')

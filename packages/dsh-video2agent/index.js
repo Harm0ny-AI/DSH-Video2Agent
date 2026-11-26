@@ -84,7 +84,7 @@ douyinSearch: Schema.boolean().default(false).description('Enable Douyin keyword
     cacheTtlMs: Schema.natural().min(60000).default(86400000).description('How long a link preview is reused.'),
     cacheExpire: Schema.boolean().default(true).description('Free the media and frame files of old videos after the cache age; transcript and on-screen text stay searchable.'),
     cacheDays: Schema.natural().min(1).max(365).default(7).description('Cache age in days before a video\'s media is freed.'),
-    cacheLimitEnabled: Schema.boolean().default(false).description('Evict the oldest cache entries when the cache exceeds a size cap.'),
+    cacheLimitEnabled: Schema.boolean().default(true).description('Release the oldest media cache when it exceeds a size cap.'),
     cacheLimitGb: Schema.natural().min(1).max(20).default(20).description('Cache size cap in GB (1-20); only used when the cap is enabled.'),
   })
   : undefined
@@ -889,7 +889,7 @@ function sanitizeUiSettings(raw) {
     cacheTtlMs: number(source.cacheTtlMs, 24 * 60 * 60 * 1000, 60 * 1000, 30 * 24 * 60 * 60 * 1000),
     cacheExpire: source.cacheExpire !== false,
     cacheDays: number(source.cacheDays, 7, 1, 365),
-    cacheLimitEnabled: source.cacheLimitEnabled === true,
+    cacheLimitEnabled: source.cacheLimitEnabled === undefined || source.cacheLimitEnabled === true,
     cacheLimitGb: number(source.cacheLimitGb, 20, 1, 20),
     // No profile / OCR-budget / hold-time / auto-pick keys: ingest is lazy
     // (captions, else ASR, and a frame is OCR'd the first time it is asked for),
@@ -958,7 +958,7 @@ function cliError(r) {
   return { code, message, remedy }
 }
 
-// Frames are addressed by an opaque `<video_id>/<file>` id, never by an absolute
+// Frames are addressed by an opaque `<video_id>/[<run>/]<file>` id, never by an absolute
 // path: the model may copy this URL into an answer, and a local path there leaks
 // the user's directory layout. `path=` remains only for old links/tests.
 // The answer's markdown renderer only accepts absolute http(s) images; a
@@ -979,8 +979,13 @@ function frameUrlFor(videoId, framePath) {
   if (!vid) return base + '/api/video2agent/frame?path=' + encodeURIComponent(String(framePath))
   // `path.basename` is host-specific: on Linux it does not split a Windows path,
   // so a test/old link with C:\\... became the whole id. Split both separators.
-  const name = String(framePath || '').split(/[\\/]/).pop()
-  return base + '/api/video2agent/frame?id=' + encodeURIComponent(vid + '/' + name)
+  const parts = String(framePath || '').split(/[\\/]/)
+  const name = parts.at(-1)
+  const run = parts.at(-3)
+  const generation = parts.at(-2) === 'frames' && parts.at(-4) === vid && /^run-[a-f0-9]{32}$/.test(run)
+    ? run + '/'
+    : ''
+  return base + '/api/video2agent/frame?id=' + encodeURIComponent(vid + '/' + generation + name)
 }
 
 function doctorFailure(stdout) {
@@ -1295,7 +1300,9 @@ function commandArgs(args) {
     // run_code): a 200s wait made the whole program die with the wait half done
     // and nothing to show. 90s leaves room to parse and answer.
     const seconds = clampInt(Number(args.wait_ms) / 1000, 45, 5, 90)
-    return ['jobs', '--id', String(args.job_id), '--wait', '--wait-timeout', String(seconds), '--json']
+    const wait = ['jobs', '--id', String(args.job_id), '--wait', '--wait-timeout', String(seconds)]
+    if (args.scope === 'transcript') wait.push('--wait-for', 'transcript')
+    return [...wait, '--json']
   }
   if (command === 'overview') {
     if (!args.video_id) return null
@@ -1400,6 +1407,8 @@ function commandArgs(args) {
     // An empty --video made the CLI filter on an empty id; only pass it when real.
     const out = ['search', query, '--limit', String(clampInt(args.limit, 8, 1, 20)), '--json']
     if (args.video_id) out.splice(2, 0, '--video', String(args.video_id))
+    if (args.start !== undefined && args.start !== null && args.start !== '') out.push('--start', String(args.start))
+    if (args.end !== undefined && args.end !== null && args.end !== '') out.push('--end', String(args.end))
     if (variants.length) out.push('--queries', ...variants.slice(0, 7))
     return out
   }
@@ -1418,10 +1427,15 @@ function commandArgs(args) {
   }
   if (command === 'evidence') {
     if (!args.video_id) return null
-    // `evidence` accepts either a single moment or a window; asking for neither would
-    // silently answer 00:00.
+    // Reopen existing evidence or capture a moment/window. Requiring a selector
+    // avoids silently answering 00:00.
     const out = ['evidence', String(args.video_id)]
-    if (args.at !== undefined && args.at !== null && args.at !== '') out.push('--at', String(args.at))
+    const at = args.at === undefined || args.at === null ? '' : String(args.at)
+    const evidenceId = args.evidence_id || (/^ev_[A-Za-z0-9_-]+$/.test(at) ? at : '')
+    if (evidenceId) {
+      if (badPositional(evidenceId)) return null
+      out.push('--evidence-id', String(evidenceId))
+    } else if (at) out.push('--at', at)
     else if (args.start || args.end) {
       if (args.start) out.push('--start', String(args.start))
       if (args.end) out.push('--end', String(args.end))
@@ -3741,7 +3755,7 @@ export function apply(ctx, config) {
         try {
           if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
           const sid = String(new URL(req.url || '', 'http://localhost').searchParams.get('session') || '').slice(0, 128)
-          let status = readDiscoveryStatus()
+          let status = readDiscoveryStatus(sid)
           // A status claimed by a session is only visible to that session. The old
           // check let a request without `session` read another chat's query.
           if (status && status.session_id && status.session_id !== sid) status = null
@@ -3802,15 +3816,14 @@ export function apply(ctx, config) {
           const at = Number(parsed && parsed.at)
           const phase = String(parsed && parsed.phase || '')
           if (!Number.isFinite(at) || at <= 0) return sendJson(res, 200, { ok: true, cleared: false })
-          const status = readDiscoveryStatus()
+          const status = readDiscoveryStatus(sid)
           if (!status) return sendJson(res, 200, { ok: true, cleared: false })
           if (status.session_id && status.session_id !== sid) {
             return sendJson(res, 200, { ok: true, cleared: false })
           }
           if (Number(status.at || 0) !== at) return sendJson(res, 200, { ok: true, cleared: false })
           if (phase && String(status.phase || '') !== phase) return sendJson(res, 200, { ok: true, cleared: false })
-          clearDiscoveryStatus()
-          return sendJson(res, 200, { ok: true, cleared: true })
+          return sendJson(res, 200, { ok: true, cleared: clearDiscoveryStatus(sid) })
         } catch (e) {
           return sendJson(res, (e && e.status) || 500, { error: 'internal error', code: 'E_ROUTE' })
         }
@@ -3853,11 +3866,9 @@ export function apply(ctx, config) {
         try {
           if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
           const sid = String(new URL(req.url || '', 'http://localhost').searchParams.get('session') || '').slice(0, 128)
-          let activity = readActivity()
-          // The tool call does not know its conversation, so the first client
-          // that polls claims the record for its session. Other conversations
-          // must not see the card. A new activity has no session_id and can be
-          // claimed again.
+          let activity = readActivity(sid)
+          // Older invocations without a session still publish a global record.
+          // The first polling conversation claims only that unscoped record.
           if (activity && !activity.session_id && sid) {
             activity = { ...activity, session_id: sid }
             atomicJson(activityPath(), activity)
@@ -4161,12 +4172,23 @@ export function apply(ctx, config) {
             // without asking again — still with a token, never a bare flag. The
             // issue+spawn section shares the shortlist lock because both write the
             // single confirm.json the CLI consumes.
+            let options = {}
+            try {
+              const parsed = JSON.parse(job?.options_json || '{}')
+              if (parsed && typeof parsed === 'object') options = parsed
+            } catch {}
             const out = await withConfirmTokenLock(async () => {
               const retryToken = issueConfirmToken([source])
               const args = ['ingest', source, '--confirm-token', retryToken]
               const retryCookies = persistedCookiesPath()
               if (retryCookies) args.push('--cookies', retryCookies)
-              args.push('--detach', '--force', '--json')
+              if (['auto', 'fast', 'standard', 'deep', 'source_only'].includes(options.profile)) args.push('--profile', options.profile)
+              if (typeof options.language === 'string' && options.language) args.push('--language=' + options.language)
+              if (typeof options.collection === 'string' && options.collection) args.push('--collection=' + options.collection)
+              if (Number.isInteger(options.ocr_budget)) args.push('--ocr-budget', String(clampInt(options.ocr_budget, 120, 6, 240)))
+              if (options.reselect_ocr === true) args.push('--reselect-ocr')
+              if (options.force === true) args.push('--force')
+              args.push('--detach', '--json')
               return runCli(args, 30000)
             })
             let created = null
@@ -4222,6 +4244,16 @@ export function apply(ctx, config) {
       status: path.join(dir, 'status.json'),
       last: path.join(dir, 'last.json'),
     }
+  }
+
+  function discoveryStatusPath(sessionId = '') {
+    return scopedStatusPath(discoveryPaths().status, sessionId)
+  }
+
+  function scopedStatusPath(legacyPath, sessionId) {
+    if (!sessionId) return legacyPath
+    const key = crypto.createHash('sha256').update(String(sessionId)).digest('hex').slice(0, 32)
+    return legacyPath.slice(0, -5) + '-' + key + '.json'
   }
 
   // Candidate offers are per conversation: one session's find must never make
@@ -4316,40 +4348,62 @@ export function apply(ctx, config) {
     // `at`, which silently restarted the client's age budget for that line.
     const record = { ...payload, at: Number(payload && payload.at) || Date.now() }
     if (sessionId) record.session_id = sessionId
-    atomicJson(discoveryPaths().status, record)
+    atomicJson(discoveryStatusPath(sessionId), record)
   }
 
-  function readDiscoveryStatus() {
+  function readDiscoveryStatus(sessionId = '') {
+    const read = (file) => {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+        if (!parsed || !parsed.phase) return null
+        // Old spinners and terminal lines must not reappear in a later turn.
+        if (Date.now() - Number(parsed.at || 0) > 2 * 60 * 1000) return null
+        return parsed
+      } catch {
+        return null
+      }
+    }
+    return read(discoveryStatusPath(sessionId)) || (sessionId ? read(discoveryStatusPath()) : null)
+  }
+
+  function clearDiscoveryStatus(sessionId = '', requestId = '') {
+    if (requestId && readDiscoveryStatus(sessionId)?.request_id !== requestId) return false
+    const scoped = discoveryStatusPath(sessionId)
+    const legacy = discoveryStatusPath()
+    const target = fs.existsSync(scoped) || !sessionId ? scoped : legacy
+    if (target === legacy && sessionId && readDiscoveryStatus()?.session_id !== sessionId) return false
     try {
-      const parsed = JSON.parse(fs.readFileSync(discoveryPaths().status, 'utf8'))
-      if (!parsed || !parsed.phase) return null
-      // Search status is turn-scoped. Never let a stale spinner or an old
-      // no-result/error line outlive a restart or reappear in a later turn.
-      if (Date.now() - Number(parsed.at || 0) > 2 * 60 * 1000) return null
-      return parsed
+      fs.rmSync(target, { force: true })
+      return true
     } catch {
-      return null
+      return false
     }
   }
 
-  function clearDiscoveryStatus() {
-    try { fs.rmSync(discoveryPaths().status, { force: true }) } catch {}
+  function finishDiscoveryPhase(sessionId, requestId, payload) {
+    const current = readDiscoveryStatus(sessionId)
+    if (current?.request_id === requestId) {
+      writeDiscoveryStatus({ ...payload, request_id: requestId, session_id: current.session_id }, sessionId)
+    }
   }
 
-  function writeDiscoveryLast(payload, sessionId = '') {
+  function writeDiscoveryLast(payload, sessionId = '', current = true) {
     // Keep the union of this turn's searches, not only the last query. The model
     // sometimes refines the query after seeing noise; a candidate from the first
     // search is still legitimately offered, and shortlisting it should not fail.
-    let previous = []
+    let previous = null
     try {
       const old = JSON.parse(fs.readFileSync(discoveryLastPath(sessionId), 'utf8'))
       if (old && Date.now() - Number(old.at || 0) < 5 * 60 * 1000 && Array.isArray(old.candidates)) {
-        previous = old.candidates
+        previous = old
       }
     } catch {}
     const seen = new Set()
     const merged = []
-    for (const candidate of [...(payload.candidates || []), ...previous]) {
+    const newCandidates = payload.candidates || []
+    const oldCandidates = previous?.candidates || []
+    const candidates = current ? [...newCandidates, ...oldCandidates] : [...oldCandidates, ...newCandidates]
+    for (const candidate of candidates) {
       const videoId = String(candidate.video_id || '')
       if (!videoId || seen.has(videoId)) continue
       seen.add(videoId)
@@ -4358,7 +4412,8 @@ export function apply(ctx, config) {
       // tail of a 50-candidate discover and made valid ids E_SHORTLIST_UNKNOWN.
       if (merged.length >= 100) break
     }
-    atomicJson(discoveryLastPath(sessionId), { ...payload, candidates: merged, at: Date.now(), session_id: sessionId || null })
+    const latest = !current && previous ? previous : payload
+    atomicJson(discoveryLastPath(sessionId), { ...latest, candidates: merged, at: Date.now(), session_id: sessionId || null })
   }
 
   function readDiscoveryLast(sessionId = '') {
@@ -4375,8 +4430,8 @@ export function apply(ctx, config) {
   // One generic activity record for the few long actions that are not
   // ingest jobs (OCR, export, account writes). The card only needs the
   // status; no counts, no error reason, no stage.
-  function activityPath() {
-    return path.join(video2agentHome(), 'activity', 'last.json')
+  function activityPath(sessionId = '') {
+    return scopedStatusPath(path.join(video2agentHome(), 'activity', 'last.json'), sessionId)
   }
 
   function beginActivity(kind, title, sessionId = '') {
@@ -4388,25 +4443,32 @@ export function apply(ctx, config) {
       at: Date.now(),
     }
     if (sessionId) record.session_id = sessionId
-    atomicJson(activityPath(), record)
+    atomicJson(activityPath(sessionId), record)
     return record
   }
 
   function finishActivity(record, state) {
     if (!record) return
-    atomicJson(activityPath(), { ...record, state, finished_at: Date.now() })
+    const target = activityPath(record.session_id)
+    try {
+      const current = JSON.parse(fs.readFileSync(target, 'utf8'))
+      if (current?.id === record.id) atomicJson(target, { ...current, state, finished_at: Date.now() })
+    } catch {}
   }
 
-  function readActivity() {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(activityPath(), 'utf8'))
-      if (!parsed || !parsed.kind) return null
-      const at = Number(parsed.finished_at || parsed.at || 0)
-      if (Date.now() - at > 30 * 1000) return null
-      return parsed
-    } catch {
-      return null
+  function readActivity(sessionId = '') {
+    const read = (file) => {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+        if (!parsed || !parsed.kind) return null
+        const at = Number(parsed.finished_at || parsed.at || 0)
+        if (Date.now() - at > 30 * 1000) return null
+        return parsed
+      } catch {
+        return null
+      }
     }
+    return read(activityPath(sessionId)) || (sessionId ? read(activityPath()) : null)
   }
 
   // Read the job mirror the worker keeps up to date. Returns null when it is
@@ -4648,15 +4710,25 @@ function guardWrite(req, res) {
     })
   }
 
-  async function overviewFor(videoId, ttlMs) {
+  async function overviewFor(videoId, job) {
     const hit = OVERVIEW_CACHE.get(videoId)
-    if (hit && Date.now() - hit.at < ttlMs) return hit.data
+    const requestedAt = Date.now()
+    const ttlMs = job.state === 'running' ? 30000 : 60000
+    const ready = job.state === 'ready' || job.state === 'done'
+    const completedAt = ready ? Date.parse(job.finished_at || job.updated_at || '') : NaN
+    // During a rebuild the index still describes the preceding successful
+    // analysis. A finished job needs one overview fetched after completion.
+    // The engine's activity timestamps have one-second precision.
+    const current = !ready || (hit && (hit.readyJobId === job.id || hit.requestedAt >= completedAt + 1000))
+    if (hit && current && requestedAt - hit.at < ttlMs) return hit.data
     const out = await runCli(['overview', String(videoId), '--json'], 20000)
     let data = null
     try { data = JSON.parse(out.out) } catch { data = null }
     if (data && data.ok) {
       if (OVERVIEW_CACHE.size > 40) OVERVIEW_CACHE.delete(OVERVIEW_CACHE.keys().next().value)
-      OVERVIEW_CACHE.set(videoId, { at: Date.now(), data })
+      if (requestedAt >= (OVERVIEW_CACHE.get(videoId)?.requestedAt ?? 0)) {
+        OVERVIEW_CACHE.set(videoId, { at: Date.now(), requestedAt, readyJobId: ready ? job.id : null, data })
+      }
       return data
     }
     return hit ? hit.data : null
@@ -4691,7 +4763,7 @@ function guardWrite(req, res) {
             }
             let overview = null
             if (wantOverview && job.video_id) {
-              overview = await overviewFor(job.video_id, job.state === 'running' ? 30000 : 60000)
+              overview = await overviewFor(job.video_id, job)
             }
             sendJson(res, 200, { ok: true, job, overview, source })
           } catch (e) {
@@ -4714,15 +4786,15 @@ function guardWrite(req, res) {
             // and is rejected as "outside" the unresolved .video2agent/... prefix.
             let derived = path.resolve(video2agentHome(), 'derived')
             try { derived = fs.realpathSync(derived) } catch {}
-            // Preferred: an opaque `id=<video_id>/<file>`. The URL never carries an
+            // Preferred: an opaque `id=<video_id>/[<run>/]<file>`. The URL never carries an
             // absolute path, so a frame link cannot leak the user's disk layout.
             // `path=` stays for links created before this change.
             const frameId = params.get('id') || ''
             let candidate = ''
             if (frameId) {
-              const match = /^([A-Za-z0-9_-]{1,64})\/([A-Za-z0-9_.-]{1,80})$/.exec(frameId)
-              if (!match || match[2].includes('..')) return sendJson(res, 400, { error: 'invalid frame id' })
-              candidate = path.join(derived, match[1], 'frames', match[2])
+              const match = /^([A-Za-z0-9_-]{1,64})\/(?:(run-[a-f0-9]{32})\/)?([A-Za-z0-9_.-]{1,80})$/.exec(frameId)
+              if (!match || match[3].includes('..')) return sendJson(res, 400, { error: 'invalid frame id' })
+              candidate = path.join(derived, match[1], match[2] || '', 'frames', match[3])
             } else {
               const raw = params.get('path') || ''
               if (!raw) return sendJson(res, 400, { error: 'missing frame id' })
@@ -4906,7 +4978,7 @@ function guardWrite(req, res) {
           // The CLI prints its failure envelope on stdout; reading stderr alone
           // turned every cause into the generic 'ingest failed'.
           ...(() => {
-            const structured = parseStructuredError(out.out)
+            const structured = cliError(out)
             return {
               error_code: structured ? structured.code : 'E_INGEST',
               error_message: String((structured && structured.message) || out.err || 'ingest failed').slice(0, 300),
@@ -4927,6 +4999,7 @@ function guardWrite(req, res) {
   __test.startShortlistJobs = startShortlistJobs
   __test.resetShortlistStarts = () => SHORTLIST_STARTS.clear()
   __test.discoveryLastPath = discoveryLastPath
+  __test.discoveryStatusPath = discoveryStatusPath
   const campaigns = createCampaignManager({ home: video2agentHome, startShortlistJobs, readJobSidecar })
   __test.campaigns = campaigns
   __test.timeoutPayload = timeoutPayload
@@ -4991,16 +5064,19 @@ function guardWrite(req, res) {
   async function executeShortlist(args, sessionId = '') {
     const rawIds = Array.isArray(args.video_ids) ? args.video_ids : []
     const last = readDiscoveryLast(sessionId)
-    const fail = (code, message, remedy) => {
+    let requestId = ''
+    const fail = (code, message, remedy, kind = 'selection') => {
       // A rejected shortlist used to leave status.json at `curating`, so the
       // composer kept saying "AI 正在筛选" for two minutes after the turn failed.
       try {
-        writeDiscoveryStatus({
+        const payload = {
           phase: 'error',
-          kind: 'selection',
+          kind,
           query: String((last && last.query) || ''),
           error: String(message).slice(0, 240),
-        }, sessionId)
+        }
+        if (requestId) finishDiscoveryPhase(sessionId, requestId, payload)
+        else writeDiscoveryStatus(payload, sessionId)
       } catch {}
       return { ok: false, text: message, error: { code, message, remedy } }
     }
@@ -5122,8 +5198,10 @@ function guardWrite(req, res) {
     // Selected videos start immediately. The Host owns the start now: the old
     // client confirm route could wait 480s for a click that no longer exists, and
     // a closed tab could either block the batch or duplicate it.
+    requestId = crypto.randomUUID()
     writeDiscoveryStatus({
       phase: 'starting',
+      request_id: requestId,
       query: String(last.query || ''),
       found: selected.length,
       candidates: selected.slice(0, 4).map((c) => ({
@@ -5178,40 +5256,32 @@ function guardWrite(req, res) {
         }
       }
       if (!campaign) {
-      campaign = await campaigns.start(selected, sessionId || null, processLimit)
-      const snap = campaigns.snapshot(campaign)
-      started = {
-        jobs: snap.items.filter((x) => x.job_id && x.state !== 'failed'),
-        failed: snap.items.filter((x) => x.state === 'failed'),
-        queued: snap.items.filter((x) => x.state === 'queued'),
-        reused: false,
-      }
-      // Cache only a campaign that actually started something: a fully failed
-      // first wave must be retryable immediately.
-      if (started.jobs.length && campaign && campaign.id) {
-        CAMPAIGN_STARTS.set(campaignKey, { at: Date.now(), id: campaign.id })
-        // Bound the cache: a long-lived Host otherwise grows it forever.
-        if (CAMPAIGN_STARTS.size > 50) {
-          const oldest = CAMPAIGN_STARTS.keys().next().value
-          if (oldest && oldest !== campaignKey) CAMPAIGN_STARTS.delete(oldest)
+        campaign = await campaigns.start(selected, sessionId || null, processLimit)
+        const snap = campaigns.snapshot(campaign)
+        started = {
+          jobs: snap.items.filter((x) => x.job_id && x.state !== 'failed'),
+          failed: snap.items.filter((x) => x.state === 'failed'),
+          queued: snap.items.filter((x) => x.state === 'queued'),
+          reused: false,
         }
-      }
+        if (campaign.status === 'running' && campaign.id) {
+          CAMPAIGN_STARTS.set(campaignKey, { at: Date.now(), id: campaign.id })
+          // Bound the cache: a long-lived Host otherwise grows it forever.
+          if (CAMPAIGN_STARTS.size > 50) {
+            const oldest = CAMPAIGN_STARTS.keys().next().value
+            if (oldest && oldest !== campaignKey) CAMPAIGN_STARTS.delete(oldest)
+          }
+        }
       }
     } else {
       started = await startShortlistJobs(selected, undefined, sessionId)
     }
-    if (!started.jobs.length) {
+    if (!started.jobs.length && !(campaign && started.queued?.length && campaign.status === 'running')) {
       const message = (started.failed[0] && started.failed[0].error_message) || '没有任务启动成功'
-      writeDiscoveryStatus({
-        phase: 'error',
-        kind: 'start',
-        query: String(last.query || ''),
-        error: String(message).slice(0, 240),
-      }, sessionId)
       if (campaign) campaigns.abort(campaign.id, message)
-      return fail('E_START', '视频任务没有启动：' + message, '检查 video2agent CLI、FFmpeg 和网络；修复后重试 shortlist。')
+      return fail('E_START', '视频任务没有启动：' + message, '检查 video2agent CLI、FFmpeg 和网络；修复后重试 shortlist。', 'start')
     }
-    clearDiscoveryStatus()
+    clearDiscoveryStatus(sessionId, requestId)
     const payload = {
       ok: true,
       state: 'started',
@@ -5241,8 +5311,8 @@ function guardWrite(req, res) {
       next_step: {
         action: 'started',
         rule: campaign
-          ? 'This is a campaign: only the first wave started; queued rows are not running yet. Call ingest with campaign_id (or the same video_ids plus campaign:true) to advance/read it; there is no campaign tool command. Do not claim all rows are running. Use jobs --wait for started job ids, then overview/transcript/search/evidence.'
-          : 'The videos in default_selected have started; other video_ids were NOT started (see not_started). Do not call ingest again and do not ask the user to repeat their question. If the original request was a content task, call video2agent jobs --id <job_id> --wait --json, then overview/transcript/search/evidence, and answer. If you truly need one of the not_started videos too, say so and start it separately; do not claim it is part of this batch.',
+          ? 'This is a campaign. Only rows with job ids started; queued rows are waiting. Call ingest with campaign_id to advance or read it. For a question about what was said, wait for the started job with ingest, job_id, wait_ms and scope:"transcript", then read that video. For a full review, wait for completion.'
+          : 'The videos in default_selected have started; other video_ids were NOT started (see not_started). Do not call ingest again or ask the user to repeat their question. For a question about what was said, wait with ingest, job_id, wait_ms and scope:"transcript", then read that video. For a full review, wait for completion. If you need a not_started video, say so and start it separately.',
       },
     }
     // PTC sessions call this through run_code, so no Card mounts. The dock polls
@@ -5296,7 +5366,7 @@ function guardWrite(req, res) {
         scope: {
           type: 'string',
           enum: ['all', 'bilibili', 'douyin', 'library', 'transcript', 'compare'],
-          description: 'find: omit for the configured default (Bilibili unless the Douyin search setting is on), bilibili, douyin (only when the user explicitly asks for Douyin), all (both), or library. read: transcript (default) or compare.',
+          description: 'find: configured default, bilibili, douyin (when requested), all, or library. read: transcript or compare. ingest with job_id and wait_ms: transcript for questions about what was said. If transcript_ready is true, read that video_id while visual analysis continues. Omit scope to wait for full analysis.',
         },
         detail: {
           type: 'string',
@@ -5394,7 +5464,7 @@ function guardWrite(req, res) {
         job_id: { type: 'string', description: 'ingest: job id to poll.' },
         wait_ms: { type: 'number', description: 'ingest: wait for one job (ms, clamped to 5000-90000). One wait per job: never loop waits over several jobs in one program; read already-finished videos instead.' },
         language: { type: 'string', description: 'ingest: ASR language when the video has no captions (zh, en, ja, ...). Omit to auto-detect; pass it when the transcript came out in the wrong language.' },
-        at: { type: 'string', description: 'evidence/frames: the moment (01:12:34, 548s, or 548000ms); comma list for evidence.' },
+        at: { type: 'string', description: 'evidence/frames: the moment (01:12:34, 548s, or 548000ms). Evidence also accepts a comma list or an ev_ ID from a previous evidence call.' },
         timestamp: { type: 'string', description: 'Alias of at (evidence/frames); at wins when both are set.' },
         max_images: { type: 'number', description: 'evidence: image budget for a multi-moment call (1-6).' },
         crop: { type: 'string', description: 'frames: normalized x,y,w,h (0-1).' },
@@ -5503,15 +5573,17 @@ function guardWrite(req, res) {
         const error = {
           code: 'E_ARGS',
           message: `Missing required argument for "${command || 'unknown'}".`,
-          remedy: 'discover/search need query; shortlist needs 1-10 video_ids, default_selected plus primary; ingest needs source; overview/transcript/frames/map/evidence/export need video_id; evidence needs at; resolve needs url; admin douyin needs douyin_action (profile also needs douyin_url, profiles needs 1-10 douyin_urls). Positional values must not start with "-".',
+          remedy: 'discover/search need query; shortlist needs 1-10 video_ids, default_selected plus primary; ingest needs source; overview/transcript/frames/map/evidence/export need video_id; evidence needs at (moment or ev_ ID) or a range; resolve needs url; admin douyin needs douyin_action (profile also needs douyin_url, profiles needs 1-10 douyin_urls). Positional values must not start with "-".',
         }
         return { ok: false, text: JSON.stringify({ ok: false, error }), error }
       }
-      if (cliCommand === 'discover') {
+      const searchId = cliCommand === 'discover' ? crypto.randomUUID() : ''
+      if (searchId) {
         // A new search replaces the previous status line; there is no pending
         // card or interrupt marker left to clear.
         writeDiscoveryStatus({
           phase: 'searching',
+          request_id: searchId,
           query: String(args.query || ''),
           at: Date.now(),
         }, sessionId)
@@ -5602,8 +5674,8 @@ function guardWrite(req, res) {
               writeDiscoveryLast({
                 query: String(parsed.query || args.query || ''),
                 candidates: parsed.candidates,
-              }, sessionId)
-              writeDiscoveryStatus({
+              }, sessionId, readDiscoveryStatus(sessionId)?.request_id === searchId)
+              finishDiscoveryPhase(sessionId, searchId, {
                 phase: 'curating',
                 query: String(parsed.query || args.query || ''),
                 found: parsed.candidates.length,
@@ -5616,7 +5688,7 @@ function guardWrite(req, res) {
                   duration_ms: c.duration_ms || 0,
                 })),
                 at: Date.now(),
-              }, sessionId)
+              })
               const processLimit = Number(readMergedSettings().processLimit) || 10
               parsed.process_limit = processLimit
               parsed.next_step = {
@@ -5629,12 +5701,12 @@ function guardWrite(req, res) {
               parsed.next_step.ts = Date.now()
               text = JSON.stringify(parsed)
             } else {
-              writeDiscoveryStatus({
+              finishDiscoveryPhase(sessionId, searchId, {
                 phase: 'empty',
                 query: String(parsed.query || args.query || ''),
                 found: 0,
                 at: Date.now(),
-              }, sessionId)
+              })
             }
           } catch {
             // Success with unparseable stdout is still a failure for the caller:
@@ -5645,21 +5717,21 @@ function guardWrite(req, res) {
               message: '搜索返回的内容不是 JSON：' + String(raw).slice(0, 200),
               remedy: '重试一次；连续出现说明 CLI 输出被日志污染，运行 video2agent doctor。',
             }
-            writeDiscoveryStatus({
+            finishDiscoveryPhase(sessionId, searchId, {
               phase: 'error',
               query: String(args.query || ''),
               at: Date.now(),
               error: bad.message,
-            }, sessionId)
+            })
             return { ok: false, text: JSON.stringify({ ok: false, error: bad }), error: bad }
           }
         } else {
-          writeDiscoveryStatus({
+          finishDiscoveryPhase(sessionId, searchId, {
             phase: 'error',
             query: String(args.query || ''),
             at: Date.now(),
             error: error && error.message ? String(error.message).slice(0, 240) : 'search failed',
-          }, sessionId)
+          })
         }
       }
       // Evidence and frames are pictures. OCR is only a triage/index signal — it cannot

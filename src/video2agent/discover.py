@@ -137,6 +137,19 @@ def parse_date_bound(value: str | None, *, now: datetime | None = None) -> int |
     )
 
 
+def _published_timestamp(candidate: dict[str, Any]) -> int | None:
+    ts = candidate.get("published_ts")
+    try:
+        if ts is not None:
+            return int(ts)
+        day = str(candidate.get("published_at") or "")
+        if re.fullmatch(r"\d{8}|\d{4}-\d{2}-\d{2}", day):
+            return int(datetime.strptime(day.replace("-", ""), "%Y%m%d").replace(tzinfo=timezone.utc).timestamp())
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return None
+
+
 def apply_filters(candidates: list[dict[str, Any]], *, uploader: str | None = None,
                   after: str | None = None, before: str | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Filter by uploader and publication window; report what the filter did.
@@ -156,11 +169,10 @@ def apply_filters(candidates: list[dict[str, Any]], *, uploader: str | None = No
             uid = str(c.get("uploader_id") or "")
             if not (name == wanted or wanted in name or (wanted.isdigit() and uid == wanted)):
                 continue
-        ts = c.get("published_ts")
-        if after_ts is not None and (ts is None or int(ts) < after_ts):
-            continue
-        if before_ts is not None and (ts is None or int(ts) > before_ts):
-            continue
+        if after_ts is not None or before_ts is not None:
+            ts = _published_timestamp(c)
+            if ts is None or (after_ts is not None and ts < after_ts) or (before_ts is not None and ts > before_ts):
+                continue
         kept.append(c)
     filters = {
         "uploader": uploader or None,
@@ -251,15 +263,24 @@ def discover_bilibili(query: str, cfg: Config, *, limit: int = 8, covers: bool =
         # Fall back to yt-dlp's BiliBiliSearch; never silently return empty.
         try:
             from .sources import discover_bilibili as ytdlp_discover
-            result = ytdlp_discover(query, cfg, limit=limit, covers=covers)
-            result.setdefault("warnings", []).append({"code": "SEARCH_FALLBACK", "message": f"API search failed: {e}"})
+            result = ytdlp_discover(query, cfg, limit=limit, covers=covers and not filtered)
+            fallback_warnings = list(result.get("warnings") or [])
+            fallback_warnings.append({"code": "SEARCH_FALLBACK", "message": f"API search failed: {e}"})
             if filtered:
-                result.setdefault("warnings", []).append({
-                    "code": "FILTERS_UNSUPPORTED",
-                    "message": "fallback 搜索不支持 uploader/after/before 过滤",
-                })
+                candidates = result["candidates"]
+                kept, report = apply_filters(candidates, uploader=uploader, after=after, before=before)
+                result = _finalize(query, kept, cfg, covers)
+                result["filters"] = report
+                if not kept:
+                    fallback_warnings.append({
+                        "code": "FILTER_EMPTY",
+                        "message": f"备用搜索找到 {len(candidates)} 条，未能确认有符合作者和日期条件的视频。",
+                    })
+            result["warnings"] = fallback_warnings
             return result
         except Exception as e2:
+            if isinstance(e2, Video2AgentError) and e2.code == "E_DATE":
+                raise
             raise Video2AgentError("E_SEARCH", f"Bilibili search failed: {e}; fallback failed: {e2}", "Check network or update yt-dlp.") from e2
     return {"query": query, "platform": "bilibili", "candidates": [], "cover_sheet": None,
             "filters": {"uploader": uploader, "after": after, "before": before, "matched": 0, "dropped": 0},

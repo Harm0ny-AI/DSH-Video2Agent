@@ -385,10 +385,9 @@ def spawn_detached(cmd: Sequence[str], *, log_path: str | Path | None = None,
         "env": env,
     }
     if os.name == "nt":
-        flags = 0
-        flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
-        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        kwargs["creationflags"] = flags
+        # A venv launcher without a console can give the Python process it starts
+        # a visible one. Give both a windowless console in a separate process group.
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(args, **kwargs)

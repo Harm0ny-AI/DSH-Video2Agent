@@ -1,7 +1,9 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from video2agent import discover
@@ -125,6 +127,27 @@ class DiscoverWithFiltersTests(unittest.TestCase):
     def test_candidates_keep_the_uploader_id(self):
         result = self._run()
         self.assertTrue(all("uploader_id" in c for c in result["candidates"]))
+
+    def test_fallback_keeps_only_candidates_with_verified_filters(self):
+        entries = [
+            {"id": "BV1match", "title": "匹配", "uploader_id": "123", "upload_date": "20260121"},
+            {"id": "BV1other", "title": "其他作者", "uploader_id": "456", "upload_date": "20260121"},
+            {"id": "BV1older", "title": "日期太早", "uploader_id": "123", "upload_date": "20240121"},
+            {"id": "BV1unknown", "title": "日期缺失", "uploader_id": "123"},
+        ]
+        response = SimpleNamespace(ok=True, stdout="\n".join(json.dumps(row) for row in entries))
+        with patch.object(discover, "_api_candidates", side_effect=RuntimeError("API unavailable")), \
+                patch("video2agent.sources.run", return_value=response):
+            result = discover.discover_bilibili(
+                "注意力", self.cfg, covers=False, uploader="123", after="2026-01-01",
+            )
+            self.assertEqual([row["video_id"] for row in result["candidates"]], ["BV1match"])
+            self.assertEqual(result["filters"]["dropped"], 3)
+            self.assertEqual([w["code"] for w in result["warnings"]], ["SEARCH_FALLBACK"])
+
+            empty = discover.discover_bilibili("注意力", self.cfg, covers=False, after="2030-01-01")
+            self.assertEqual(empty["candidates"], [])
+            self.assertIn("FILTER_EMPTY", {w["code"] for w in empty["warnings"]})
 
 
 if __name__ == "__main__":

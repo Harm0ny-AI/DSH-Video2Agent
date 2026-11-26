@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import threading
 import time
@@ -104,7 +105,19 @@ def _engine_for_thread(config_path: str | None = None):
     engine = engines.get(key)
     if engine is None:
         try:
-            engine = cls(config_path=config_path) if config_path else cls()
+            if config_path:
+                engine = cls(config_path=config_path)
+            elif kind == "rapidocr":
+                # Detection, orientation and recognition each own an ONNX session.
+                # Letting each frame worker open default-sized thread pools
+                # oversubscribes the CPU even when there are only two workers.
+                available_cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 1
+                engine = cls(params={
+                    "EngineConfig.onnxruntime.intra_op_num_threads": max(1, min(4, available_cpus // 2)),
+                    "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+                })
+            else:
+                engine = cls()
         except TypeError:
             # rapidocr 3.x has no legacy config_path argument; a custom YAML model
             # still requires rapidocr-onnxruntime (Python 3.11/3.12).

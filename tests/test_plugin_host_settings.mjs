@@ -33,6 +33,7 @@ const { apply, __test } = await import(pluginUrl)
 const routes = new Map()
 const sections = []
 let registeredTool = null
+let attachmentsService
 let connectionRejection = undefined
 const admittedRequests = []
 const ctx = {
@@ -40,6 +41,7 @@ const ctx = {
   commands: { register() {} },
   systemPrompt: { section: (options) => { sections.push(options); return () => {} } },
   get(name) {
+    if (name === 'attachments') return attachmentsService
     if (name === 'webServer') return { register(route) { routes.set(route.path, route.handler) }, getOrigin: () => 'https://qa.example' }
     if (name === 'tools') return { register(tool) { registeredTool = tool } }
     if (name === 'connection') {
@@ -265,7 +267,7 @@ assert.deepEqual(JSON.parse(initial.body), {
   cacheTtlMs: 86400000,
   cacheExpire: true,
   cacheDays: 7,
-  cacheLimitEnabled: false,
+  cacheLimitEnabled: true,
   cacheLimitGb: 20,
   accentColor: '#0a84ff',
   cookiesPath: '',
@@ -287,7 +289,7 @@ assert.deepEqual(JSON.parse(saved.body), {
   cacheTtlMs: 3600000,
   cacheExpire: true,
   cacheDays: 7,
-  cacheLimitEnabled: false,
+  cacheLimitEnabled: true,
   cacheLimitGb: 20,
   accentColor: '#0a84ff',
   cookiesPath: '',
@@ -302,6 +304,7 @@ assert.equal(rawSaved.cacheTtlMs, 3600000)
 assert.equal(routingSection.text(), '', 'a disabled plugin (enabled:false) must publish no routing rule')
 assert.equal('cookiesPath' in rawSaved, false, 'saving the UI must not freeze Config-only keys')
 const fullSave = await call('POST', JSON.stringify({ enabled: true, cacheTtlMs: 86400000, cacheExpire: true, cacheDays: 7, cacheLimitEnabled: false, cacheLimitGb: 20, accentColor: '#0a84ff', processLimit: 10 }))
+assert.equal(JSON.parse(fullSave.body).cacheLimitEnabled, false, 'an explicit capacity opt-out overrides the default')
 assert.equal(fullSave.status, 200, 'the exact full settings body must save')
 const cachePolicy = await call('POST', JSON.stringify({ cacheExpire: false, cacheDays: 999, cacheLimitEnabled: true, cacheLimitGb: 99 }))
 assert.equal(cachePolicy.status, 200)
@@ -1550,6 +1553,8 @@ assert.equal(flagValue(denseArgv, '--mode'), 'change')
 // 'running' — a queued job used to look like it was making progress.
 assert.equal(flagValue(commandArgs({ command: 'ingest', job_id: 'job_w', wait_ms: 200000 }), '--wait-timeout'), '90')
 assert.equal(flagValue(commandArgs({ command: 'ingest', job_id: 'job_w', wait_ms: 5000 }), '--wait-timeout'), '5')
+assert.equal(flagValue(commandArgs({ command: 'ingest', job_id: 'job_w', wait_ms: 5000, scope: 'transcript' }), '--wait-for'), 'transcript')
+assert.equal(commandArgs({ command: 'ingest', job_id: 'job_w', wait_ms: 5000 }).includes('--wait-for'), false)
 assert.equal(commandArgs({ command: 'ingest', job_id: 'job_w' }).includes('--wait'), false)
 fs.mkdirSync(path.join(home, 'jobs'), { recursive: true })
 fs.writeFileSync(path.join(home, 'jobs', 'job_queued.json'), JSON.stringify({
@@ -1610,6 +1615,13 @@ assert.equal(pluginModule.__test.workerEligible({ command: 'perceive' }), true)
 // produced, so the CLI surface stays the single implementation.
 assert.equal(commandArgs({ command: 'find', query: 'q' })[0], 'discover')
 assert.equal(commandArgs({ command: 'find', query: 'q', scope: 'library' })[0], 'search')
+const searchWindow = commandArgs({ command: 'find', query: 'q', scope: 'library', video_id: 'v', start: '00:02:00', end: '00:03:00' })
+assert.equal(flagValue(searchWindow, '--start'), '00:02:00')
+assert.equal(flagValue(searchWindow, '--end'), '00:03:00')
+assert.equal(commandArgs({ command: 'find', query: 'q', scope: 'library' }).includes('--start'), false)
+assert.deepEqual(commandArgs({ command: 'evidence', video_id: 'v', at: 'ev_1', images: 0 }),
+  ['evidence', 'v', '--evidence-id', 'ev_1', '--images', '0', '--json'])
+assert.match(registeredTool.parameters.properties.at.description, /ev_ ID/)
 assert.equal(commandArgs({ command: 'find', url: 'https://b23.tv/abc' })[0], 'resolve')
 assert.equal(commandArgs({ command: 'outline', video_id: 'v' })[0], 'digest')
 assert.equal(commandArgs({ command: 'outline', video_id: 'v', detail: 'overview' })[0], 'overview')
@@ -1728,7 +1740,7 @@ assert.equal(registeredTool.parameters.properties.profile, undefined, 'the tool 
 // The frame route is the riskiest surface: it streams files from the derived dir.
 fs.mkdirSync(path.join(home, 'derived', 'vid_x', 'frames'), { recursive: true })
 const goodFrame = path.join(home, 'derived', 'vid_x', 'frames', 'frame_00000.jpg')
-fs.writeFileSync(goodFrame, Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
+fs.writeFileSync(goodFrame, Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from('legacy pixel data'), Buffer.from([0xff, 0xd9])]))
 const secret = path.join(home, 'secret.txt')
 fs.writeFileSync(secret, 'not a frame')
 const traversal = await call('GET', undefined, { path: '/api/video2agent/frame', url: `/api/video2agent/frame?path=${encodeURIComponent(secret)}` })
@@ -1808,6 +1820,55 @@ assert.ok(frameUrl.includes('?id='), 'frame urls must use the opaque id')
 assert.ok(!frameUrl.includes('Users'), 'a frame url must not carry an absolute path')
 assert.equal(decodeURIComponent(frameUrl.split('id=')[1]), 'vid_x/frame_00000.jpg')
 
+// Reopening a citation must keep its own image bytes when a new analysis reuses
+// the filename. Attachments and the model's browser links must agree.
+{
+  const generation = 'run-' + 'a'.repeat(32)
+  const generationFrame = path.join(home, 'derived', 'vid_x', generation, 'frames', path.basename(goodFrame))
+  fs.mkdirSync(path.dirname(generationFrame), { recursive: true })
+  fs.writeFileSync(generationFrame, Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from('new analysis pixels'), Buffer.from([0xff, 0xd9])]))
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-evidence-replay-'))
+  fs.writeFileSync(path.join(fakeDir, 'evidence'), `
+    const frames = ${JSON.stringify({ev_old: goodFrame, ev_new: generationFrame})};
+    const args = process.argv.slice(2);
+    const frame = frames[args[args.indexOf('--evidence-id') + 1]];
+    process.stdout.write(JSON.stringify({ok: true, video_id: 'vid_x', images: [frame], frames: [{path: frame, t_ms: 0}]}));
+  `)
+  const savedImages = []
+  attachmentsService = { async saveImages(inputs) {
+    savedImages.push(Buffer.from(inputs[0].data))
+    return [{ attachmentId: 'frame-' + savedImages.length }]
+  } }
+  const originalCwd = process.cwd()
+  const originalBin = process.env.VIDEO2AGENT_BIN
+  __test.stopWorker()
+  process.chdir(fakeDir)
+  process.env.VIDEO2AGENT_BIN = process.execPath
+  try {
+    for (const [id, localPath, frameId] of [
+      ['ev_old', goodFrame, 'vid_x/frame_00000.jpg'],
+      ['ev_new', generationFrame, 'vid_x/' + generation + '/frame_00000.jpg'],
+    ]) {
+      const result = await registeredTool.execute({ command: 'evidence', video_id: 'vid_x', at: id })
+      assert.equal(result.ok, true)
+      const evidence = JSON.parse(result.text)
+      assert.deepEqual(evidence.image_attached, [true])
+      assert.deepEqual(savedImages.at(-1), fs.readFileSync(localPath))
+      const url = new URL(evidence.image_urls[0])
+      assert.equal(url.searchParams.get('id'), frameId)
+      assert.ok(!result.text.includes(home), 'evidence must not expose an absolute file path')
+      const browser = await call('GET', undefined, { path: url.pathname, url: url.pathname + url.search })
+      assert.equal(browser.status, 200)
+      assert.equal(browser.body, fs.readFileSync(localPath, 'utf8'))
+    }
+  } finally {
+    __test.stopWorker()
+    process.chdir(originalCwd)
+    process.env.VIDEO2AGENT_BIN = originalBin
+    attachmentsService = undefined
+  }
+}
+
 
 // The image allowance is only for /frame: every other read route must still
 // refuse a cross-site GET that claims to be an image.
@@ -1881,6 +1942,37 @@ const noOverview = JSON.parse((await call('GET', undefined, {
 })).body)
 assert.equal(noOverview.source, 'sidecar')
 assert.equal(noOverview.overview, null, 'overview=0 must skip the overview spawn')
+{
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-ready-overview-'))
+  const analysisFile = path.join(fakeDir, 'analysis.json')
+  const readsFile = path.join(fakeDir, 'overview-reads.txt')
+  fs.writeFileSync(path.join(fakeDir, 'overview'), `
+    const fs = require('node:fs');
+    fs.appendFileSync(${JSON.stringify(readsFile)}, '1');
+    process.stdout.write(fs.readFileSync(${JSON.stringify(analysisFile)}));
+  `)
+  const saveOverview = (title) => fs.writeFileSync(analysisFile, JSON.stringify({ ok: true, title }))
+  const saveRebuildJob = (state) => fs.writeFileSync(path.join(home, 'jobs', 'job_rebuild.json'), JSON.stringify({
+    ok: true, job: { id: 'job_rebuild', video_id: 'vid_rebuild', state, updated_at: new Date().toISOString() },
+  }))
+  const originalCwd = process.cwd()
+  const originalBin = process.env.VIDEO2AGENT_BIN
+  process.chdir(fakeDir)
+  process.env.VIDEO2AGENT_BIN = process.execPath
+  try {
+    saveOverview('previous index')
+    saveRebuildJob('running')
+    assert.equal((await pollJob('job_rebuild')).overview.title, 'previous index')
+    saveOverview('rebuilt index')
+    saveRebuildJob('ready')
+    assert.equal((await pollJob('job_rebuild')).overview.title, 'rebuilt index')
+    assert.equal((await pollJob('job_rebuild')).overview.title, 'rebuilt index')
+    assert.equal(fs.readFileSync(readsFile, 'utf8'), '11', 'the fresh ready overview should still be cached')
+  } finally {
+    process.chdir(originalCwd)
+    process.env.VIDEO2AGENT_BIN = originalBin
+  }
+}
 writeSidecar('job_stale', 'running', 16000)
 process.env.VIDEO2AGENT_BIN = 'definitely-missing-video2agent-binary-xyz'
 const stale = await call('GET', undefined, { path: '/api/video2agent/job', url: '/api/video2agent/job?id=job_stale' })
@@ -1951,7 +2043,7 @@ assert.equal(failedStatus.phase, 'error', 'a failed start must leave a visible s
     assert.equal(found.ok, true, 'a find call must succeed: ' + String(found.text).slice(0, 300))
     const last = JSON.parse(fs.readFileSync(__test.discoveryLastPath('sess-find'), 'utf8'))
     assert.equal(last.candidates[0].video_id, 'BV1fake00001', 'find must persist its candidates for the shortlist')
-    const curating = JSON.parse(fs.readFileSync(path.join(home, 'discovery', 'status.json'), 'utf8'))
+    const curating = JSON.parse(fs.readFileSync(__test.discoveryStatusPath('sess-find'), 'utf8'))
     assert.equal(curating.phase, 'curating', 'find must publish the curating state')
 
     const started = await registeredTool.execute({
@@ -2418,6 +2510,63 @@ assert.equal(JSON.parse(lateClear.body).cleared, false, 'a late clear must not d
 const survivor = JSON.parse((await call('GET', undefined, { path: '/api/video2agent/discovery/status', url: '/api/video2agent/discovery/status?session=alpha' })).body)
 assert.equal(survivor.status && survivor.status.phase, 'searching', 'the newer search must survive a late clear')
 assert.equal(survivor.status && survivor.status.at, newerAt, 'the newer search keeps its own at after claiming')
+// A late response must not replace a newer search in the same conversation.
+// Another conversation retains its own search and activity in parallel.
+{
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-session-activity-'))
+  const fsImport = "const fs = require('node:fs');"
+  const slowGate = path.join(fakeDir, 'search-release')
+  fs.writeFileSync(path.join(fakeDir, 'discover'), fsImport + `
+    const query = process.argv[2];
+    const reply = () => process.stdout.write(JSON.stringify({ok:true, query, candidates:[]}));
+    if (query === 'old query') {
+      const end = Date.now() + 8000;
+      const timer = setInterval(() => {
+        if (fs.existsSync(${JSON.stringify(slowGate)}) || Date.now() > end) {
+          clearInterval(timer);
+          reply();
+        }
+      }, 20);
+    } else reply();
+  `)
+  fs.writeFileSync(path.join(fakeDir, 'export'), "process.stdout.write('{\"ok\":true}');")
+  const originalCwd = process.cwd()
+  const originalBin = process.env.VIDEO2AGENT_BIN
+  const execFor = (id) => ({ agent: { session: { id } } })
+  const poll = async (route, sid) => JSON.parse((await call('GET', undefined, {
+    path: route, url: route + '?session=' + sid,
+  })).body)
+  const searchStatus = '/api/video2agent/discovery/status'
+  __test.stopWorker()
+  process.chdir(fakeDir)
+  process.env.VIDEO2AGENT_BIN = process.execPath
+  try {
+    const slow = registeredTool.execute({ command: 'find', query: 'old query' }, execFor('search-a'))
+    const until = Date.now() + 5000
+    while ((await poll(searchStatus, 'search-a')).status?.query !== 'old query' && Date.now() < until) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    const newer = registeredTool.execute({ command: 'find', query: 'new query' }, execFor('search-a'))
+    assert.equal((await newer).ok, true)
+    assert.equal((await registeredTool.execute({ command: 'find', query: 'second conversation' }, execFor('search-b'))).ok, true)
+    fs.writeFileSync(slowGate, '')
+    assert.equal((await slow).ok, true)
+    assert.equal((await poll(searchStatus, 'search-a')).status?.query, 'new query')
+    assert.equal((await poll(searchStatus, 'search-b')).status?.query, 'second conversation')
+    const route = '/api/video2agent/activity'
+    assert.equal((await registeredTool.execute({ command: 'admin', admin_action: 'export', video_id: 'vid_a' }, execFor('search-a'))).ok, true)
+    assert.equal((await registeredTool.execute({ command: 'admin', admin_action: 'export', video_id: 'vid_b' }, execFor('search-b'))).ok, true)
+    const a = (await poll(route, 'search-a')).activity
+    const b = (await poll(route, 'search-b')).activity
+    assert.equal(a?.state, 'ready')
+    assert.equal(b?.state, 'ready')
+    assert.notEqual(a?.id, b?.id)
+  } finally {
+    __test.stopWorker()
+    process.chdir(originalCwd)
+    process.env.VIDEO2AGENT_BIN = originalBin
+  }
+}
 assert.equal(routes.has('/api/video2agent/discovery/confirm'), false, 'the old confirm route must be gone')
 assert.equal(routes.has('/api/video2agent/discovery/pending'), false, 'the old pending route must be gone')
 assert.equal(routes.has('/api/video2agent/discovery/status'), true, 'the status route must exist')
@@ -2439,6 +2588,43 @@ assert.equal(JSON.parse(douyinClear.body).logged_in, false)
 // CLI can ingest again. It must not be rejected as an invalid source.
 const douyinRetry = await call('POST', JSON.stringify({ source: 'https://www.douyin.com/video/7665930064613199114' }), { path: '/api/video2agent/retry' })
 assert.notEqual(douyinRetry.status, 400, 'a Douyin source URL must be retryable')
+
+// Retry the exact failed request from its stored options and leave ordinary
+// retries eligible for reuse of a good index. An original explicit force stays.
+{
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-retry-options-'))
+  const source = 'D:/offline fixture/video.mp4'
+  fs.writeFileSync(path.join(fakeDir, 'jobs'), `
+    const opts = {profile:'deep', language:'en', collection:'Class notes',
+                  ocr_budget:24, reselect_ocr:true, force:process.argv.includes('job_force')};
+    process.stdout.write(JSON.stringify({ok:false, job:{state:'failed',
+      source:${JSON.stringify(source)}, options_json:JSON.stringify(opts)}}));
+  `)
+  const retryArgvFile = path.join(fakeDir, 'retry-argv.json')
+  fs.writeFileSync(path.join(fakeDir, 'ingest'), `
+    require('node:fs').writeFileSync(${JSON.stringify(retryArgvFile)}, JSON.stringify(process.argv.slice(2)));
+    process.stdout.write('{"ok":true,"job_id":"job_test","state":"running"}');
+  `)
+  const originalCwd = process.cwd()
+  const originalBin = process.env.VIDEO2AGENT_BIN
+  process.chdir(fakeDir)
+  process.env.VIDEO2AGENT_BIN = process.execPath
+  try {
+    for (const [jobId, force] of [['job_ordinary', false], ['job_force', true]]) {
+      const response = await call('POST', JSON.stringify({ job_id: jobId }), { path: '/api/video2agent/retry' })
+      assert.equal(response.status, 200, response.body)
+      const argv = JSON.parse(fs.readFileSync(retryArgvFile, 'utf8'))
+      assert.equal(argv[0], source)
+      assert.equal(flagValue(argv, '--profile'), 'deep')
+      assert.equal(flagValue(argv, '--ocr-budget'), '24')
+      assert.ok(argv.includes('--language=en') && argv.includes('--collection=Class notes') && argv.includes('--reselect-ocr'))
+      assert.equal(argv.includes('--force'), force)
+    }
+  } finally {
+    process.chdir(originalCwd)
+    process.env.VIDEO2AGENT_BIN = originalBin
+  }
+}
 
 // Validation still happens before any spawn.
 const defaultOutside = await registeredTool.execute({ command: 'shortlist', video_ids: ['BV1aaaaaaaa1'], default_selected: ['BV1bbbbbbbb1'], primary: 'BV1aaaaaaaa1' })
@@ -2528,6 +2714,45 @@ const allFail = await registeredTool.execute({
 assert.equal(allFail.error.code, 'E_START', 'a fully failed first wave must not be ok:true')
 const failedCampaignFiles = fs.readdirSync(path.join(home, 'campaigns')).map((f) => JSON.parse(fs.readFileSync(path.join(home, 'campaigns', f), 'utf8')))
 assert.equal(failedCampaignFiles.some((c) => c.status === 'failed'), true, 'an E_START campaign must not stay running forever')
+
+// Distinguish a missing engine from case-specific failures in every row of
+// the first wave. The latter must leave a usable campaign id and queue.
+{
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-recoverable-campaign-'))
+  fs.writeFileSync(path.join(fakeDir, 'ingest'), `
+    const index = Number(process.argv[2].split('BV1pad').at(-1));
+    const result = index < 10
+      ? {ok:false, error:{code:'E_SOURCE', message:'this video is unavailable'}}
+      : {ok:true, job_id:'job_pad_' + index, state:'running'};
+    process.exitCode = result.ok ? 0 : 1;
+    process.stdout.write(JSON.stringify(result));
+  `)
+  const originalCwd = process.cwd()
+  const originalBin = process.env.VIDEO2AGENT_BIN
+  process.chdir(fakeDir)
+  process.env.VIDEO2AGENT_BIN = process.execPath
+  try {
+    const response = await registeredTool.execute({
+      command: 'ingest', campaign: true, primary: many[0].video_id, video_ids: many.map((c) => c.video_id),
+    })
+    assert.equal(response.ok, true)
+    const batch = JSON.parse(response.text)
+    assert.equal(batch.jobs.length, 0)
+    assert.equal(batch.failed.length, 10)
+    assert.equal(batch.queued.length, 2)
+    const route = '/api/video2agent/campaign'
+    const url = route + '?id=' + batch.campaign_id
+    const waiting = JSON.parse((await call('GET', undefined, { path: route, url })).body)
+    assert.equal(waiting.queued, 2, 'reading the campaign must not launch the next wave')
+    const advanced = JSON.parse((await call('POST', '{}', { path: route, url })).body)
+    assert.equal(advanced.started, 2)
+    assert.equal(advanced.failed, 10)
+    assert.equal(advanced.queued, 0)
+  } finally {
+    process.chdir(originalCwd)
+    process.env.VIDEO2AGENT_BIN = originalBin
+  }
+}
 
 console.log('host settings ok: GET, POST, retired knobs, structured spawn error, error envelope render, CLI error passthrough, wait_ms, Config schema, write guards, origin, arg clamping, settings precedence, frame route, host-start shortlist, status route')
 fs.rmSync(home, { recursive: true, force: true })

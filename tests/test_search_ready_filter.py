@@ -182,8 +182,8 @@ class NoReadyVideoTest(unittest.TestCase):
         self.assertEqual(ctx.exception.as_dict()["code"], "E_NO_READY_VIDEO")
 
 
-class CappedWarningSurvivesTokenlessQueryTest(unittest.TestCase):
-    """A tokenizer-empty query must still declare the search-target cap."""
+class LargeLibrarySearchTest(unittest.TestCase):
+    """The index covers all ready videos even when per-video checks are capped."""
 
     @classmethod
     def setUpClass(cls):
@@ -191,15 +191,21 @@ class CappedWarningSurvivesTokenlessQueryTest(unittest.TestCase):
         cls.cfg = load_config(Path(cls.tmp.name))
         db = Database(cls.cfg.db_path)
         try:
-            # 201 ready videos: list_videos(limit=200) drops the oldest one, so
-            # SEARCH_TARGET_LIMIT triggers and the payload must say so.
             for i in range(201):
                 vid = f"vid_cap{i:03d}"
                 db.upsert_video({
                     "id": vid, "source_kind": "local", "source_uri": vid + ".mp4",
-                    "source_path": vid + ".mp4", "title": vid, "duration_ms": 60_000,
-                    "status": "ready",
+                    "source_path": vid + ".mp4", "title": vid if i else "外接屏幕", "duration_ms": 60_000,
+                    "status": "ready", "created_at": "2026-02-01" if i else "2026-01-01",
                 })
+            db.insert_segments("vid_cap000", [{
+                "start_ms": 6000, "end_ms": 8000, "source": "caption",
+                "text": "电容耦合", "tokens": tokens_for_search("电容耦合"),
+            }])
+            db.insert_ocr_tracks("vid_cap000", [{
+                "start_ms": 10000, "end_ms": 12000,
+                "text": "SubRip", "tokens": tokens_for_search("SubRip"),
+            }])
         finally:
             db.close()
 
@@ -212,6 +218,20 @@ class CappedWarningSurvivesTokenlessQueryTest(unittest.TestCase):
         codes = {w.get("code") for w in result.get("warnings") or []}
         self.assertIn("SEARCH_TARGETS_CAPPED", codes,
                       "the cap was dropped on the empty-literal path: " + repr(codes))
+
+    def test_indexed_modalities_find_the_oldest_video(self):
+        for query, modality, start_ms, end_ms in (
+            ("电容耦合", "transcript", 6000, 8000),
+            ("SubRip", "ocr", 10000, 12000),
+            ("外接屏幕", "video", None, None),
+        ):
+            with self.subTest(modality=modality):
+                result = search(self.cfg, query, modalities=[modality], limit=1,
+                                start_ms=start_ms, end_ms=end_ms)
+                self.assertEqual([hit["video_id"] for hit in result["results"]], ["vid_cap000"])
+                self.assertNotIn("SEARCH_TARGETS_CAPPED", {w["code"] for w in result["warnings"]})
+                self.assertEqual(result["visual_index"]["sampled_videos"], 200)
+                self.assertEqual(result["visual_index"]["total_videos"], 201)
 
 
 if __name__ == "__main__":

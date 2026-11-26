@@ -274,6 +274,85 @@ class EvidenceSameFrameTests(_HomeCase):
         self.assertEqual(data["ocr_frame_ms"], 1000)
         self.assertTrue(data["ocr"])
 
+    def test_nearby_legacy_ocr_is_not_used_for_the_picture(self):
+        boxes = [{"text": "当前画面 10 元", "confidence": 0.96, "bbox": [10, 10, 300, 40]}]
+        with Database(self.cfg.db_path) as db:
+            db.insert_ocr_tracks("vid_ocr", [{"start_ms": 1200, "end_ms": 1200, "text": "下一帧 99 元"}])
+            db.set_ocr_anchors("vid_ocr", [1000, 1200, 2500])
+        with patch("video2agent.pipeline.ocr_available", return_value=True), \
+                patch("video2agent.pipeline._local_ocr_boxes", return_value=boxes) as read:
+            data = pipeline.evidence(self.cfg, video_id="vid_ocr", at_ms=1000, image_budget=1)
+        read.assert_called_once_with(str(self.sample), None, False)
+        self.assertEqual(data["frame_ms"], 1000)
+        self.assertEqual(data["ocr_frame_ms"], 1000)
+        self.assertEqual([row["text"] for row in data["ocr"]], ["当前画面 10 元"])
+
+    def test_first_surviving_frame_is_the_one_read(self):
+        boxes = [{"text": "返回的画面", "confidence": 0.96, "bbox": [10, 10, 300, 40]}]
+        with Database(self.cfg.db_path) as db:
+            db.insert_frames("vid_ocr", [{"pts_ms": 1200, "path": str(self.frame_dir / "missing.jpg")}])
+            db.insert_ocr_tracks("vid_ocr", [{"start_ms": 1200, "end_ms": 1200, "text": "已清理的画面"}])
+        with patch("video2agent.pipeline.ocr_available", return_value=True), \
+                patch("video2agent.pipeline._local_ocr_boxes", return_value=boxes) as read:
+            data = pipeline.evidence(self.cfg, video_id="vid_ocr", at_ms=1200, image_budget=2)
+        read.assert_called_once_with(str(self.sample), None, False)
+        self.assertEqual(data["images"], [str(self.sample)])
+        self.assertEqual(data["frame_ms"], 1000)
+        self.assertEqual(data["ocr_frame_ms"], 1000)
+        self.assertEqual([row["text"] for row in data["ocr"]], ["返回的画面"])
+
+    def test_no_engine_preserves_unread_state_and_text_only_lookup(self):
+        with patch("video2agent.pipeline.ocr_available", return_value=False), \
+                patch("video2agent.pipeline.cloud.configured", return_value=False):
+            image = pipeline.evidence(self.cfg, video_id="vid_ocr", at_ms=1000, image_budget=1)
+            text = pipeline.evidence(self.cfg, video_id="vid_ocr", at_ms=1000, image_budget=0)
+        self.assertEqual(image["ocr"], [])
+        self.assertEqual(image["ocr_state"], "unread")
+        self.assertIsNone(image["ocr_frame_ms"])
+        self.assertIn("OCR_UNAVAILABLE", [warning["code"] for warning in image["warnings"]])
+        self.assertEqual([row["text"] for row in text["ocr"]], ["第二页文字"])
+        self.assertEqual(text["ocr_frame_ms"], 2500)
+
+    def test_a_successful_empty_read_is_reused_without_an_engine(self):
+        with patch("video2agent.pipeline.ocr_available", return_value=True), \
+                patch("video2agent.pipeline._local_ocr_boxes", return_value=[]) as read:
+            first = pipeline.evidence(self.cfg, video_id="vid_ocr", at_ms=1000, image_budget=1)
+        read.assert_called_once()
+        with patch("video2agent.pipeline.ocr_available", return_value=False), \
+                patch("video2agent.pipeline._local_ocr_boxes") as read:
+            second = pipeline.evidence(self.cfg, video_id="vid_ocr", at_ms=1000, image_budget=1)
+        read.assert_not_called()
+        self.assertEqual(second["ocr"], [])
+        self.assertEqual(second["ocr_state"], "read")
+        self.assertEqual(second["ocr_frame_ms"], 1000)
+        self.assertEqual(second["evidence_id"], first["evidence_id"])
+        codes = [warning["code"] for warning in second["warnings"]]
+        self.assertIn("OCR_EMPTY_FRAME", codes)
+        self.assertNotIn("OCR_UNAVAILABLE", codes)
+
+    def test_replaced_primary_frame_never_reuses_its_previous_ocr_or_citation(self):
+        companion = self.frame_dir / "f1300.jpg"
+        companion.write_bytes(b"companion frame")
+        with Database(self.cfg.db_path) as db:
+            db.insert_frames("vid_ocr", [{"pts_ms": 1300, "path": str(companion)}])
+        old_boxes = [{"text": "原始引用", "confidence": 0.96, "bbox": [10, 10, 300, 40]}]
+        new_boxes = [{"text": "新截图", "confidence": 0.96, "bbox": [10, 10, 300, 40]}]
+        with patch("video2agent.pipeline.ocr_available", return_value=True), \
+                patch("video2agent.pipeline._local_ocr_boxes", side_effect=[old_boxes, new_boxes]) as read:
+            original = pipeline.evidence(self.cfg, video_id="vid_ocr", at_ms=1000, image_budget=2)
+            self.sample.write_bytes(b"replacement frame")
+            fresh = pipeline.evidence(self.cfg, video_id="vid_ocr", at_ms=1000, image_budget=2)
+            replay = pipeline.evidence(self.cfg, video_id="vid_ocr", evidence_id=original["evidence_id"])
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(original["images"], [str(self.sample), str(companion)])
+        self.assertNotEqual(fresh["evidence_id"], original["evidence_id"])
+        self.assertEqual([row["text"] for row in fresh["ocr"]], ["新截图"])
+        self.assertEqual([row["text"] for row in replay["ocr"]], ["原始引用"])
+        self.assertEqual(replay["ocr_frame_ms"], 1000)
+        self.assertEqual(replay["images"], [])
+        self.assertIsNone(replay["frame_ms"])
+        self.assertNotIn("_image_hashes", replay)
+
 
 class EvidenceListAlignmentTests(_HomeCase):
     """frames and images must be the same list, even when a frame file is gone."""
@@ -351,6 +430,28 @@ class OcrRuntimeCacheTests(unittest.TestCase):
                 patch.object(visual, "_OCR_AVAILABLE", False), \
                 patch.object(visual, "_OCR_TRIED_AT", time.monotonic()):
             self.assertFalse(visual.ocr_available())
+
+    def test_builtin_rapidocr_bounds_thread_pools_without_overriding_custom_config(self):
+        import video2agent.visual as visual
+        made = []
+
+        def fake_engine(**kwargs):
+            made.append(kwargs)
+            return object()
+
+        with patch.object(visual, "_OCR_LOCAL", threading.local()), \
+                patch.object(visual, "ocr_engine", return_value=("rapidocr", fake_engine)), \
+                patch.object(visual.os, "process_cpu_count", return_value=4, create=True):
+            first = visual._engine_for_thread()
+            self.assertIs(first, visual._engine_for_thread())
+            visual._engine_for_thread("custom-ocr.yaml")
+        self.assertEqual(made, [
+            {"params": {
+                "EngineConfig.onnxruntime.intra_op_num_threads": 2,
+                "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+            }},
+            {"config_path": "custom-ocr.yaml"},
+        ])
 
     def test_the_engine_is_rebuilt_when_the_config_file_changes(self):
         import video2agent.visual as visual

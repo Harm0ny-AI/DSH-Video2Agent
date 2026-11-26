@@ -135,9 +135,10 @@ def _safe_filename(name: str) -> str:
     return name[:80] or "video"
 
 
-def download_video(url: str, cfg: Config, *, video_id: str, timeout: float = 3600) -> tuple[Path, dict[str, Any]]:
+def download_video(url: str, cfg: Config, *, video_id: str, timeout: float = 3600,
+                   cache_slot: str | None = None) -> tuple[Path, dict[str, Any]]:
     meta = fetch_metadata(url, cfg)
-    out_dir = ensure_dir(cfg.media_dir / video_id)
+    out_dir = ensure_dir(cfg.media_dir / video_id / (cache_slot or ""))
     template = str(out_dir / "source.%(ext)s")
     cmd = _ytdlp() + [
         "-f", str(cfg.get("ytdlp_format")),
@@ -200,7 +201,7 @@ def find_downloaded_subtitles(directory: str | Path) -> list[Path]:
     return sorted([*d.glob("*.vtt"), *d.glob("*.srt")])
 
 
-def _douyin_source(ref: dict[str, Any], cfg: Config) -> dict[str, Any]:
+def _douyin_source(ref: dict[str, Any], cfg: Config, *, cache_slot: str | None = None) -> dict[str, Any]:
     """Build an ingest source from one Douyin video (SSR metadata + direct mp4)."""
     from .douyin import download, get_item, is_image_post
 
@@ -217,7 +218,7 @@ def _douyin_source(ref: dict[str, Any], cfg: Config) -> dict[str, Any]:
         )
     canonical = str(ref["url"])
     vid = stable_id("vid", canonical)
-    out_dir = ensure_dir(cfg.media_dir / vid)
+    out_dir = ensure_dir(cfg.media_dir / vid / (cache_slot or ""))
     target = out_dir / "source.mp4"
     if not (target.is_file() and target.stat().st_size > 50_000):
         download(item, target)
@@ -273,7 +274,7 @@ def _douyin_source(ref: dict[str, Any], cfg: Config) -> dict[str, Any]:
     }
 
 
-def resolve_source(source: str, cfg: Config) -> dict[str, Any]:
+def resolve_source(source: str, cfg: Config, *, cache_slot: str | None = None) -> dict[str, Any]:
     text = str(source).strip()
     p = Path(text).expanduser()
     if p.exists() and p.is_file():
@@ -299,7 +300,7 @@ def resolve_source(source: str, cfg: Config) -> dict[str, Any]:
     if ref:
         text = ref["url"]
     if ref and ref.get("platform") == "douyin":
-        return _douyin_source(ref, cfg)
+        return _douyin_source(ref, cfg, cache_slot=cache_slot) if cache_slot else _douyin_source(ref, cfg)
     if ref is None and re.match(r"https?://", text, re.I) and re.search(
         r"^https?://(?:www\.|m\.)?(?:ies)?douyin\.com/(?:share/)?user/", text, re.I
     ):
@@ -312,8 +313,9 @@ def resolve_source(source: str, cfg: Config) -> dict[str, Any]:
         assert_public_url(text, allow_private=bool(cfg.get("allow_private_urls")))
         meta = fetch_metadata(text, cfg)
         vid = stable_id("vid", text)
-        out_dir = ensure_dir(cfg.media_dir / vid)
-        path, meta2 = download_video(text, cfg, video_id=vid)
+        out_dir = ensure_dir(cfg.media_dir / vid / (cache_slot or ""))
+        path, meta2 = (download_video(text, cfg, video_id=vid, cache_slot=cache_slot)
+                       if cache_slot else download_video(text, cfg, video_id=vid))
         meta = {**meta, **meta2}
         info = probe(path)
         digest = sha256_file(path)
@@ -402,7 +404,9 @@ def discover_bilibili(query: str, cfg: Config, *, limit: int = 8, covers: bool =
             "cover_ocr": cover_text,
             "duration_ms": int(float(meta.get("duration") or 0) * 1000) if meta.get("duration") else None,
             "uploader": meta.get("uploader") or meta.get("channel"),
+            "uploader_id": meta.get("uploader_id") or meta.get("channel_id"),
             "published_at": meta.get("upload_date"),
+            "published_ts": meta.get("timestamp"),
             "description": desc[:300],
             "stats": {k: meta.get(k) for k in ("view_count", "like_count", "comment_count") if meta.get(k) is not None},
         })

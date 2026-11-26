@@ -93,6 +93,40 @@ assert.equal(failedSnap.failed, 1)
 assert.equal(failedSnap.ready, 11)
 assert.equal(failedSnap.total, 12)
 
+// If every video in the first wave fails independently, a read-only refresh
+// leaves later waves queued. Concurrent advancing requests start exactly one.
+failFirst = true
+const recovered = await campaigns.start(failureCandidates.slice(0, 3), 'session-recover', 1)
+assert.equal(recovered.items[0].state, 'failed')
+assert.equal(recovered.status, 'running')
+const beforeAdvance = started.length
+const refresh = campaigns.refresh(recovered.id)
+const advance = campaigns.tick(recovered.id)
+const duplicateAdvance = campaigns.tick(recovered.id)
+assert.equal((await refresh).items[1].state, 'queued')
+const [afterAdvance] = await Promise.all([advance, duplicateAdvance])
+assert.equal(afterAdvance.items[1].state, 'running')
+assert.equal(afterAdvance.items[2].state, 'queued')
+assert.equal(started.length, beforeAdvance + 1, 'concurrent advance must start only one wave')
+
+// Infrastructure failures affect all selections. Do not start each later wave
+// only to repeat the same failure.
+let systemAttempts = 0
+const unavailable = createCampaignManager({
+  home: () => home, readJobSidecar,
+  startShortlistJobs: async (selected) => {
+    systemAttempts++
+    return { jobs: [], failed: selected.map((item) => ({
+      video_id: item.video_id, error_code: 'E_SPAWN', error_message: 'engine unavailable',
+    })) }
+  },
+})
+const blocked = await unavailable.start(failureCandidates.slice(0, 3), 'session-blocked', 1)
+assert.equal(blocked.status, 'failed')
+assert.ok(blocked.items.every((item) => item.state === 'failed' && item.error_code === 'E_SPAWN' && !item.job_id))
+await unavailable.tick(blocked.id)
+assert.equal(systemAttempts, 1, 'an unavailable engine must not start later waves')
+
 // A vanished sidecar must fail the row after 240 ticks instead of keeping the
 // campaign "running" forever (a crashed worker).
 const missingCampaign = await campaigns.start([{

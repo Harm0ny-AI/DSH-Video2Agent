@@ -22,6 +22,7 @@ class CachePolicyCorruptTest(unittest.TestCase):
         (self.cfg.home / "ui-settings.json").write_text("{not json", encoding="utf-8")
         policy = storage.cache_policy(self.cfg)
         self.assertFalse(policy["expire"], "a corrupt file must not expire the cache")
+        self.assertFalse(policy["limit_enabled"], "a corrupt file must not activate the default cap")
         self.assertTrue(policy.get("corrupt"))
 
     def test_non_object_disables_expiry(self):
@@ -35,6 +36,10 @@ class CachePolicyCorruptTest(unittest.TestCase):
         policy = storage.cache_policy(self.cfg)
         self.assertFalse(policy["expire"])
         self.assertEqual(policy["days"], 30)
+
+    def test_saved_off_takes_precedence_over_default_cap(self):
+        (self.cfg.home / "ui-settings.json").write_text('{"cacheLimitEnabled":false}', encoding="utf-8")
+        self.assertFalse(storage.cache_policy(self.cfg, {"cacheLimitEnabled": True})["limit_enabled"])
 
     def test_infinity_limit_falls_back(self):
         (self.cfg.home / "ui-settings.json").write_text(

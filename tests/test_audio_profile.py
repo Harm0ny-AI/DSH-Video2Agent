@@ -4,7 +4,9 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from video2agent import media
 from video2agent.media import audio_profile, speech_profile
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -63,7 +65,10 @@ class AudioProfileTests(unittest.TestCase):
     @unittest.skipUnless(_have_vad() and (FIXTURES / "speech.mp4").exists(),
                          "no speech fixture or VAD")
     def test_real_speech_is_detected(self):
-        profile = audio_profile(FIXTURES / "speech.mp4")
+        with patch.object(media, "run", wraps=media.run) as ffmpeg:
+            profile = audio_profile(FIXTURES / "speech.mp4")
+        stats_command = next(call.args[0] for call in ffmpeg.call_args_list if "-af" in call.args[0])
+        self.assertIn("-vn", stats_command)
         self.assertEqual(profile["source"], "silero")
         self.assertGreater(profile["speech_ratio"], 0.3)
         self.assertIsNotNone(profile["first_speech_ms"])

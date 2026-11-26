@@ -488,7 +488,7 @@ window.__ModuleLoader__.load({
     // A failed cover request must not leave an empty white box that collapses
     // the row. This inline placeholder is a play glyph on a neutral surface.
     const COVER_FALLBACK = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="54"><rect width="96" height="54" fill="#2c2c2e"/><path d="M38 17v20l18-10z" fill="#8b8172"/></svg>')
-    const DEFAULT_SETTINGS = { enabled: true, cacheTtlMs: 24 * 60 * 60 * 1000, cacheExpire: true, cacheDays: 7, cacheLimitEnabled: false, cacheLimitGb: 20, accentColor: '#0a84ff', processLimit: 10 }
+    const DEFAULT_SETTINGS = { enabled: true, cacheTtlMs: 24 * 60 * 60 * 1000, cacheExpire: true, cacheDays: 7, cacheLimitEnabled: true, cacheLimitGb: 20, accentColor: '#0a84ff', processLimit: 10 }
     const SETTINGS_LISTENERS = new Set()
     let SETTINGS = null
 
@@ -2009,6 +2009,22 @@ window.__ModuleLoader__.load({
     const ENGINE_POLL_RECOVERY_MS = 15000
     const ENGINE_POLL_MAX = 120
 
+    // Version truth beats a leftover update flag. Only two numeric x.y.z values
+    // are comparable; anything else must not suppress a real failure.
+    const versionTriplet = (value) => {
+      const match = String(value || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/)
+      return match ? match.slice(1).map((part) => parseInt(part, 10) || 0) : null
+    }
+    const versionAtLeast = (actual, target) => {
+      const left = versionTriplet(actual)
+      const right = versionTriplet(target)
+      if (!left || !right) return false
+      for (let i = 0; i < 3; i += 1) {
+        if (left[i] !== right[i]) return left[i] > right[i]
+      }
+      return true
+    }
+
     // Environment check + one-click install. The plugin cannot run the Python
     // CLI by itself, so this card is where a new user finds out what is missing
     // and fixes it without a terminal. Installs are initiated here only.
@@ -2166,8 +2182,7 @@ window.__ModuleLoader__.load({
       // exact DPAPI error the user is looking at.
       const updateCli = !!(data && data.canInstall && data.canInstall.updateCli)
       const plugin = data && data.plugin ? data.plugin : null
-      // A pending plugin reload pauses the engine-update nudge; the explicit
-      // manual action stays available below.
+      // Reload the plugin before offering any engine update action.
       const pluginRestart = !!(plugin && plugin.restart_required)
       const engine = data && data.engine_update ? data.engine_update : null
       const engineState = engine ? String(engine.state || '') : ''
@@ -2177,11 +2192,24 @@ window.__ModuleLoader__.load({
       // update in progress also supersedes it: a failed manual POST followed by
       // a re-check that reports a running update used to show both "正在更新"
       // and "更新失败" (plus a retry button) at the same time.
-      const engineFailed = !engineUpdating && (engineState === 'failed'
+      const engineVersion = String((engine && engine.target) || (data && data.cli && data.cli.version) || '')
+      const cliVersion = String((data && data.cli && data.cli.version) || '')
+      const targetVersion = String((engine && engine.target) || (data && data.cli && data.cli.latest) || '')
+      // An update offer, a failed marker or a failed manual result can outlive the
+      // update itself. Only a comparable CLI/target pair makes that stale; an
+      // unknown version leaves the Host's own flags and failure state alone.
+      const cliCurrent = !!(data && data.cli && data.cli.ok)
+        && versionAtLeast(cliVersion, targetVersion)
+      // A pending plugin reload owns the card: no failure copy, retry or engine
+      // nudge (progress and success still render below).
+      const engineFailed = !engineUpdating && !pluginRestart && !cliCurrent && (engineState === 'failed'
         || (!!(updateResult && updateResult.state === 'failed') && engineState !== 'ready'))
       const engineReady = !engineFailed && !engineUpdating
         && ((engineState === 'ready' && sawUpdatingRef.current) || !!(updateResult && updateResult.state === 'ready'))
-      const engineVersion = String((engine && engine.target) || (data && data.cli && data.cli.version) || '')
+      // Keep a failed manual engine POST hidden when a later read proves the CLI
+      // is already current, or while the plugin restart owns the card; the log
+      // line belongs to that same stale failure.
+      const staleEngineLog = !!(updateResult && updateResult.state === 'failed') && (cliCurrent || pluginRestart)
       // A background update is Host work, not page work: follow it only while it
       // is actually running, stop as soon as it settles, and never poll a broken
       // Host forever. A fast failure streak is retried twice at a slower pace;
@@ -2292,28 +2320,19 @@ window.__ModuleLoader__.load({
           ? h('div', { 'data-vp-env-engine': 'ready', style: { marginTop: '7px', fontSize: '11.5px', color: '#1a7f37' } },
               '视频引擎已更新' + (engineVersion ? '至 ' + engineVersion : ''))
           : null,
-        updateCli && !engineUpdating && !engineFailed
-          ? (pluginRestart
-            // While a plugin reload is pending the card must not push an engine
-            // update, but the explicit manual action stays available.
-            ? h('div', { style: { marginTop: '7px' } },
-                h('button', {
-                  'data-vp-bili-btn': '',
-                  'data-vp-env-engine-manual': '',
-                  disabled: !!busy,
-                  onClick: () => install('update-cli'),
-                  style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' },
-                }, busy === 'update-cli' ? '更新中…' : '更新引擎'))
-            : h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
-                h('span', { style: { fontSize: '11px', color: '#9a6700' } },
-                  '视频引擎可更新：' + (data.cli.version || '?') + ' → ' + (data.cli.latest || '?')),
-                h('button', {
-                  'data-vp-bili-btn': '',
-                  disabled: !!busy,
-                  onClick: () => install('update-cli'),
-                  style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' },
-                }, busy === 'update-cli' ? '更新中…' : '更新引擎'),
-              ))
+        // A pending plugin reload pauses all engine-update actions and copy; the
+        // restart notice is the only engine-related line the card adds.
+        updateCli && !pluginRestart && !engineUpdating && !engineFailed && !cliCurrent
+          ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
+              h('span', { style: { fontSize: '11px', color: '#9a6700' } },
+                '视频引擎可更新：' + (data.cli.version || '?') + ' → ' + (data.cli.latest || '?')),
+              h('button', {
+                'data-vp-bili-btn': '',
+                disabled: !!busy,
+                onClick: () => install('update-cli'),
+                style: { padding: '2px 8px', fontSize: '11px', lineHeight: '18px' },
+              }, busy === 'update-cli' ? '更新中…' : '更新引擎'),
+            )
           : null,
         missing.length
           ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '7px' } },
@@ -2341,7 +2360,7 @@ window.__ModuleLoader__.load({
         missing.some((entry) => entry.key === 'python')
           ? h('div', { style: { fontSize: '11px', color: 'var(--vp-muted,#63605a)', marginTop: '6px' } }, (data && data.hints && data.hints.python) || '先安装 Python 3.11+。')
           : null,
-        log ? h('pre', { 'data-vp-env-log': '', style: { marginTop: '6px', maxHeight: '120px', overflow: 'auto', fontSize: '10.5px', whiteSpace: 'pre-wrap' } }, log) : null,
+        log && !staleEngineLog ? h('pre', { 'data-vp-env-log': '', style: { marginTop: '6px', maxHeight: '120px', overflow: 'auto', fontSize: '10.5px', whiteSpace: 'pre-wrap' } }, log) : null,
       )
     }
 
@@ -3223,7 +3242,7 @@ window.__ModuleLoader__.load({
             h('input', { type: 'checkbox', checked: draft.douyinSearch === true, onChange: (e) => updateUi({ douyinSearch: e.target.checked }) })
           ),
           h('div', { 'data-vp-muted': '', style: { fontSize: '11px' } },
-            '默认关闭。抖音平台搜索风控严格；开启后若遇到验证，需要你在 Chrome 窗口完成。')
+            '除用户指定平台外，默认不使用抖音搜索。抖音平台搜索风控严格，触发风控需用户手动完成。')
         ),
         h('label', { 'data-vp-settings-row': '' },
           h('span', {}, '主题色'),
@@ -3692,22 +3711,7 @@ window.__ModuleLoader__.load({
               collapsed: false,
               evidence: null,
             })
-            const first = snap.jobs.find((job) => job && job.primary && job.job_id) || snap.jobs.find((job) => job && job.job_id)
-            if (first && first.job_id) {
-              publishLive({
-                sessionId: sid,
-                origin: 'batch',
-                jobId: String(first.job_id),
-                videoId: first.video_id || '',
-                title: first.title || '',
-                coverUrl: first.cover_url || '',
-                duration: first.duration_ms ? fmtTime(first.duration_ms) : undefined,
-                phase: 'running',
-                pct: 0,
-                stage: '已经启动，正在准备',
-                createdAt: new Date().toISOString(),
-              })
-            }
+            // Only the job poll can publish live progress for a restored batch.
           } catch {}
         }
         // Recursive setTimeout: the hidden delay is re-read every tick, so a tab
@@ -3820,8 +3824,10 @@ window.__ModuleLoader__.load({
       // Both spellings: Python writes canceled, but a legacy sidecar may say cancelled.
       const terminal = (state) => state === 'ready' || state === 'failed'
         || state === 'canceled' || state === 'cancelled'
+      const liveState = (state) => state === 'running' || state === 'queued'
       const rowKey = (job) => String((job && (job.job_id || job.video_id || job.source)) || '')
       const rows = jobs.map((job) => ({ ...job, ...(status[job.job_id] || {}) }))
+      const visibleRows = rows.filter((job) => !job.job_id || terminal(job.state) || status[job.job_id]?.state)
       const pendingQueued = rows.some((job) => job.state === 'queued' || (!job.job_id && !terminal(job.state)))
       const anyRunning = pendingQueued || rows.some((job) => job.job_id && !terminal(job.state))
       const allTerminal = rows.length > 0 && !anyRunning
@@ -3829,7 +3835,7 @@ window.__ModuleLoader__.load({
       const ok = rows.filter((job) => job.state === 'ready').length
       const failed = rows.filter((job) => job.state === 'failed').length
       const canceled = rows.filter((job) => job.state === 'canceled' || job.state === 'cancelled').length
-      const running = rows.filter((job) => !terminal(job.state)).length
+      const running = visibleRows.filter((job) => !terminal(job.state)).length
       const coverFor = (job) => {
         if (!job) return ''
         // cover_url is an image URL; `source` is a page URL or a local path, so
@@ -3890,15 +3896,9 @@ window.__ModuleLoader__.load({
             try {
               const response = await fetch('/api/video2agent/job?id=' + encodeURIComponent(job.job_id) + '&overview=0')
               if (!response.ok) {
-                if (response.status !== 404) {
-                  // A 500 is not "the job was deleted": keep the row visible and
-                  // let the next poll retry instead of offering a misleading restart.
-                  next[job.job_id] = {
-                    state: job.state,
-                    message: '进度更新中断，请稍后重试。',
-                  }
-                  return
-                }
+                // Transient failures cannot confirm a state or overwrite the
+                // last confirmed progress. Retry on the next poll.
+                if (response.status !== 404) return
                 misses[job.job_id] = (misses[job.job_id] || 0) + 1
                 if (misses[job.job_id] >= 3) {
                   next[job.job_id] = {
@@ -3913,9 +3913,10 @@ window.__ModuleLoader__.load({
               misses[job.job_id] = 0
               const data = await response.json()
               const live = data && data.job
-              if (!live) return
+              const state = live && (live.state === 'done' ? 'ready' : live.state)
+              if (!liveState(state) && !terminal(state)) return
               next[job.job_id] = {
-                state: live.state || job.state,
+                state,
                 stage: live.stage || job.stage,
                 message: live.message || job.message,
                 progress: live.progress,
@@ -3942,20 +3943,24 @@ window.__ModuleLoader__.load({
             }
           }
           const merged = jobs.map((job) => ({ ...job, ...(next[job.job_id] || {}) }))
+          const confirmedLive = (job) => job.job_id && liveState(next[job.job_id]?.state)
           if (firstPoll.current) {
+            const hasLiveJob = merged.some(confirmedLive)
+            // A missing or failed reply leaves cached rows unverified. Unless
+            // all jobs are terminal, keep the table hidden and check again.
+            if (!hasLiveJob && merged.some((job) => job.job_id && !terminal(job.state))) return
             firstPoll.current = false
-            const stillRunning = merged.some((job) => job && job.job_id && !terminal(job.state))
-            setHydrated(true)
-            if (!stillRunning) {
+            if (!hasLiveJob) {
               stopped = true
               if (timer) { clearInterval(timer); timer = null }
               clearBatch(sid)
               return
             }
+            setHydrated(true)
           }
-          const active = merged.find((job) => job.primary && job.job_id && !job.lost && !terminal(job.state))
-            || merged.find((job) => job.origin === 'shortlist' && job.job_id && !job.lost && !terminal(job.state))
-            || merged.find((job) => job.job_id && !job.lost && !terminal(job.state))
+          const active = merged.find((job) => job.primary && confirmedLive(job))
+            || merged.find((job) => job.origin === 'shortlist' && confirmedLive(job))
+            || merged.find(confirmedLive)
           if (active) {
             const fresh = LAST_BATCH_LIVE.get(sid) !== active.job_id
             LAST_BATCH_LIVE.set(sid, active.job_id)
@@ -4034,15 +4039,15 @@ window.__ModuleLoader__.load({
       if (hydratedSid !== sid || !hydrated) return null
       // A turn ending must not hide a batch that is still running in the
       // background. Only a terminal history record waits for its fade/clear.
-      if (!sessionRunning && !freshTerminal && !anyRunning) return null
-      if (!rows.length || dismissed || restoredTerminal) return null
+      if (!sessionRunning && !freshTerminal && !running) return null
+      if (!visibleRows.length || dismissed || restoredTerminal) return null
 
       if (queue && queue.collapsed) {
         // The pill must show the row that is actually being worked on, not the
         // primary: after a dedupe the primary can already be finished while the
         // last row still runs, and the pill showed the wrong cover.
-        const activeRow = rows.find((job) => job && !terminal(job.state))
-        const top = activeRow || rows.find((job) => job.primary) || rows[0]
+        const activeRow = visibleRows.find((job) => !terminal(job.state))
+        const top = activeRow || visibleRows.find((job) => job.primary) || visibleRows[0]
         const topCover = coverFor(top)
         const label = allTerminal ? (failed ? '失败' : canceled ? '已取消' : '已完成') : '正在处理'
         return h('div', { 'data-vp-queue': '', 'data-vp-queue-collapsed': '', 'data-vp-queue-pill-job': String(top && top.job_id || ''), 'data-terminal': allTerminal ? 'true' : undefined },
@@ -4098,8 +4103,8 @@ window.__ModuleLoader__.load({
       // video was not first (campaign waves, a retried row, a queued row without a
       // job id): the table said "正在处理" on row 3 while the ring sat on row 2.
       const isRunning = (job) => job && job.state === 'running' && !!job.job_id
-      const runningJob = rows.find((job) => isRunning(job) && job.primary) || rows.find(isRunning)
-      const activeJob = runningJob || rows.find((job) => !terminal(job.state))
+      const runningJob = visibleRows.find((job) => isRunning(job) && job.primary) || visibleRows.find(isRunning)
+      const activeJob = runningJob || visibleRows.find((job) => !terminal(job.state))
       const rawProgress = activeJob ? Number(activeJob.progress) : 0
       const activeProgress = Number.isFinite(rawProgress)
         ? Math.max(0.08, Math.min(1, rawProgress > 1 ? rawProgress / 100 : rawProgress))
@@ -4125,7 +4130,7 @@ window.__ModuleLoader__.load({
             }, '清除')
             : null
         ),
-        h('div', { 'data-vp-queue-rows': '' }, rows.map((job) => {
+        h('div', { 'data-vp-queue-rows': '' }, visibleRows.map((job) => {
           const state = String(job.state || 'running')
           const key = rowKey(job)
           const isCanceling = !!(canceling[key] || job.canceling)

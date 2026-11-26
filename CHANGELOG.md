@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.3.8 (2026-11-26)
+
+- **Ask about the subtitles while visual analysis continues.** Once subtitles
+  are ready, the agent can read them and check known moments in the video.
+
+- **Reopening a conversation verifies saved video jobs before showing progress.**
+  Missing or temporarily unavailable status no longer revives old running cards.
+
+- **Bilibili fallback search honors creator and date filters.** Results with
+  dates that cannot be verified are excluded when a date filter is in use.
+- **The Douyin search setting explains when Douyin search is used and when
+  manual verification is required.**
+- **Background video jobs stay windowless on Windows.**
+
+- **Search covers the full ready library.** Older videos can match via
+  subtitles, speech transcripts, on-screen text, titles and descriptions, even
+  in libraries with more than 200 videos. Expensive per-video fallbacks are
+  still bounded and report their coverage.
+- **Local on-screen text reads use fewer CPU resources.** Default RapidOCR
+  sessions have bounded CPU thread pools, improving single-frame reads and
+  short-window OCR without changing the models, input frames or output format.
+- **Video outlines scan only audio for speech and loudness hints.** Picture
+  decoding is no longer repeated for this step.
+
+- **Settings no longer offer a redundant engine update.** While the plugin is
+  waiting for DSH to reopen, the update row only prompts for that restart. If
+  the video engine is already up to date, stale update and retry buttons stay
+  hidden.
+
+- **Re-analysis preserves the previous result until the new analysis succeeds.**
+  Earlier evidence remains available, and reprocessing a link after media
+  cleanup restores the source without rebuilding the index when the bytes match.
+- **Evidence text matches the returned frame.** Library searches honor the
+  requested time range, and saved evidence can be reopened from the plugin tool.
+- **Video tasks recover more reliably.** A failed first wave can leave later
+  videos queued for processing. Search progress stays with its conversation,
+  retry keeps the original analysis options, and a stopped worker is reported
+  while waiting.
+- **The existing 20 GB media cache limit is enabled by default.** Explicit
+  cache settings still apply, and automatic cleanup preserves the searchable
+  library.
+
+- **Updated download security dependencies.** Requires yt-dlp 2026.10.26 or
+  later and certifi 2026.10.19 or later.
+
 ## 0.3.7 (2026-11-24)
 
 - **Older engines move into a versioned private environment on startup.** An
