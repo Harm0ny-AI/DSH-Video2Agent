@@ -28,15 +28,7 @@ check the upload date and patch in the title, and say when the video predates it
 
 ## Call it directly
 
-Call the `video2agent` tool as a top-level tool whenever the harness allows it.
-Never shell out to the CLI for a tool action. A nested `run_code` call bypasses
-the plugin's dock rendering, so use it only when the harness exposes no other way
-to reach the tool; the card may stay blank.
-
-## Answer in chat; export only when asked
-
-A video answer belongs in chat. Do not create or export a file unless the user
-asks for it.
+Call `video2agent` as a top-level tool; never shell out to the CLI. Use `run_code` only when no top-level tool exists. Answer in chat unless the user asks to export.
 
 ## The eight commands
 
@@ -55,20 +47,11 @@ asks for it.
 
 ### 1. Find
 
-`find` with `query`; Bilibili by default. Use `scope:"douyin"` when the user asks for Douyin
-or Douyin creator (login needed; if challenged, say so, don't web-search). Filter by uploader/date.
-The reply is for you: ingest only the ids you recommend (`default_selected`;
-`video_ids` lists candidates) plus `primary`. Over `processLimit` → `campaign:true`.
-
-A pasted URL → `find` with `url` (title/cover/duration, no download), then
-`ingest` once the user wants it.
+`find` with `query` (Bilibili default; `scope:"douyin"` when asked, don't web-search on login challenges). Filter by uploader/date. Pass only recommended ids in `default_selected` (+ `primary`, `video_ids` shortlist; over `processLimit` → `campaign:true`). For a URL, resolve with `find(url)` before `ingest`.
 
 ### 2. Ingest
 
-`ingest(source)` starts a video. Reuse shortlist jobs. Wait with `job_id` and
-`wait_ms` (one job, max 90s; don't loop on `queued`). For speech use `scope:"transcript"`;
-`transcript_ready:true` lets `read` use that `video_id` immediately. For a full
-review wait for completion. Wrong transcript language → `ingest(language)`.
+`ingest(source)` starts a video. Wait with `job_id` + `wait_ms` (max 90s, never loop `queued`). For speech use `scope:"transcript"`; once `transcript_ready:true`, `read` works immediately. Omit `scope` for full visual analysis. Wrong ASR language → `ingest(language)`.
 
 ### 3. Read
 
@@ -87,30 +70,27 @@ timestamped transcript/OCR lines, keyframes, scene cuts, and coverage. Then:
 
 ### 3b. Short-video fast path
 
-For a clip under ~6 minutes where the question is about **what was said** (not
-what was on screen), skip `outline` and call `read` directly: the whole
-transcript usually fits one reply (~150–800 tokens) versus ~1.4k tokens plus a
-contact-sheet image for `outline`. Measured: the 6,000-character `read` cap
-covers ~8 min of fast Chinese commentary and ~5.5–7 min of English. If the
-reply carries `next_start_ms`, it was cut — switch to `search`/`outline` for
-the rest instead of paging. Use `outline` when you need structure, on-screen
-text, or visuals; use `perceive` for motion. If the user pastes the
-transcript/subtitles themselves, answer from that text and use the video only
-for the moments that need a picture.
+For speech questions on a clip under ~6 min, skip `outline` and call `read`
+directly (~150–800 tokens vs ~1.4k + sheet). The 6k-char `read` cap fits ~8 min
+zh / ~6 min en; if `next_start_ms` appears, search with `find(scope:"library")`.
+Use `outline` (`detail:"digest"`) for structure, on-screen text, or visuals (9
+diverse keyframes in a 3×3 sheet + `visual_highlights`). On subtitled videos,
+search/read the transcript before scanning frames; if digest or transcript
+already answers clearly, answer directly without extra frames.
 
 ### 4. Look (evidence / frames)
 
-`evidence` with `at` returns the frame plus its on-screen text and transcript.
-Default 2 images; `images:0` for text only, `images:1` for one picture.
+`evidence` (`at`) returns frame + OCR + transcript (default 2 images; `images:0`
+for text only, `1` for one picture). `frames` is for visual QA (counting, action,
+colour, layout):
 
-`frames` is for what text cannot answer (counting, action, colour, layout):
-
-- `at` + `count`: exact frames.
-- `start`/`end`: a dense window (≤5 s); `sheet:true` tiles up to 9 frames into
-  one labelled image; `windows:N` samples a named range into one coverage image
-  and reports covered/missing.
-- `view:"candidates"`: shot list (timecodes + keyframes) for "find one segment".
-- `view:"ocr"`: OCR every frame of a short window when an on-screen line changes.
+- `at` + `count`: exact frames (`count:1` only when counting, reading small UI, or
+  confirming an ambiguous tile). With `sheet:true`, a comma list (`at:"t1,t2,..."`,
+  such as `visual_highlights.inspect_at`) packs up to 16 moments into **1** sheet.
+- `start`/`end` + `sheet:true`: up to 16 tiles in **1** sheet; ranges >5s auto-cover
+  the whole span instead of clamping to 5s. Always set `sheet:true` for range scans
+  unless you intentionally want multiple image attachments.
+- `view:"candidates"`: shot list (`include_images:true` for 1 sheet); `view:"ocr"`: OCR window.
 
 ### 5. Motion (perceive)
 
@@ -151,6 +131,7 @@ duplicate frames, flicker) as numbers.
 - **A picture and its text come from the same frame** — trust `ocr_frame_ms`.
 - **Don't dump.** `read` is capped (default 6000 chars); `outline` is compact;
   use ranges and `next_start_ms`.
+- **Stay on visual tools for visual QA.** Do not call `admin` (`list`/`export`/`ocr-index`) or loop `read`/`find(scope:"library")` when a video has no transcript; use `outline(detail:"digest")` (not `overview`, which is metadata-only), `visual_highlights.inspect_at`, `frames(..., sheet:true)`, and `count:1` zoom. On long videos, if 2–3 full-range sheets (≤4 images total) show no sign of the target, conclude it is not shown rather than slicing endlessly.
 - **Do not call a tool for every video**: the transcript answers content;
   `perceive` is for temporal/UI questions.
 

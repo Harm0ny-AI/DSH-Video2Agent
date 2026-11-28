@@ -666,3 +666,125 @@ def best_frame(frames: list[dict[str, Any]], *, prefer_text: bool = True) -> dic
         return (float(f.get("sharpness") or 0) * 0.6 + float(f.get("text_coverage") or 0) * 0.4
                 if prefer_text else float(f.get("sharpness") or 0))
     return max(frames, key=key)
+
+
+def _load_frame_vectors(frames: list[dict[str, Any]], *, max_scan: int = 240) -> list[tuple[dict[str, Any], np.ndarray, float]]:
+    """Tiny 16x16 grayscale vectors of already-saved frames (JPEG draft decode, no new files)."""
+    valid = [f for f in frames if f.get("path") and Path(str(f["path"])).is_file()]
+    if not valid:
+        return []
+    valid.sort(key=lambda f: int(f.get("pts_ms") or 0))
+    if len(valid) > max_scan:
+        idxs = [round(i * (len(valid) - 1) / (max_scan - 1)) for i in range(max_scan)]
+        valid = [valid[i] for i in idxs]
+    out: list[tuple[dict[str, Any], np.ndarray, float]] = []
+    for frame in valid:
+        try:
+            with Image.open(str(frame["path"])) as im:
+                im.draft("L", (32, 32))
+                small = im.convert("L").resize((16, 16), Image.Resampling.BILINEAR)
+                arr = np.asarray(small, dtype=np.float32).reshape(-1) / 255.0
+                out.append((frame, arr, float(arr.std())))
+        except Exception:
+            continue
+    return out
+
+
+def pick_diverse_frames(frames: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    """`count` frames covering the whole timeline, preferring visually distinctive ones.
+
+    The timeline is split into `count` strata so no stretch goes unseen; inside each
+    stratum the frame that differs most from the video's typical picture (and from the
+    frames already picked) wins, so short pop-ups surface instead of falling between
+    uniform strides. Ties keep the earliest frame.
+    """
+    if count <= 0 or not frames:
+        return []
+    valid = [f for f in frames if f.get("path") and Path(str(f["path"])).is_file()]
+    if not valid:
+        return []
+    valid.sort(key=lambda f: int(f.get("pts_ms") or 0))
+    if len(valid) <= count:
+        return valid
+    if count == 1:
+        return [valid[len(valid) // 2]]
+    loaded = _load_frame_vectors(valid)
+    if len(loaded) <= count:
+        return [item[0] for item in loaded]
+    vecs = np.stack([item[1] for item in loaded], axis=0)
+    median_vec = np.median(vecs, axis=0)
+    novelty = np.mean(np.abs(vecs - median_vec), axis=1)
+    n = len(loaded)
+    picked_indices: list[int] = []
+    picked_vecs: list[np.ndarray] = []
+    for slot in range(count):
+        lo = (slot * n) // count
+        hi = max(lo + 1, ((slot + 1) * n) // count)
+        candidates = list(range(lo, hi))
+        textured = [i for i in candidates if loaded[i][2] >= 0.03]
+        pool = textured or candidates
+        best_idx = pool[0]
+        best_score = -1.0
+        for idx in pool:
+            score = float(novelty[idx])
+            if picked_vecs:
+                score += 0.6 * min(float(np.mean(np.abs(vecs[idx] - pv))) for pv in picked_vecs)
+            if score > best_score + 1e-6:
+                best_score = score
+                best_idx = idx
+        picked_indices.append(best_idx)
+        picked_vecs.append(vecs[best_idx])
+    picked_indices.sort()
+    return [loaded[i][0] for i in picked_indices]
+
+
+def visual_frame_highlights(frames: list[dict[str, Any]], *, top_k: int = 8, min_gap_ms: int = 5000) -> dict[str, Any]:
+    """Most distinctive moments and sharpest picture jumps among saved frames (~ms, no new work)."""
+    loaded = _load_frame_vectors(frames)
+    if len(loaded) < 3:
+        return {"novel_moments": [], "visual_jumps": []}
+    vecs = np.stack([item[1] for item in loaded], axis=0)
+    median_vec = np.median(vecs, axis=0)
+    novelty = np.mean(np.abs(vecs - median_vec), axis=1)
+    jumps = np.zeros(len(loaded), dtype=np.float32)
+    jumps[1:] = np.mean(np.abs(vecs[1:] - vecs[:-1]), axis=1)
+
+    def _top_spaced(scores: np.ndarray, k: int, *, min_score: float) -> list[dict[str, Any]]:
+        order = sorted(range(len(loaded)), key=lambda i: float(scores[i]), reverse=True)
+        chosen: list[dict[str, Any]] = []
+        for idx in order:
+            val = float(scores[idx])
+            if val < min_score:
+                break
+            pts = int(loaded[idx][0].get("pts_ms") or 0)
+            if any(abs(pts - int(c["t_ms"])) < min_gap_ms for c in chosen):
+                continue
+            chosen.append({"t_ms": pts, "score": round(val, 3)})
+            if len(chosen) >= k:
+                break
+        chosen.sort(key=lambda c: c["t_ms"])
+        return chosen
+
+    return {
+        "novel_moments": _top_spaced(novelty, top_k, min_score=0.06),
+        "visual_jumps": _top_spaced(jumps, top_k, min_score=0.10),
+    }
+
+
+def format_inspect_at(highlights: dict[str, Any], *, max_items: int = 8, min_gap_ms: int = 2000) -> str:
+    """Merge ranked highlight timestamps into a chronological comma-separated `frames(at=...)` string."""
+    picked: list[int] = []
+    for key in ("novel_moments", "visual_jumps", "motion_peaks"):
+        for item in highlights.get(key) or []:
+            if not isinstance(item, dict) or item.get("t_ms") is None:
+                continue
+            pts = max(0, int(item["t_ms"]))
+            if any(abs(pts - seen) < min_gap_ms for seen in picked):
+                continue
+            picked.append(pts)
+            if len(picked) >= max_items:
+                break
+        if len(picked) >= max_items:
+            break
+    picked.sort()
+    return ",".join(f"{pts / 1000:.1f}s" for pts in picked)

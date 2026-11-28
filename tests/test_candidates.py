@@ -61,6 +61,61 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(starts[0], 0)
         self.assertGreater(starts[-1], starts[0])
 
+    def test_long_shot_candidates_show_the_matching_moment(self):
+        with Database(self.cfg.db_path) as db:
+            db.upsert_video({
+                "id": "vid_long_shot", "source_kind": "local", "source_uri": "long.mp4",
+                "source_path": "long.mp4", "title": "long", "duration_ms": 90_000,
+                "status": "ready", "analysis_version": "0.3.8",
+            })
+            db.insert_scenes("vid_long_shot", [{"start_ms": 0, "end_ms": 90_000, "cut_score": 0.2}])
+            db.insert_segments("vid_long_shot", [
+                {"start_ms": 81_000, "end_ms": 82_000, "text": "calibration finished",
+                 "source": "caption", "confidence": 1.0, "tokens": tokens_for_search("calibration finished")},
+            ])
+            db.insert_frames("vid_long_shot", [
+                {"pts_ms": 15_000, "path": "start.jpg"},
+                {"pts_ms": 45_000, "path": "middle.jpg"},
+                {"pts_ms": 74_000, "path": "before.jpg"},
+                {"pts_ms": 81_600, "path": "match.jpg"},
+            ])
+        result = candidates(self.cfg, "vid_long_shot", query="calibration finished", limit=1)
+        pick = result["candidates"][0]
+        self.assertEqual((pick["start_ms"], pick["end_ms"]), (60_000, 90_000))
+        self.assertEqual(pick["keyframe_ms"], 81_600)
+        self.assertEqual(pick["text"], "calibration finished")
+        fallback = candidates(self.cfg, "vid_long_shot", query="unknown", limit=3)
+        self.assertEqual([row["keyframe_ms"] for row in fallback["candidates"]], [15_000, 45_000, 74_000])
+
+    def test_long_shot_candidates_target_matching_ocr_cue(self):
+        with Database(self.cfg.db_path) as db:
+            db.upsert_video({
+                "id": "vid_long_ocr", "source_kind": "local", "source_uri": "ocr.mp4",
+                "source_path": "ocr.mp4", "title": "ocr", "duration_ms": 90_000,
+                "status": "ready", "analysis_version": "0.3.8",
+            })
+            db.insert_scenes("vid_long_ocr", [{"start_ms": 0, "end_ms": 90_000, "cut_score": 0.2}])
+            db.insert_ocr_tracks("vid_long_ocr", [
+                {"start_ms": 48_000, "end_ms": 50_000, "text": "Export SRT Subtitles",
+                 "confidence": 0.95, "tokens": tokens_for_search("Export SRT Subtitles")},
+            ])
+            db.insert_frames("vid_long_ocr", [
+                {"pts_ms": 34_000, "path": "early.jpg"},
+                {"pts_ms": 49_200, "path": "ocr_hit.jpg"},
+            ])
+        result = candidates(self.cfg, "vid_long_ocr", query="Export SRT", limit=1)
+        pick = result["candidates"][0]
+        self.assertEqual((pick["start_ms"], pick["end_ms"]), (30_000, 60_000))
+        self.assertEqual(pick["keyframe_ms"], 49_200)
+        self.assertEqual(pick["text"], "Export SRT Subtitles")
+
+    def test_no_saved_frame_does_not_point_at_the_next_shot(self):
+        result = candidates(self.cfg, VID, limit=6, images=True)
+        for row in result["candidates"]:
+            self.assertLessEqual(row["start_ms"], row["keyframe_ms"])
+            self.assertLess(row["keyframe_ms"], row["end_ms"])
+        self.assertEqual(result["candidates"][1]["keyframe_ms"], 15_000)
+
     def test_without_a_query_shots_are_evenly_spaced(self):
         data = candidates(self.cfg, VID, limit=3)
         starts = [c["start_ms"] for c in data["candidates"]]

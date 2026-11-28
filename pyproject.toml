@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "video2agent"
-version = "0.3.8"
-description = "Bilibili/Douyin favorites gathering dust? Want your agent to gain video retrieval and understanding? Choose Video2Agent! One-click install gives your agent top-tier video understanding and turns online video into an information source. Whether you are researching social trends or working in media, any task that requires watching videos can now be handed to Video2Agent. Local-first; optional cloud ASR/OCR; optional Bilibili/Douyin login to unlock favorites/history and CC/AI subtitles."
+version = "0.3.9"
+description = "Want your agent to search & understand videos? Choose Video2Agent! One-click install turns online & local videos into an agent source (Video-MME 87.8%). Local-first; optional login/cloud."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

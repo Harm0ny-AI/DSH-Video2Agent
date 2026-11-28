@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — turn favorites into knowledge, a DSH plugin (dsh-video2agent)" width="100%">
+  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — give your agent video retrieval and understanding, a DSH plugin (dsh-video2agent)" width="100%">
 </p>
 
 <p align="center">
@@ -14,14 +14,14 @@
   <img alt="Local-first" src="https://img.shields.io/badge/local--first-8b5cf6">
 </p>
 
-<h1 align="center">Bilibili/Douyin favorites gathering dust?<br>Give your agent video retrieval and understanding.</h1>
+<h1 align="center">Give your agent video retrieval and understanding.</h1>
 
 <p align="center">
-  Bilibili/Douyin favorites gathering dust? Want your agent to gain video retrieval and understanding? Choose Video2Agent! One-click install gives your agent top-tier video understanding and turns online video into an information source. Whether you are researching social trends or working in media, any task that requires watching videos can now be handed to Video2Agent. Local-first; optional cloud ASR/OCR; optional Bilibili/Douyin login to unlock favorites/history and CC/AI subtitles.
+  Want your agent to search and understand videos? Choose Video2Agent! One-click install turns Bilibili, Douyin &amp; local videos into a searchable agent knowledge base — read favorites, inspect long videos, and compare multiple clips with source-frame evidence (Video-MME 87.8%). Local-first; optional cloud recognition and optional Bilibili/Douyin login.
 </p>
 
 <p align="center">
-  <a href="#favorites-shouldnt-be-where-videos-go-to-die">Favorites</a> ·
+  <a href="#turn-favorites-and-long-videos-into-knowledge">Overview</a> ·
   <a href="#faster-broader-cheaper">Benchmarks</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#what-it-does">What it does</a> ·
@@ -38,13 +38,30 @@
 
 <p align="center"><sub><b>1 Paste</b> → <b>2 Process</b> → <b>3 Ask</b></sub></p>
 
+### 30-second quick install
+
+```bash
+dsh plugin --profile web add dsh-video2agent
+```
+
+After installing, open **Environment Check** in the plugin settings page to install any missing components in one click; or run `pip install video2agent` manually (requires Python 3.11+ and FFmpeg).
+
+### Why Video2Agent
+
+| Comparison | Caption-only summarizers | Single-grid viewers | **Video2Agent** |
+| :--- | :---: | :---: | :---: |
+| **Video sources** | Single links only | Single links only | **Bilibili + Douyin favorites/likes + local files** |
+| **Batch comparison** | Not supported | Not supported | **Compare 1–10 videos for consensus & conflicts** |
+| **Source-frame proof** | No visual context | No library-wide search | **Search text & timecodes first, then verify exact frames** |
+| **Local & token budget** | Text only | Heavy per-query image calls | **Local-first index, ~99% fewer tokens (Video-MME 87.8%)** |
+
 ---
 
-## Favorites shouldn’t be where videos go to die
+## Turn favorites and long videos into knowledge
 
-Saved videos across Bilibili and Douyin are where good videos pile up and never get watched: saved because they looked useful, then lost, unfinished, forgotten.
+Saved videos across Bilibili and Douyin pile up fast: useful when bookmarked, hard to find or finish when needed.
 
-Stop letting good videos gather dust! Video2Agent reads the video first—transcript, on-screen text, scenes, key frames—into your own local knowledge base. Then all you do is ask:
+Video2Agent reads the video first—transcript, on-screen text, scenes, key frames—into your own local knowledge base. Then all you do is ask:
 
 - **“What does this one actually say?”** → a few minutes of reading, with timecodes;
 - **“What was that table at 12:00?”** → the source frame plus the text on that same frame;
@@ -152,24 +169,7 @@ Skill installed by `video2agent setup` teaches the model the tool order and cita
 
 ## How it works
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant A as Agent
-  participant V as video2agent
-  participant D as SQLite + FTS5
-  Note over V: ingest once: probe → captions/ASR → scenes → frames → OCR → visual segments
-  A->>V: search / digest / transcript
-  V->>D: FTS5 + stored segments
-  D-->>V: text hits
-  V-->>A: text + timecode
-  opt proof needed
-    A->>V: evidence / frames
-    V->>V: read the same frame + OCR/transcript
-    V-->>A: image + text + timecode
-  end
-  A-->>A: answer with citation
-```
+![How Video2Agent works](docs/assets/architecture.en.svg)
 
 **Design rules**
 
@@ -207,8 +207,7 @@ The dark social card and marketplace card live in [`docs/assets/`](docs/assets).
 
 ## Marketplace
 
-Native DSH plugin (`dsh.bundle` → `cordis.patch.yml`), prepared for the
-[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) list.
+Native DSH plugin (`dsh.bundle` → `cordis.patch.yml`), listed on the [DSH Plugin Marketplace](https://awesome-dsh-plugin.com/p/Harm0ny-AI/DSH-Video2Agent--packages-dsh-video2agent/) ([awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)).
 
 - Category: `vision`
 - Install surface: `video2agent` tool + `/video` command; the CLI is the shared engine.

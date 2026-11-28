@@ -56,6 +56,42 @@ class FramesSheetTests(unittest.TestCase):
         self.assertNotIn("sheet", data)
         self.assertEqual(len(data["images"]), 1)
 
+    def test_portrait_sheet_keeps_information_at_both_ends(self):
+        def portrait(_src, _t, out, **_kwargs):
+            frame = Image.new("RGB", (180, 320), (40, 40, 40))
+            frame.paste((230, 30, 30), (0, 0, 180, 48))
+            frame.paste((30, 210, 30), (0, 272, 180, 320))
+            frame.save(out)
+
+        with patch.object(pipeline, "extract_frames_batch", return_value={}), \
+             patch.object(pipeline, "extract_frame", side_effect=portrait):
+            data = pipeline.frames(self.cfg, VID, start_ms=1_000, end_ms=2_000, fps=2, sheet=True)
+        with Image.open(data["sheet"]) as sheet:
+            self.assertEqual(sheet.height, 342)
+            top = sheet.getpixel((90, 20))
+            bottom = sheet.getpixel((90, 300))
+            self.assertGreater(top[0], 190)
+            self.assertGreater(bottom[1], 170)
+
+    def test_square_sheet_uses_square_tiles_and_keeps_all_edges(self):
+        def square(_src, _t, out, **_kwargs):
+            frame = Image.new("RGB", (300, 300), (40, 40, 40))
+            frame.paste((230, 30, 30), (0, 0, 300, 40))
+            frame.paste((30, 210, 30), (0, 260, 300, 300))
+            frame.paste((30, 30, 230), (0, 40, 40, 260))
+            frame.paste((220, 200, 30), (260, 40, 300, 260))
+            frame.save(out)
+
+        with patch.object(pipeline, "extract_frames_batch", return_value={}), \
+             patch.object(pipeline, "extract_frame", side_effect=square):
+            data = pipeline.frames(self.cfg, VID, start_ms=1_000, end_ms=2_000, fps=2, sheet=True)
+        with Image.open(data["sheet"]) as sheet:
+            self.assertEqual(sheet.size, (720, 262), "3 tiles of 240x240 + 22px label")
+            self.assertGreater(sheet.getpixel((120, 12))[0], 190)
+            self.assertGreater(sheet.getpixel((120, 228))[1], 170)
+            self.assertGreater(sheet.getpixel((12, 120))[2], 190)
+            self.assertGreater(sheet.getpixel((228, 120))[0], 180)
+
     def test_windows_cover_the_range_without_reading_it_all(self):
         with patch.object(pipeline, "extract_frame", side_effect=fake_extract):
             data = pipeline.frames(self.cfg, VID, start_ms=0, end_ms=60_000, windows=6)

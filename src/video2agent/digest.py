@@ -6,16 +6,18 @@ contact sheet so the host model can decide what to inspect next.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from .db import Database
 from .media import audio_profile
 from .text import normalize_text
 from .util import Video2AgentError, ensure_dir, not_ready_error
+from .visual import format_inspect_at, pick_diverse_frames, visual_frame_highlights
 
 OCR_RELIABLE_MIN = 0.5
 # Bounded on purpose: these hints ride in every digest call, so 16 cuts and 6
@@ -99,49 +101,77 @@ def _evenly(items: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
     return [items[i] for i in idx]
 
 
+def _cached_audio_profile(source_path: str, cache_dir: Path, *, max_gaps: int = MAX_SILENCES) -> dict[str, Any] | None:
+    """audio_profile keyed by the source file's size/mtime: a repeat digest skips the ffmpeg/VAD pass."""
+    if not source_path or not Path(source_path).exists():
+        return None
+    try:
+        st = Path(source_path).stat()
+        stamp: dict[str, Any] | None = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "max_gaps": max_gaps}
+    except OSError:
+        stamp = None
+    cache_file = Path(cache_dir) / "audio_profile.json"
+    if stamp and cache_file.is_file():
+        try:
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and cached.get("stamp") == stamp and isinstance(cached.get("profile"), dict):
+                return cached["profile"]
+        except (OSError, ValueError):
+            pass
+    profile = audio_profile(source_path, max_gaps=max_gaps)
+    if stamp and isinstance(profile, dict):
+        try:
+            ensure_dir(Path(cache_dir))
+            cache_file.write_text(json.dumps({"stamp": stamp, "profile": profile}, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+    return profile
+
+
 def _contact_sheet(frames: list[dict[str, Any]], out_dir: Path, max_frames: int = 6) -> tuple[str | None, list[dict[str, Any]], int]:
-    limit = max(1, min(6, int(max_frames or 6)))
-    picked = _evenly([f for f in frames if f.get("path") and Path(str(f["path"])).exists()], limit)
+    limit = max(1, min(16, int(max_frames or 6)))
+    existing = [f for f in frames if f.get("path") and Path(str(f["path"])).exists()]
+    picked = pick_diverse_frames(existing, limit)
     if not picked:
         return None, [], 0
-    th, tw = 180, 320
     label_h = 24
     # Decode first, then size the canvas from usable tiles. This avoids both
     # a blank slot for a corrupt frame and a needlessly wide black canvas.
-    tiles: list[tuple[Any, dict[str, Any]]] = []
+    raw_tiles: list[tuple[Any, dict[str, Any]]] = []
     for frame in picked:
         try:
             with Image.open(str(frame["path"])) as img:
-                tile = img.convert("RGB")
-                # Cover-fit; never stretch a UI screenshot.
-                ratio = max(tw / tile.width, th / tile.height)
-                tile = tile.resize((max(1, int(tile.width * ratio)), max(1, int(tile.height * ratio))), Image.Resampling.LANCZOS)
-                left = max(0, (tile.width - tw) // 2)
-                top = max(0, (tile.height - th) // 2)
-                tile = tile.crop((left, top, left + tw, top + th))
-                tiles.append((tile, frame))
+                raw_tiles.append((img.convert("RGB"), frame))
         except Exception:
             # A corrupt frame must not become a black tile in a successful sheet.
             continue
-    if not tiles:
+    if not raw_tiles:
         return None, [], 0
-    columns = min(3, len(tiles))
-    rows = max(1, (len(tiles) + columns - 1) // columns)
+    width, height = raw_tiles[0][0].size
+    if height > width:
+        tw, th = 180, 320
+    elif width < 1.5 * height:
+        tw, th = 240, 240
+    else:
+        tw, th = 320, 180
+    columns = min(3, len(raw_tiles)) if len(raw_tiles) <= 9 else 4
+    rows = max(1, (len(raw_tiles) + columns - 1) // columns)
     sheet = Image.new("RGB", (tw * columns, (th + label_h) * rows), (20, 20, 20))
     draw = ImageDraw.Draw(sheet)
     font = ImageFont.load_default()
     keys: list[dict[str, Any]] = []
-    for slot, (tile, frame) in enumerate(tiles):
+    for slot, (tile, frame) in enumerate(raw_tiles):
         x = (slot % columns) * tw
         y = (slot // columns) * (th + label_h)
-        sheet.paste(tile, (x, y))
-        draw.rectangle((x, y + th, x + tw, y + th + label_h), fill=(16, 16, 16))
+        fitted = ImageOps.contain(tile, (tw, th), Image.Resampling.LANCZOS)
+        sheet.paste(fitted, (x + (tw - fitted.width) // 2, y + (th - fitted.height) // 2))
+        draw.rectangle((x, y + th, x + tw - 1, y + th + label_h - 1), fill=(16, 16, 16))
         draw.text((x + 6, y + th + 5), _format_ms(int(frame.get("pts_ms") or 0)), fill=(235, 235, 235), font=font)
         keys.append({"index": slot, "t_ms": int(frame.get("pts_ms") or 0),
                      "timecode": _format_ms(int(frame.get("pts_ms") or 0))})
     out_dir = ensure_dir(out_dir)
-    target = out_dir / (f"digest_sheet_{int(picked[0]['pts_ms'])}_"
-                        f"{int(picked[-1]['pts_ms'])}_{len(tiles)}.jpg")
+    target = out_dir / (f"digest_sheet_{int(raw_tiles[0][1]['pts_ms'])}_"
+                        f"{int(raw_tiles[-1][1]['pts_ms'])}_{len(raw_tiles)}.jpg")
     sheet.save(target, "JPEG", quality=85)
     return str(target), keys, len(keys)
 
@@ -206,7 +236,8 @@ def digest(cfg: Any, video_id: str, *, max_chars: int = 6000, max_frames: int = 
     # work and tells the model where the picture probably changed.
     cuts = _evenly(scenes[1:], MAX_SCENE_CUTS)
     source_path = str(video.get("source_path") or "")
-    audio = audio_profile(source_path, max_gaps=MAX_SILENCES) if source_path and Path(source_path).exists() else None
+    audio = _cached_audio_profile(source_path, cfg.derived_dir / video_id, max_gaps=MAX_SILENCES)
+    highlights = visual_frame_highlights(frames, top_k=6) if len(frames) > max(1, int(max_frames or 6)) else None
     warnings: list[dict[str, Any]] = []
     if not segments:
         warnings.append({"code": "NO_TRANSCRIPT", "message": "没有转写；digest 只含画面/OCR。"})
@@ -223,9 +254,11 @@ def digest(cfg: Any, video_id: str, *, max_chars: int = 6000, max_frames: int = 
         # model treat the first N characters as the whole video.
         warnings.append({
             "code": "DIGEST_SAMPLED",
-            "message": f"转写是抽样：只含前 {chars} 字符（到 {_format_ms(next_start)}），不是全片。"
-                       f"用 read --start 从 next_start_ms 继续，或先用 search 定位。",
+            "message": f"转写仅含前 {chars} 字符（到 {_format_ms(next_start)}），未覆盖后半段；"
+                       f"若找特定内容请先用 find(scope='library', queries=[...]) 搜关键词，再看画面。",
         })
+    transcript_chars = sum(len(str(seg.get("text") or "")) for seg in segments)
+    low_text = (not segments) or (transcript_chars < 150)
     cues = _score_cues(ocr)
     payload: dict[str, Any] = {
         "ok": True,
@@ -263,4 +296,21 @@ def digest(cfg: Any, video_id: str, *, max_chars: int = 6000, max_frames: int = 
         # field would imply "no scoring in this video" on every non-sports video.
         payload["score_cues"] = cues
         payload["score_cues_truncated"] = len(cues) >= MAX_SCORE_CUES
+    if highlights and (highlights.get("novel_moments") or highlights.get("visual_jumps")):
+        inspect_at = format_inspect_at(highlights)
+        vh_payload: dict[str, Any] = {
+            "novel_moments_ms": [m["t_ms"] for m in highlights["novel_moments"]],
+            "visual_jumps_ms": [m["t_ms"] for m in highlights["visual_jumps"][:4]],
+        }
+        if inspect_at:
+            vh_payload["inspect_at"] = inspect_at
+            if low_text:
+                vh_payload["hint"] = (
+                    f"无字幕视频；可用 frames(at='{inspect_at}', sheet=true) 一张拼图查看画面突变点。"
+                )
+            else:
+                vh_payload["note"] = (
+                    "仅当字幕无法回答（如短暂弹窗/无配音画面）时，再用 frames(at=inspect_at, sheet=true) 一图核查。"
+                )
+        payload["visual_highlights"] = vh_payload
     return payload

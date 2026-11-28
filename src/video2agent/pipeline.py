@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import time
+from bisect import bisect_left
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -81,6 +82,9 @@ plan_ocr_budget = lazy_call("video2agent.visual", "plan_ocr_budget")
 select_ocr_frames = lazy_call("video2agent.visual", "select_ocr_frames")
 text_coverage_for = lazy_call("video2agent.visual", "text_coverage_for")
 visual_segments = lazy_call("video2agent.visual", "visual_segments")
+pick_diverse_frames = lazy_call("video2agent.visual", "pick_diverse_frames")
+visual_frame_highlights = lazy_call("video2agent.visual", "visual_frame_highlights")
+format_inspect_at = lazy_call("video2agent.visual", "format_inspect_at")
 
 Progress = Callable[[str, float, str], None]
 
@@ -3109,16 +3113,22 @@ def _evidence_warnings(db: Database, video: dict[str, Any], extra: list[dict[str
 
 
 CANDIDATE_WINDOW_MS = 15000
+CANDIDATE_MAX_SHOT_MS = 30000
 
 
 def _candidate_shots(scenes: list[dict[str, Any]], duration_ms: int) -> list[dict[str, Any]]:
-    """Scene shots, or fixed windows when the record has no scene cuts."""
+    """Preserve cuts and subdivide long shots; use fixed windows without cuts."""
     shots: list[dict[str, Any]] = []
     for scene in scenes:
         start = max(0, int(scene.get("start_ms") or 0))
         end = int(scene.get("end_ms") or 0)
+        end = min(end, duration_ms or end)
         if end > start:
-            shots.append({"start_ms": start, "end_ms": min(end, duration_ms or end)})
+            length = end - start
+            count = (length + CANDIDATE_MAX_SHOT_MS - 1) // CANDIDATE_MAX_SHOT_MS
+            for i in range(count):
+                shots.append({"start_ms": start + length * i // count,
+                              "end_ms": start + length * (i + 1) // count})
     if shots:
         return shots
     total = max(0, duration_ms)
@@ -3143,7 +3153,21 @@ def _evenly_pick(items: list[dict[str, Any]], count: int) -> list[dict[str, Any]
 SHEET_TILE = (320, 180)
 
 
-def _sheet_layout(count: int, max_cols: int = 4) -> tuple[int, int]:
+def _diverse_pick_shots(shots: list[dict[str, Any]], frames: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    """Spread picks over time but favour shots whose saved keyframe looks distinctive.
+
+    Falls back to even spacing when there are not enough shots with a readable saved frame.
+    """
+    by_ms = {int(f["pts_ms"]): f for f in frames if f.get("path") and Path(str(f["path"])).is_file()}
+    backed = [{**by_ms[int(s["keyframe_ms"])], "_shot": s} for s in shots if int(s["keyframe_ms"]) in by_ms]
+    if len(backed) > count:
+        chosen = pick_diverse_frames(backed, count)
+        if chosen:
+            return [item["_shot"] for item in chosen]
+    return _evenly_pick(shots, count)
+
+
+def _sheet_layout(count: int, max_cols: int = 4, *, tile_size: tuple[int, int] = SHEET_TILE) -> tuple[int, int]:
     """Columns/rows for `count` tiles with the fewest empty cells.
 
     The sheet must never show blank cells: the caller may have fewer candidates
@@ -3158,8 +3182,8 @@ def _sheet_layout(count: int, max_cols: int = 4) -> tuple[int, int]:
     for cols in range(2, min(max_cols, count) + 1):
         rows = (count + cols - 1) // cols
         empty = cols * rows - count
-        width = cols * SHEET_TILE[0]
-        height = rows * (SHEET_TILE[1] + 22)
+        width = cols * tile_size[0]
+        height = rows * (tile_size[1] + 22)
         # Log distance keeps 4x2 (wide) ahead of 2x4 (tall) for seven tiles,
         # instead of letting the absolute ratio favour the tall layout.
         key = (empty, abs(math.log((width / height) / (16 / 9))), -cols)
@@ -3170,7 +3194,7 @@ def _sheet_layout(count: int, max_cols: int = 4) -> tuple[int, int]:
 
 def _montage(cfg: Config, video_id: str, tiles: list[dict[str, Any]], *,
              filename: str = "montage_sheet.jpg",
-             max_tiles: int = 9) -> tuple[str | None, list[dict[str, Any]]]:
+             max_tiles: int = 16) -> tuple[str | None, list[dict[str, Any]]]:
     """Tile picture paths into one labelled image, re-flowing to the real count.
 
     One image with nine tiles replaces nine `frames --at` calls when the question
@@ -3179,7 +3203,7 @@ def _montage(cfg: Config, video_id: str, tiles: list[dict[str, Any]], *,
     seven-tile sheet, which no practical rectangle fills).
     """
     from PIL import Image as PILImage
-    from PIL import ImageDraw, ImageFont
+    from PIL import ImageDraw, ImageFont, ImageOps
 
     chosen: list[tuple[Any, dict[str, Any]]] = []
     for tile in tiles[:max_tiles]:
@@ -3189,30 +3213,33 @@ def _montage(cfg: Config, video_id: str, tiles: list[dict[str, Any]], *,
         try:
             with PILImage.open(path) as img:
                 thumb = img.convert("RGB")
-                ratio = max(SHEET_TILE[0] / thumb.width, SHEET_TILE[1] / thumb.height)
-                thumb = thumb.resize((max(1, int(thumb.width * ratio)), max(1, int(thumb.height * ratio))),
-                                     PILImage.Resampling.LANCZOS)
-                left = max(0, (thumb.width - SHEET_TILE[0]) // 2)
-                top = max(0, (thumb.height - SHEET_TILE[1]) // 2)
-                thumb = thumb.crop((left, top, left + SHEET_TILE[0], top + SHEET_TILE[1]))
         except Exception:
             continue
         chosen.append((thumb, tile))
     if not chosen:
         return None, []
-    cols, rows = _sheet_layout(len(chosen))
+    width, height = chosen[0][0].size
+    if height > width:
+        tile_size = SHEET_TILE[::-1]
+    elif width < 1.5 * height:
+        tile_size = (240, 240)
+    else:
+        tile_size = SHEET_TILE
+    tile_w, tile_h = tile_size
+    cols, rows = _sheet_layout(len(chosen), tile_size=tile_size)
     label_h = 22
-    sheet = PILImage.new("RGB", (SHEET_TILE[0] * cols, (SHEET_TILE[1] + label_h) * rows), (18, 18, 18))
+    sheet = PILImage.new("RGB", (tile_w * cols, (tile_h + label_h) * rows), (18, 18, 18))
     draw = ImageDraw.Draw(sheet)
     font = ImageFont.load_default()
     meta: list[dict[str, Any]] = []
     for position, (thumb, tile) in enumerate(chosen):
-        x = (position % cols) * SHEET_TILE[0]
-        y = (position // cols) * (SHEET_TILE[1] + label_h)
-        sheet.paste(thumb, (x, y))
-        draw.rectangle((x, y + SHEET_TILE[1], x + SHEET_TILE[0], y + SHEET_TILE[1] + label_h), fill=(14, 14, 14))
+        x = (position % cols) * tile_w
+        y = (position // cols) * (tile_h + label_h)
+        thumb = ImageOps.contain(thumb, tile_size, PILImage.Resampling.LANCZOS)
+        sheet.paste(thumb, (x + (tile_w - thumb.width) // 2, y + (tile_h - thumb.height) // 2))
+        draw.rectangle((x, y + tile_h, x + tile_w - 1, y + tile_h + label_h - 1), fill=(14, 14, 14))
         label = str(tile.get("label") or "")
-        draw.text((x + 6, y + SHEET_TILE[1] + 5), label, fill=(235, 235, 235), font=font)
+        draw.text((x + 6, y + tile_h + 5), label, fill=(235, 235, 235), font=font)
         item = {"timecode": label, "tile": position}
         if tile.get("t_ms") is not None:
             item["t_ms"] = int(tile["t_ms"])
@@ -3226,7 +3253,7 @@ def _montage(cfg: Config, video_id: str, tiles: list[dict[str, Any]], *,
 
 def _candidate_sheet(cfg: Config, video_id: str, picks: list[dict[str, Any]],
                      frames: list[dict[str, Any]], *,
-                     max_tiles: int = 9) -> tuple[str | None, list[dict[str, Any]]]:
+                     max_tiles: int = 16) -> tuple[str | None, list[dict[str, Any]]]:
     """Montage of the candidate keyframes (up to 9, one and the same image)."""
     path_by_ms = {int(f["pts_ms"]): str(f["path"]) for f in frames if f.get("path")}
     tiles = []
@@ -3262,37 +3289,40 @@ def candidates(cfg: Config, video_id: str, *, query: str | None = None,
         ocr = db.get_ocr_tracks(video_id, limit=2000)
         frames = sorted((f for f in db.get_frames(video_id, limit=1000) if f.get("path")),
                         key=lambda f: int(f["pts_ms"] or 0))
+    units = query_units(to_simplified(normalize_text(query or ""))) if query else []
+    frame_times = [int(frame["pts_ms"] or 0) for frame in frames]
+    cues = [
+        (int(row.get("start_ms") or 0), int(row.get("end_ms") or 0), str(row.get("text") or ""))
+        for row in (*segments, *ocr)
+    ]
     for number, shot in enumerate(shots):
         shot["_i"] = number
-        parts = [str(s.get("text") or "") for s in segments
-                 if int(s.get("end_ms") or 0) > shot["start_ms"]
-                 and int(s.get("start_ms") or 0) < shot["end_ms"]]
-        parts += [str(t.get("text") or "") for t in ocr
-                  if int(t.get("end_ms") or 0) > shot["start_ms"]
-                  and int(t.get("start_ms") or 0) < shot["end_ms"]]
-        shot["text"] = normalize_text(" ".join(p for p in parts if p))
-        # The nearest sampled frame is enough: `frames --at` extracts the exact
-        # picture, and candidates costs no image by itself.
-        shot["keyframe_ms"] = shot["start_ms"]
-        if frames:
-            middle = (shot["start_ms"] + shot["end_ms"]) // 2
-            nearest = min(frames, key=lambda f: abs(int(f["pts_ms"] or 0) - middle))
-            shot["keyframe_ms"] = int(nearest["pts_ms"] or 0)
-    units = query_units(to_simplified(normalize_text(query or ""))) if query else []
-    for shot in shots:
+        start, end = shot["start_ms"], shot["end_ms"]
+        local = [(lo, hi, text) for lo, hi, text in cues if text and hi > start and lo < end]
+        shot["text"] = normalize_text(" ".join(text for _, _, text in local))
         shot["matched"] = count_unit_matches(shot["text"], units) if units else 0
+        target = (start + end) // 2
+        if shot["matched"]:
+            lo, hi, text = max(local, key=lambda cue: count_unit_matches(cue[2], units))
+            target = (max(start, lo) + min(end, hi)) // 2
+            shot["excerpt"] = normalize_text(text)
+        first = bisect_left(frame_times, start)
+        stop = bisect_left(frame_times, end)
+        # With no saved frame in this window, return a valid seek time. The sheet
+        # skips it, and callers can fetch that moment without seeing another shot.
+        shot["keyframe_ms"] = min(frame_times[first:stop], key=lambda ms: abs(ms - target), default=target)
     warnings: list[dict[str, Any]] = []
     if units:
         if max((s["matched"] for s in shots), default=0) == 0:
-            picks = _evenly_pick(shots, limit)
+            picks = _diverse_pick_shots(shots, frames, limit)
             warnings.append({
                 "code": "NO_TEXT_MATCH",
-                "message": "所有候选片段都没匹配到查询词；按时间均匀给出，请直接看关键帧（frames --at）。",
+                "message": "所有候选片段都没匹配到查询词；已按画面差异和时间覆盖挑选，请直接看关键帧（frames --at）。",
             })
         else:
             picks = sorted(shots, key=lambda s: (-s["matched"], s["start_ms"]))[:limit]
     else:
-        picks = _evenly_pick(shots, limit)
+        picks = _diverse_pick_shots(shots, frames, limit)
     sheet, sheet_tiles = _candidate_sheet(cfg, video_id, picks, frames) if images else (None, [])
     payload: dict[str, Any] = {
         "ok": True,
@@ -3308,7 +3338,7 @@ def candidates(cfg: Config, video_id: str, *, query: str | None = None,
             "keyframe_ms": shot["keyframe_ms"],
             "keyframe_timecode": format_timecode(shot["keyframe_ms"]),
             "matched_units": shot["matched"],
-            "text": shot["text"][:160],
+            "text": shot.get("excerpt", shot["text"])[:160],
         } for shot in picks],
         "warnings": warnings,
     }
@@ -4374,7 +4404,7 @@ def _change_scores(images: list[dict[str, Any]]) -> list[float]:
     return scores
 
 
-WINDOWS_MAX = 9
+WINDOWS_MAX = 16
 WINDOWS_COARSE_MS = 10 * 60 * 1000
 
 
@@ -4382,7 +4412,8 @@ def frames(cfg: Config, video_id: str, *, at_ms: int | None = None, count: int =
            width: int = 1280, fmt: str = "jpg", crop: tuple[float, float, float, float] | None = None,
            scale: float = 1.0, start_ms: int | None = None, end_ms: int | None = None,
            fps: int = 5, max_frames: int = 12, mode: str = "uniform",
-           sheet: bool = False, windows: int | None = None) -> dict[str, Any]:
+           sheet: bool = False, windows: int | None = None,
+           at_list_ms: list[int] | None = None) -> dict[str, Any]:
     if windows is not None and (start_ms is None or end_ms is None):
         raise Video2AgentError(
             "E_ARGS",
@@ -4395,10 +4426,21 @@ def frames(cfg: Config, video_id: str, *, at_ms: int | None = None, count: int =
             raise Video2AgentError("E_NOT_FOUND", f"Video not found: {video_id}", "Run video2agent list.")
         _require_media(video)
         windowed = start_ms is not None or end_ms is not None
+        multi_at = False
         dense_meta: dict[str, Any] = {}
         warnings: list[dict[str, Any]] = []
         windows_meta: list[dict[str, Any]] = []
         coverage: dict[str, Any] = {}
+        if (windows is None and sheet and start_ms is not None and end_ms is not None
+                and int(end_ms) - int(start_ms) > DENSE_WINDOW_MAX_MS):
+            # A long range with a sheet used to be cut to its first 5 seconds and
+            # return near-identical tiles; spread the tiles over the whole range instead.
+            windows = max(2, min(WINDOWS_MAX, int(max_frames or 12)))
+            warnings.append(_warn(
+                "RANGE_SHEET_AUTO_COVERED",
+                "请求区间超过 5 秒，已按整段范围均匀铺满拼图，未截断到前 5 秒。",
+                severity="info",
+            ))
         if windows is not None:
             fitted = _fit_request_times(video, start_ms=int(start_ms or 0), end_ms=int(end_ms or 0))
             start = int(fitted["start_ms"] or 0)
@@ -4445,6 +4487,24 @@ def frames(cfg: Config, video_id: str, *, at_ms: int | None = None, count: int =
                     f"请求窗口到 {format_timecode(end)}，实际只覆盖到 {format_timecode(effective_end)}（5 秒上限）。",
                     severity="info",
                 ))
+        elif at_list_ms:
+            multi_at = True
+            cap = WINDOWS_MAX if sheet else 8
+            times = []
+            seen_req: set[int] = set()
+            for raw_t in at_list_ms:
+                fitted = _fit_request_times(video, at_ms=int(raw_t))
+                fitted_t = int(fitted["at_ms"] or 0)
+                _require_in_range(video, at_ms=fitted_t)
+                if fitted_t not in seen_req:
+                    seen_req.add(fitted_t)
+                    times.append(fitted_t)
+                    if len(times) >= cap:
+                        break
+            if not times:
+                _require_in_range(video, at_ms=0)
+                times = [0]
+            dense_warnings = []
         else:
             if at_ms is None:
                 at_ms = 0
@@ -4596,8 +4656,8 @@ def frames(cfg: Config, video_id: str, *, at_ms: int | None = None, count: int =
     if sheet and len(images) >= 2:
         tiles = [{"path": str(im["path"]), "label": str(im["timecode"]),
                   "t_ms": int(im["t_ms"])} for im in images]
-        if len(tiles) > 9:
-            idx = sorted({round(i * (len(tiles) - 1) / 8) for i in range(9)})
+        if len(tiles) > 16:
+            idx = sorted({round(i * (len(tiles) - 1) / 15) for i in range(16)})
             tiles = [tiles[i] for i in idx]
             warnings.append(_warn(
                 "SHEET_SAMPLED",
@@ -4605,9 +4665,10 @@ def frames(cfg: Config, video_id: str, *, at_ms: int | None = None, count: int =
                 severity="info",
                 remedy="要看全部帧就缩小窗口或对具体时刻用 --at。",
             ))
+        sheet_prefix = "moments_sheet" if multi_at else "window_sheet"
         sheet_path, sheet_tiles = _montage(
             cfg, video_id, tiles,
-            filename=f"window_sheet_{int(times[0])}_{int(times[-1])}_{len(tiles)}.jpg")
+            filename=f"{sheet_prefix}_{int(min(times))}_{int(max(times))}_{len(tiles)}.jpg")
         if sheet_path:
             result.update({
                 "sheet": sheet_path,
@@ -4626,16 +4687,60 @@ def visual_map(cfg: Config, video_id: str, *, types: list[str] | None = None, mi
         video = require_ready(db.get_video(video_id), video_id)
         total = int(db.counts(video_id).get("visual_segments") or 0)
         rows = db.get_visual_segments(video_id, start_ms, end_ms, types=types, min_score=min_score, limit=limit + 1)
+        saved_frames = db.get_frames(video_id, limit=1000)
     truncated = len(rows) > limit
     if truncated:
         rows = rows[:limit]
     next_start_ms = int(rows[-1].get("end_ms") or 0) + 1 if truncated and rows else None
-    return {
+    for row in rows:
+        if row.get("scores") == {}:
+            row.pop("scores", None)
+        signals = row.get("signals")
+        if isinstance(signals, dict) and signals.get("motion") is not None:
+            motion = float(signals["motion"])
+            row["activity"] = "static" if motion < 0.03 else ("moderate" if motion < 0.12 else "high_motion")
+    highlights = visual_frame_highlights(saved_frames, top_k=8)
+    novel = [{**m, "timecode": format_timecode(int(m["t_ms"]))} for m in (highlights.get("novel_moments") or [])]
+    jumps = [{**m, "timecode": format_timecode(int(m["t_ms"]))} for m in (highlights.get("visual_jumps") or [])]
+    peaks: list[dict[str, Any]] = []
+    for frame in sorted(saved_frames, key=lambda f: float(f.get("motion") or 0), reverse=True):
+        value = float(frame.get("motion") or 0)
+        if value < 0.08 or len(peaks) >= 6:
+            break
+        pts = int(frame.get("pts_ms") or 0)
+        if any(abs(pts - p["t_ms"]) < 5000 for p in peaks):
+            continue
+        peaks.append({"t_ms": pts, "timecode": format_timecode(pts), "motion": round(value, 3)})
+    peaks.sort(key=lambda p: p["t_ms"])
+    combined_highlights: dict[str, Any] = {
+        "novel_moments": novel,
+        "visual_jumps": jumps,
+        "motion_peaks": peaks,
+    }
+    inspect_at = format_inspect_at(combined_highlights)
+    if inspect_at:
+        combined_highlights["inspect_at"] = inspect_at
+
+    def _reason(row: dict[str, Any]) -> Any:
+        return row.get("reason") or (row.get("signals") or {}).get("reason")
+
+    note = None
+    if rows and all(r.get("label") == "unknown" and _reason(r) == "text_unmeasured" for r in rows):
+        if inspect_at:
+            note = (
+                f"OCR 未索引，版式标签暂为 unknown；可直接用 frames(at='{inspect_at}', sheet=true) "
+                "一张拼图查看异常/跳变画面，或用 frames(start, end, sheet=true) 整段拼图浏览。"
+            )
+        else:
+            note = ("OCR 未索引，版式标签暂为 unknown；可直接按 visual_highlights 跳转变化明显的画面，"
+                    "或用 frames(start, end, sheet=true) 整段拼图浏览。")
+    result_map = {
         "ok": True,
         "video_id": video_id,
         "title": (video or {}).get("title"),
         "segments": rows,
         "returned": len(rows),
+        "visual_highlights": combined_highlights,
         # `total` is the unfiltered visual-segment count; a type/score filter can
         # return fewer. The explicit truncation contract prevents a 50-row default
         # from looking complete on a one-hour video.
@@ -4644,6 +4749,9 @@ def visual_map(cfg: Config, video_id: str, *, types: list[str] | None = None, mi
         "next_start_ms": next_start_ms,
         "next": {"start_ms": next_start_ms} if next_start_ms is not None else None,
     }
+    if note:
+        result_map["note"] = note
+    return result_map
 
 
 def list_videos(cfg: Config, limit: int = 50) -> dict[str, Any]:

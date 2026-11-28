@@ -175,6 +175,12 @@ assert.equal(__test.discoveryLastPath('session-a'), __test.discoveryLastPath('se
 assert.deepEqual(__test.commandArgs({ command: 'find', query: '一' }),
   ['discover', '一', '--limit', '8', '--platform', 'bilibili', '--no-covers', '--json'],
   'a single-query find must stay Bilibili-only while Douyin search is off')
+assert.deepEqual(__test.commandArgs({ command: 'frames', video_id: 'vid_1', at: '6.5s,167.4s', sheet: true }),
+  ['frames', 'vid_1', '--at', '6.5s,167.4s', '--count', '1', '--sheet', '--json'],
+  'frames must pass comma-separated at timestamps with --sheet cleanly')
+assert.deepEqual(__test.commandArgs({ command: 'frames', video_id: 'vid_1', start: 0, end: 30, sheet: true }),
+  ['frames', 'vid_1', '--start', '0', '--end', '30', '--fps', '5', '--max', '12', '--mode', 'uniform', '--sheet', '--json'],
+  'frames must keep numeric start=0 instead of dropping it as falsy')
 
 const cancelMissing = await call('POST', JSON.stringify({ job_id: 'job_missing_xyz' }), { path: '/api/video2agent/jobs/cancel' })
 assert.equal(cancelMissing.status, 404, 'cancel must not create a marker for a missing job')
@@ -1538,6 +1544,13 @@ const digestArgv = commandArgs({ command: 'digest', video_id: 'v' })
 assert.equal(digestArgv.includes('--max-chars'), true)
 assert.equal(digestArgv.includes('--frames'), true)
 assert.equal(digestArgv.includes('--compact'), true)
+assert.equal(flagValue(digestArgv, '--frames'), '9', 'digest defaults to a 9-tile 3x3 first look')
+assert.equal(flagValue(digestArgv, '--max-chars'), '3500', 'digest defaults to 3500 chars to reduce premature mid-video truncation')
+assert.equal(flagValue(commandArgs({ command: 'digest', video_id: 'v', count: 20 }), '--frames'), '16')
+assert.equal(flagValue(commandArgs({ command: 'frames', video_id: 'v', start: '0', end: '300', windows: 16 }), '--windows'), '16')
+assert.equal(flagValue(commandArgs({ command: 'frames', video_id: 'v', start: '0', end: '300', windows: 40 }), '--windows'), '16')
+assert.equal(flagValue(commandArgs({ command: 'frames', video_id: 'v', start: '0', end: '300', sheet: true, count: 16 }), '--max'), '16')
+assert.equal(flagValue(commandArgs({ command: 'frames', video_id: 'v', start: '0', end: '3', count: 16 }), '--max'), '15')
 const cropArgv = commandArgs({ command: 'frames', video_id: 'v', at: '00:02', crop: '0,0,0.5,0.5', scale: 2 })
 assert.equal(flagValue(cropArgv, '--crop'), '0,0,0.5,0.5')
 assert.equal(flagValue(cropArgv, '--scale'), '2')

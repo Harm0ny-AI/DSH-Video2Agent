@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — 把收藏夹里的视频变成知识，DSH 插件 dsh-video2agent" width="100%">
+  <img src="docs/assets/hero-brand.svg" alt="Video2Agent — 让 Agent 拥有视频检索和理解能力，DSH 插件 dsh-video2agent" width="100%">
 </p>
 
 <p align="center">
@@ -14,14 +14,14 @@
   <img alt="Local-first" src="https://img.shields.io/badge/local--first-8b5cf6">
 </p>
 
-<h1 align="center">B站/抖音收藏夹吃灰？<br>让 Agent 拥有视频检索和理解能力。</h1>
+<h1 align="center">让 Agent 拥有视频检索和理解能力。</h1>
 
 <p align="center">
-  B站/抖音收藏夹吃灰？想要Agent获得视频检索和理解能力？欢迎选择Video2Agent！一键安装，让Agent获取顶尖视频理解能力，并获取网络视频作为信息源。无论你是想调研社会趋势，还是自媒体工作者，只要需要你看视频完成的工作，现在统统交给Video2Agent即可！本地优先，云端 ASR/OCR 可选；B 站/抖音登录可选，解锁收藏夹/历史与 CC/AI 字幕。
+  想要Agent获得视频检索和理解能力？欢迎选择Video2Agent！一键安装，让Agent获取顶尖视频理解能力，并获取网络视频作为信息源。读收藏夹、看长视频、多条对比，答案都能回原片核对（Video-MME 87.8%）；默认本地优先，云端识别与 B 站/抖音登录按需开启。
 </p>
 
 <p align="center">
-  <a href="#收藏夹不该是视频的终点">收藏夹</a> ·
+  <a href="#把收藏夹与长视频变成知识库">核心能力</a> ·
   <a href="#更快更全面更省">实测</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#它能做什么">它能做什么</a> ·
@@ -38,13 +38,30 @@
 
 <p align="center"><sub><b>1 贴链接</b> → <b>2 处理</b> → <b>3 提问</b></sub></p>
 
+### 30 秒极速安装
+
+```bash
+dsh plugin --profile web add dsh-video2agent
+```
+
+安装后在 DSH 插件设置页打开 **「环境检查」**，缺项可一键补齐；也可手动 `pip install video2agent`（需 Python 3.11+ 与 FFmpeg）。
+
+### 为什么选择 Video2Agent
+
+| 对比维度 | 纯文字字幕总结 | 单图分镜类插件 | **Video2Agent** |
+| :--- | :---: | :---: | :---: |
+| **覆盖平台** | 仅单条链接 | 仅单条链接 | **B 站 + 抖音收藏夹/喜欢 + 本地视频** |
+| **多条对比** | 不支持 | 不支持 | **1–10 条批量对比共识与分歧** |
+| **原片核对** | 无画面信息 | 无跨片全文检索 | **先搜文字与时间码，按需取原帧+同帧文字** |
+| **本地与用量** | 仅文字 | 按次看图消耗较高 | **本地优先入库，省 ~99% tokens（Video-MME 87.8%）** |
+
 ---
 
-## 收藏夹不该是视频的终点
+## 把收藏夹与长视频变成知识库
 
-B 站收藏夹、抖音收藏和喜欢，是很多人最大的“待看清单”，也最容易吃灰：收藏时觉得有用，真要看时找不到、看不完、记不住。
+B 站收藏夹、抖音收藏和喜欢里的好视频，收藏时觉得有用，真要找时却翻不到、看不完、记不住。
 
-别再让好视频烂在收藏夹里！Video2Agent 先把视频读一遍——转写、画面上的字、场景、关键画面——存成你自己的本地知识库。然后你只负责问：
+Video2Agent 先把视频读一遍——转写、画面上的字、场景、关键画面——存成你自己的本地知识库。然后你只负责问：
 
 - **“这条到底讲了什么？”** → 几分钟读完，带时间码；
 - **“第 12 分钟那张表写了什么？”** → 原帧 + 同一帧上的文字，不靠猜；
@@ -153,24 +170,7 @@ dsh plugin --profile web add ./packages/dsh-video2agent
 
 ## 工作原理
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant A as Agent
-  participant V as video2agent
-  participant D as SQLite + FTS5
-  Note over V: 先把视频入库：探测 → 字幕/ASR → 场景 → 采样帧 → OCR → 视觉片段
-  A->>V: search / digest / transcript
-  V->>D: 查 FTS5 和已入库片段
-  D-->>V: 文字结果
-  V-->>A: 文字 + 时间码
-  opt 需要核对时
-    A->>V: evidence / frames
-    V->>V: 取同一时刻的画面 + OCR/转写
-    V-->>A: 画面 + 文字 + 时间码
-  end
-  A-->>A: 带引用的回答
-```
+![Video2Agent 工作原理](docs/assets/architecture.svg)
 
 **设计规则**
 
@@ -203,7 +203,7 @@ sequenceDiagram
 
 ## 插件市场
 
-原生 DSH 插件（`dsh.bundle` → `cordis.patch.yml`），已经按 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 的格式准备好条目。
+原生 DSH 插件（`dsh.bundle` → `cordis.patch.yml`），已上架 [DSH 插件市场](https://awesome-dsh-plugin.com/p/Harm0ny-AI/DSH-Video2Agent--packages-dsh-video2agent/)（[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)）。
 
 - 分类：`vision`
 - 安装入口：`video2agent` 工具 + `/video` 命令；CLI 是同一套引擎。

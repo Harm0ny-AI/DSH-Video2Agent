@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.9 (2026-11-28)
+
+- **Find the relevant moment within a long shot.** Candidate previews use
+  matching subtitle or on-screen text to choose a nearby frame.
+- **Keep the whole frame in preview sheets.** Portrait and square videos keep
+  content near the edges, including captions at the bottom of the screen.
+- **Read nearby frames with less repeated decoding.** Short frame sequences and
+  on-screen text checks can reuse one decode.
+- **Long-range preview sheets cover the whole range.** Asking for a sheet over a
+  section longer than 5 seconds no longer shows only its first 5 seconds, and
+  preview sheets hold up to 16 frames.
+- **A better first look and quick moment sheets.** The outline keeps full
+  portrait and square frames, shows more visually distinct moments, points to
+  sharp picture changes so you can inspect highlighted moments together in a
+  single preview sheet, and reuses its audio analysis on repeat calls.
+- **Visual map is useful before text is indexed.** It lists notable visual changes
+  and motion peaks even when on-screen text has not been read, and
+  Traditional/Simplified matching covers more interface terms.
+
 ## 0.3.8 (2026-11-26)
 
 - **Ask about the subtitles while visual analysis continues.** Once subtitles

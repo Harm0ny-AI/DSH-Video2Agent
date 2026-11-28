@@ -629,7 +629,7 @@ def _make_parser() -> argparse.ArgumentParser:
     dg.add_argument("--full", action="store_true",
                     help="Verbose per-segment/per-OCR objects (pre-compact format)")
     dg.add_argument("--frames", "--count", dest="frames", type=int, default=6,
-                    help="Contact-sheet frames (1-6); --count is the tool-level name")
+                    help="Contact-sheet frames (1-16, default 6); --count is the tool-level name")
 
     t = cmd("transcript", "Timestamped transcript for a time range")
     t.add_argument("video_id")
@@ -684,17 +684,17 @@ def _make_parser() -> argparse.ArgumentParser:
 
     f = cmd("frames", "Extract exact frame(s)")
     f.add_argument("video_id")
-    f.add_argument("--at", default="0", help="Moment: HH:MM:SS.mmm or a bare number in SECONDS (use the ms suffix for milliseconds)")
-    f.add_argument("--start", default=None, help="Start of a bounded dense window (the window is capped at 5s)")
-    f.add_argument("--end", default=None, help="End of a bounded dense window (clamped to 5s after --start)")
+    f.add_argument("--at", default="0", help="Moment(s): HH:MM:SS.mmm, bare seconds, or comma-separated list (with --sheet)")
+    f.add_argument("--start", default=None, help="Start of a dense window (or full range when combined with --sheet/--windows)")
+    f.add_argument("--end", default=None, help="End of a dense window (or full range when combined with --sheet/--windows)")
     f.add_argument("--fps", type=int, default=5, help="Dense window fps (1-8)")
     f.add_argument("--max", type=int, default=12, help="Dense window frame cap (1-15); --count >1 is an alias")
     f.add_argument("--mode", choices=["uniform", "change"], default="uniform", help="Dense sampling mode")
     f.add_argument("--count", type=int, default=1, help="Frames from a timestamp; for a start/end window, values >1 become the frame cap")
     f.add_argument("--sheet", action="store_true",
-                   help="Tile the returned frames into one labelled image (max 9, adaptive grid)")
+                   help="Tile the returned frames into one labelled image (max 16, adaptive grid)")
     f.add_argument("--windows", type=int, default=None,
-                   help="With --start/--end: split the range into N windows and return one coverage montage (2-9)")
+                   help="With --start/--end: split the range into N windows and return one coverage montage (2-16)")
     f.add_argument("--width", type=int, default=1280)
     f.add_argument("--format", choices=["jpg", "png"], default="jpg")
     f.add_argument("--crop", default=None, help="Normalized x,y,w,h (0-1) for a detail crop")
@@ -1951,16 +1951,27 @@ def main(argv: list[str] | None = None) -> int:
                     raise Video2AgentError("E_ARGS", "--crop 需要 4 个 0-1 的数字：x,y,w,h") from exc
             start_ms = parse_time_ms(args.start) if args.start else None
             end_ms = parse_time_ms(args.end) if args.end else None
-            at_ms = parse_time_ms(args.at) if not (start_ms is not None or end_ms is not None) else None
+            at_list_ms = None
+            at_ms = None
+            if not (start_ms is not None or end_ms is not None):
+                raw_at = str(args.at if args.at is not None else "0")
+                if "," in raw_at:
+                    pieces = [part.strip() for part in raw_at.split(",") if part.strip()]
+                    if not pieces:
+                        raise Video2AgentError("E_BAD_TIME", "--at 为空")
+                    at_list_ms = [parse_time_ms(piece) for piece in pieces[:(16 if args.sheet else 8)]]
+                    at_ms = at_list_ms[0]
+                else:
+                    at_ms = parse_time_ms(raw_at)
             # `count` is the natural tool-level name for "how many frames"; for a
             # dense window it used to be ignored while `max` controlled the cap.
             max_frames = args.max
             if (start_ms is not None or end_ms is not None) and int(args.count or 1) > 1:
-                max_frames = min(15, int(args.count))
+                max_frames = min(16 if args.sheet else 15, int(args.count))
             data = frames(cfg, args.video_id, at_ms=at_ms, count=args.count, width=args.width,
                           fmt=args.format, crop=crop, scale=args.scale, start_ms=start_ms, end_ms=end_ms,
                           fps=args.fps, max_frames=max_frames, mode=args.mode,
-                          sheet=bool(args.sheet), windows=args.windows)
+                          sheet=bool(args.sheet), windows=args.windows, at_list_ms=at_list_ms)
             if args.out:
                 out_dir = Path(args.out)
                 out_dir.mkdir(parents=True, exist_ok=True)

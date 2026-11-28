@@ -185,11 +185,9 @@ def extract_frames_batch(video_path: str | Path, times_ms: list[int], out_dir: s
                          prefix: str = "batch") -> dict[int, Path]:
     """Extract several frames in one ffmpeg process, exactly like `extract_frame`.
 
-    One input per frame, each seeked two seconds early and then offset to the
-    target; the outputs are separate streams of the same process. Four frames
-    took 0.22 s with a pixel diff of 0.0 against the per-frame path, while a
-    `select`-based pass proved ambiguous (a 40 ms window catches two frames at
-    30 fps). Any failed or short output returns `{}` so the caller falls back.
+    Nearby frames can share a decoder after one seek. Each output still
+    selects the first frame at or after its own offset. Spread-out frames use
+    independent seeks so the decoder doesn't have to walk the gaps.
     """
     times = sorted({int(t) for t in times_ms})
     if len(times) < 2 or len(times) > 24:
@@ -197,26 +195,29 @@ def extract_frames_batch(video_path: str | Path, times_ms: list[int], out_dir: s
     out_root = ensure_dir(Path(out_dir))
     for old in out_root.glob(f"{prefix}_{times[0]}_*.{fmt}"):
         old.unlink(missing_ok=True)
-    cmd = [_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error", "-an"]
-    for t in times:
-        cmd += ["-ss", f"{max(0.0, t / 1000.0 - 2.0):.3f}", "-i", str(video_path)]
-    for index, t in enumerate(times):
-        seek = max(0.0, t / 1000.0 - 2.0)
-        out_path = out_root / f"{prefix}_{times[0]}_{index + 1:04d}.{fmt}"
-        cmd += ["-ss", f"{t / 1000.0 - seek:.3f}"]
-        if width and width > 0:
-            cmd += ["-vf", f"scale=w='min(iw,{int(width)})':h=-2"]
-        cmd += ["-map", f"{index}:v:0", "-frames:v", "1"]
-        if fmt.lower() in ("jpg", "jpeg"):
-            cmd += ["-q:v", "2"]
-        cmd += [str(out_path)]
-    res = run(cmd, timeout=120 + len(times) * 10)
-    files = sorted(out_root.glob(f"{prefix}_{times[0]}_*.{fmt}"))
-    if not res.ok or len(files) != len(times):
-        for old in files:
-            old.unlink(missing_ok=True)
-        return {}
-    return {t: path for t, path in zip(times, files)}
+    files = [out_root / f"{prefix}_{times[0]}_{i:04d}.{fmt}" for i in range(1, len(times) + 1)]
+    base = [_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error"]
+    modes = (True, False) if 0 <= times[0] and times[-1] - times[0] <= 2500 else (False,)
+    for shared in modes:
+        seeks = [max(0, t - 2000) for t in (times[:1] if shared else times)]
+        cmd = base.copy()
+        for seek in seeks:
+            cmd += ["-ss", f"{seek / 1000:.3f}", "-i", str(video_path)]
+        for index, (t, out_path) in enumerate(zip(times, files)):
+            input_index = 0 if shared else index
+            cmd += ["-ss", f"{(t - seeks[input_index]) / 1000:.3f}"]
+            if width and width > 0:
+                cmd += ["-vf", f"scale=w='min(iw,{int(width)})':h=-2"]
+            cmd += ["-map", f"{input_index}:v:0", "-frames:v", "1", "-an"]
+            if fmt.lower() in ("jpg", "jpeg"):
+                cmd += ["-q:v", "2"]
+            cmd += [str(out_path)]
+        res = run(cmd, timeout=120 + len(times) * 10)
+        if res.ok and all(path.exists() and path.stat().st_size for path in files):
+            return dict(zip(times, files))
+        for path in files:
+            path.unlink(missing_ok=True)
+    return {}
 
 
 def scene_times(video_path: str | Path, threshold: float = 0.05) -> list[float]:

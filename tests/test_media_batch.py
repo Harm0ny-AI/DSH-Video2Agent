@@ -4,6 +4,8 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image, ImageChops, ImageStat
 
@@ -33,6 +35,66 @@ class BatchFrameTests(unittest.TestCase):
     def test_single_time_returns_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(extract_frames_batch(FIXTURE, [1_000], tmp), {})
+
+
+class BatchSeekTests(unittest.TestCase):
+    def test_partial_shared_output_retries_with_independent_seeks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outputs = [Path(tmp) / f"near_3000_{i:04d}.jpg" for i in (1, 2)]
+            inputs = []
+
+            def run(cmd, **_kwargs):
+                inputs.append(cmd.count("-i"))
+                if len(inputs) == 1:
+                    outputs[0].write_bytes(b"partial")
+                else:
+                    self.assertFalse(outputs[0].exists())
+                    for path in outputs:
+                        path.write_bytes(b"complete")
+                return SimpleNamespace(ok=True)
+
+            with patch("video2agent.media.run", side_effect=run):
+                result = extract_frames_batch(FIXTURE, [3000, 4250], tmp, prefix="near")
+        self.assertEqual(inputs, [1, 2])
+        self.assertEqual(list(result), [3000, 4250])
+
+    def test_zero_byte_shared_output_cleans_up_and_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outputs = [Path(tmp) / f"zero_3000_{i:04d}.jpg" for i in (1, 2)]
+            inputs = []
+
+            def run(cmd, **_kwargs):
+                inputs.append(cmd.count("-i"))
+                if len(inputs) == 1:
+                    outputs[0].write_bytes(b"ok")
+                    outputs[1].write_bytes(b"")
+                else:
+                    self.assertFalse(outputs[0].exists())
+                    self.assertFalse(outputs[1].exists())
+                    for path in outputs:
+                        path.write_bytes(b"complete")
+                return SimpleNamespace(ok=True)
+
+            with patch("video2agent.media.run", side_effect=run):
+                result = extract_frames_batch(FIXTURE, [3000, 4500], tmp, prefix="zero")
+        self.assertEqual(inputs, [1, 2])
+        self.assertEqual(list(result), [3000, 4500])
+
+    def test_spread_out_times_use_independent_seeks_directly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outputs = [Path(tmp) / f"wide_1000_{i:04d}.jpg" for i in (1, 2)]
+            inputs = []
+
+            def run(cmd, **_kwargs):
+                inputs.append(cmd.count("-i"))
+                for path in outputs:
+                    path.write_bytes(b"complete")
+                return SimpleNamespace(ok=True)
+
+            with patch("video2agent.media.run", side_effect=run):
+                result = extract_frames_batch(FIXTURE, [1000, 4000], tmp, prefix="wide")
+        self.assertEqual(inputs, [2])
+        self.assertEqual(list(result), [1000, 4000])
 
 
 if __name__ == "__main__":

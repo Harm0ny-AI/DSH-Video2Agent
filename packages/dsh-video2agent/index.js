@@ -1357,23 +1357,24 @@ function commandArgs(args) {
   }
   if (command === 'frames') {
     if (!args.video_id) return null
-    const windowed = args.start !== undefined && args.start !== null && args.start !== ''
-      || args.end !== undefined && args.end !== null && args.end !== ''
+    const hasEdge = (v) => v !== undefined && v !== null && v !== ''
+    const windowed = hasEdge(args.start) || hasEdge(args.end)
     // --windows is a range mode: it needs both edges and ignores --at.
     if (args.windows !== undefined && args.windows !== null) {
-      if (!args.start || !args.end) return null
+      if (!hasEdge(args.start) || !hasEdge(args.end)) return null
       const out = ['frames', String(args.video_id), '--start', String(args.start), '--end', String(args.end),
-        '--windows', String(clampInt(args.windows, 6, 2, 9)), '--json']
+        '--windows', String(clampInt(args.windows, 6, 2, 16)), '--json']
       if (args.crop) out.push('--crop', String(args.crop))
       if (args.scale !== undefined) out.push('--scale', String(Math.max(1, Math.min(3, Number(args.scale) || 1))))
       return out
     }
-    if (!windowed && (args.at === undefined || args.at === null || args.at === '')) return null
+    if (!windowed && !hasEdge(args.at)) return null
     const out = ['frames', String(args.video_id)]
     if (windowed) {
-      if (args.start) out.push('--start', String(args.start))
-      if (args.end) out.push('--end', String(args.end))
-      const cap = Number(args.count) > 1 ? clampInt(args.count, 12, 1, 15) : clampInt(args.max, 12, 1, 15)
+      if (hasEdge(args.start)) out.push('--start', String(args.start))
+      if (hasEdge(args.end)) out.push('--end', String(args.end))
+      const maxCap = args.sheet ? 16 : 15
+      const cap = Number(args.count) > 1 ? clampInt(args.count, 12, 1, maxCap) : clampInt(args.max, 12, 1, maxCap)
       out.push('--fps', String(clampInt(args.fps, 5, 1, 8)), '--max', String(cap),
         '--mode', args.mode === 'change' ? 'change' : 'uniform')
     } else {
@@ -1387,7 +1388,7 @@ function commandArgs(args) {
   }
   if (command === 'candidates') {
     if (!args.video_id) return null
-    const out = ['candidates', String(args.video_id), '--limit', String(clampInt(args.limit, 8, 1, 30)), '--json']
+    const out = ['candidates', String(args.video_id), '--limit', String(clampInt(args.limit, 12, 1, 30)), '--json']
     if (args.query) out.push('--query', String(args.query))
     if (args.include_images) out.splice(2, 0, '--images')
     return out
@@ -1414,8 +1415,8 @@ function commandArgs(args) {
   }
   if (command === 'digest') {
     if (!args.video_id) return null
-    return ['digest', String(args.video_id), '--max-chars', String(clampInt(args.max_chars, 2000, 500, 6000)),
-      '--frames', String(clampInt(args.count, 6, 1, 6)), '--compact', '--json']
+    return ['digest', String(args.video_id), '--max-chars', String(clampInt(args.max_chars, 3500, 500, 6000)),
+      '--frames', String(clampInt(args.count, 9, 1, 16)), '--compact', '--json']
   }
   if (command === 'ocr-window') {
     if (!args.video_id || !args.start || !args.end) return null
@@ -5361,7 +5362,7 @@ function guardWrite(req, res) {
         command: {
           type: 'string',
           enum: ['find', 'ingest', 'outline', 'read', 'evidence', 'frames', 'perceive', 'admin'],
-          description: 'What to do. find: Bilibili search by default; Douyin only with scope:"douyin" or when the Douyin search setting is enabled; library search (scope library), or resolve a URL. ingest: index a path/URL, start a shortlist (video_ids), poll a job (job_id) or a campaign (campaign_id). outline: one-call index (detail digest), overview, or map. read: transcript or compare. evidence: a timestamp plus its text. frames: pixels. perceive: motion numbers. admin: list/export/ocr-index/account (Bilibili)/douyin (Douyin account)/doctor.',
+          description: 'What to do. find: search/resolve URL. ingest: index path/URL/shortlist. outline: digest (9 keyframes + visual_highlights), overview, or map. read: transcript or compare. evidence: timestamp + text + frame. frames: sheets (use sheet:true for multi-frame scans or visual_highlights) and single-frame zoom (at + count:1) only when counting, reading small UI, or confirming an ambiguous tile; if transcript or digest already answers clearly, answer directly without extra frames. perceive: motion numbers. admin: list/export/ocr-index/account/douyin/doctor (skip for visual QA).',
         },
         scope: {
           type: 'string',
@@ -5371,7 +5372,7 @@ function guardWrite(req, res) {
         detail: {
           type: 'string',
           enum: ['digest', 'overview', 'map'],
-          description: 'outline: digest (default), overview, or map.',
+          description: 'outline: digest (default, transcript/OCR + 9 keyframes), overview (metadata/status only — use digest to inspect content), or map.',
         },
         view: {
           type: 'string',
@@ -5383,7 +5384,7 @@ function guardWrite(req, res) {
         admin_action: {
           type: 'string',
           enum: ['list', 'export', 'ocr-index', 'account', 'douyin', 'doctor'],
-          description: 'admin: list (default), export, ocr-index, account (Bilibili), douyin (one or 1-10 profiles), or doctor. For a creator full-works timeline use admin_action:"douyin" + douyin_action:"videos" with the sec_uid. For 1-10 creators use douyin_action:"profiles" + douyin_urls. Use this exact field name (admin_action), not action.',
+          description: 'admin: list (default), export, ocr-index (slow full-video indexing — skip during normal QA; use evidence or frames view:"ocr" instead), account (Bilibili), douyin (one or 1-10 profiles), or doctor. For a creator full-works timeline use admin_action:"douyin" + douyin_action:"videos" with the sec_uid. For 1-10 creators use douyin_action:"profiles" + douyin_urls. Use this exact field name (admin_action), not action.',
         },
         douyin_action: {
           type: 'string',
@@ -5464,7 +5465,7 @@ function guardWrite(req, res) {
         job_id: { type: 'string', description: 'ingest: job id to poll.' },
         wait_ms: { type: 'number', description: 'ingest: wait for one job (ms, clamped to 5000-90000). One wait per job: never loop waits over several jobs in one program; read already-finished videos instead.' },
         language: { type: 'string', description: 'ingest: ASR language when the video has no captions (zh, en, ja, ...). Omit to auto-detect; pass it when the transcript came out in the wrong language.' },
-        at: { type: 'string', description: 'evidence/frames: the moment (01:12:34, 548s, or 548000ms). Evidence also accepts a comma list or an ev_ ID from a previous evidence call.' },
+        at: { type: 'string', description: 'evidence/frames: one moment (01:12:34, 548s, 548000ms) or a comma list (with frames sheet:true, packs up to 16 timestamps into 1 sheet — ideal for visual_highlights.inspect_at). Evidence also accepts an ev_ ID.' },
         timestamp: { type: 'string', description: 'Alias of at (evidence/frames); at wins when both are set.' },
         max_images: { type: 'number', description: 'evidence: image budget for a multi-moment call (1-6).' },
         crop: { type: 'string', description: 'frames: normalized x,y,w,h (0-1).' },
@@ -5472,14 +5473,14 @@ function guardWrite(req, res) {
         start: { type: 'string', description: 'Range start: seconds by default (548), or 548s / 00:09:08 / 548000ms.' },
         end: { type: 'string', description: 'Range end, same units as start (seconds by default).' },
         max_chars: { type: 'number', description: 'transcript: text budget (default 6000).' },
-        count: { type: 'number', description: 'frames: 1-8 frames; outline: 1-6 keyframes.' },
+        count: { type: 'number', description: 'frames: 1-8 frames (use count:1 only when counting, reading small UI, or confirming an ambiguous tile); outline: 1-16 keyframes (default 9).' },
         fps: { type: 'number', description: 'frames window 1-8; perceive 1-30.' },
         max_frames: { type: 'number', description: 'perceive: decode cap (100-40000).' },
         brief: { type: 'boolean', description: 'perceive: ~340-token survey (cuts + 4 moments).' },
-        max: { type: 'number', description: 'frames window: frame cap (1-15).' },
+        max: { type: 'number', description: 'frames window: frame cap (1-15, or up to 16 with sheet:true).' },
         mode: { type: 'string', enum: ['uniform', 'change'], description: 'frames window: uniform or change.' },
-        sheet: { type: 'boolean', description: 'frames: tile results into one labelled image (max 9).' },
-        windows: { type: 'number', description: 'frames: split start/end into 2-9 windows.' },
+        sheet: { type: 'boolean', description: 'frames: pack range or comma-at timestamps into 1 labelled image (up to 16 tiles; start/end >5s covers the whole range). Always set true for multi-frame scans unless you want multiple image attachments. For long videos, 2-3 range sheets suffice to survey or confirm absence — do not slice endlessly.' },
+        windows: { type: 'number', description: 'frames: split start/end into 2-16 windows.' },
         force: { type: 'boolean', description: 'ingest: re-index an existing video.' },
         format: { type: 'string', enum: ['md', 'html', 'json', 'knowledge'], description: 'export: md/html/json/knowledge.' },
         limit: { type: 'number', description: 'Result limit (default 8; map 50; account/douyin 50).' },
@@ -5745,11 +5746,14 @@ function guardWrite(req, res) {
         try {
           const parsed = JSON.parse(raw)
           const command = cliCommand
-          const windowedFrames = command === 'frames' && (args.start || args.end)
+          const hasEdge = (v) => v !== undefined && v !== null && v !== ''
+          const windowedFrames = command === 'frames' && (hasEdge(args.start) || hasEdge(args.end))
           const batchedAt = command === 'evidence' && (String(args.at || '').includes(',') || String(args.at || '').startsWith('['))
+          const batchedFramesAt = command === 'frames' && !windowedFrames && String(args.at || '').includes(',')
+          const framesAtCount = batchedFramesAt ? Math.min(8, String(args.at).split(',').map((s) => s.trim()).filter(Boolean).length || 1) : clampInt(args.count, 1, 1, 8)
           const frameCap = Number(args.count) > 1 ? clampInt(args.count, 12, 1, 15) : clampInt(args.max, 12, 1, 15)
           const budget = command === 'frames'
-            ? (parsed.sheet ? 1 : windowedFrames ? frameCap : clampInt(args.count, 1, 1, 8))
+            ? (parsed.sheet ? 1 : windowedFrames ? frameCap : framesAtCount)
             : command === 'digest' || command === 'candidates' ? 1
               : batchedAt ? clampInt(args.max_images, 6, 0, 6) : clampInt(args.images, 2, 0, 6)
           const source = Array.isArray(parsed.images) ? parsed.images : []

@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc">
+  <title id="title">Video2Agent 工作原理</title>
+  <desc id="desc">三段式工作流：视频输入入库到本地知识库，再由 Agent 先搜文字后按需核对原帧回答。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#091529"/>
+      <stop offset="0.5" stop-color="#132b4c"/>
+      <stop offset="1" stop-color="#081221"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.45" r="0.6">
+      <stop offset="0" stop-color="#4e79b2" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#091529" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cardBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#142947" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#0d1c33" stop-opacity="0.96"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M2,2 L10,6 L2,10 L4,6 Z" fill="#ff7a45"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="400" rx="18" fill="url(#bg)"/>
+  <rect width="1200" height="400" rx="18" fill="url(#glow)"/>
+  <rect x="1" y="1" width="1198" height="398" rx="17" fill="none" stroke="#2d4c78" stroke-opacity="0.7"/>
+
+  <!-- Header -->
+  <text x="48" y="48" fill="#ff7a45" font-family="'Microsoft YaHei UI', 'PingFang SC', 'Segoe UI', system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="2.2">WORKFLOW · 先文字，后画面</text>
+  <text x="48" y="80" fill="#f7fbff" font-family="'Microsoft YaHei UI', 'PingFang SC', 'Segoe UI', sans-serif" font-size="24" font-weight="700">一次入库，先搜文字与时间码，按需回看原片帧</text>
+
+  <!-- Step 1: 视频输入 -->
+  <g transform="translate(48, 112)">
+    <rect width="316" height="240" rx="14" fill="url(#cardBg)" stroke="#355888" stroke-width="1.5"/>
+    <rect x="20" y="20" width="64" height="24" rx="12" fill="#ff7a45" fill-opacity="0.16" stroke="#ff7a45" stroke-opacity="0.6"/>
+    <text x="52" y="36" text-anchor="middle" fill="#ff9a72" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="12" font-weight="700">STEP 1</text>
+    <text x="20" y="72" fill="#f7fbff" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="20" font-weight="700">视频输入</text>
+    <text x="20" y="98" fill="#9db6d8" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13">单条链接、收藏夹或本地文件</text>
+
+    <rect x="20" y="118" width="276" height="32" rx="8" fill="#0b182d" stroke="#28466e"/>
+    <text x="34" y="139" fill="#dce9fa" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13">• B 站视频 / 收藏夹 / 历史记录</text>
+
+    <rect x="20" y="158" width="276" height="32" rx="8" fill="#0b182d" stroke="#28466e"/>
+    <text x="34" y="179" fill="#dce9fa" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13">• 抖音链接 / 作品 / 收藏与喜欢</text>
+
+    <rect x="20" y="198" width="276" height="28" rx="8" fill="#0b182d" stroke="#28466e"/>
+    <text x="34" y="217" fill="#dce9fa" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13">• 本地 MP4 / 录屏 / 课程批量 1–10 条</text>
+  </g>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="370" y1="232" x2="424" y2="232" stroke="#ff7a45" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- Step 2: 本地知识库 -->
+  <g transform="translate(432, 112)">
+    <rect width="336" height="240" rx="14" fill="url(#cardBg)" stroke="#355888" stroke-width="1.5"/>
+    <rect x="20" y="20" width="64" height="24" rx="12" fill="#60a5fa" fill-opacity="0.16" stroke="#60a5fa" stroke-opacity="0.6"/>
+    <text x="52" y="36" text-anchor="middle" fill="#93c5fd" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="12" font-weight="700">STEP 2</text>
+    <text x="20" y="72" fill="#f7fbff" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="20" font-weight="700">本地知识库</text>
+    <text x="20" y="98" fill="#9db6d8" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13">默认本机建立多模态索引，支持断点与缓存</text>
+
+    <rect x="20" y="118" width="144" height="46" rx="8" fill="#0b182d" stroke="#28466e"/>
+    <text x="32" y="138" fill="#f7fbff" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13" font-weight="600">字幕与语音转写</text>
+    <text x="32" y="156" fill="#8ea9cc" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="11.5">CC/AI 校验 · Whisper</text>
+
+    <rect x="172" y="118" width="144" height="46" rx="8" fill="#0b182d" stroke="#28466e"/>
+    <text x="184" y="138" fill="#f7fbff" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13" font-weight="600">画面文字 OCR</text>
+    <text x="184" y="156" fill="#8ea9cc" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="11.5">表格 · PPT · 界面文字</text>
+
+    <rect x="20" y="172" width="144" height="46" rx="8" fill="#0b182d" stroke="#28466e"/>
+    <text x="32" y="192" fill="#f7fbff" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13" font-weight="600">场景与关键帧</text>
+    <text x="32" y="210" fill="#8ea9cc" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="11.5">3×3 九宫格 · 视觉变化点</text>
+
+    <rect x="172" y="172" width="144" height="46" rx="8" fill="#0b182d" stroke="#28466e"/>
+    <text x="184" y="192" fill="#f7fbff" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13" font-weight="600">全文与片段索引</text>
+    <text x="184" y="210" fill="#8ea9cc" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="11">时间码 · 省 99% tokens</text>
+  </g>
+
+  <!-- Arrow 2 -> 3 -->
+  <line x1="774" y1="232" x2="828" y2="232" stroke="#ff7a45" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- Step 3: Agent 先搜后看 -->
+  <g transform="translate(836, 112)">
+    <rect width="316" height="240" rx="14" fill="url(#cardBg)" stroke="#ff7a45" stroke-opacity="0.7" stroke-width="1.5"/>
+    <rect x="20" y="20" width="64" height="24" rx="12" fill="#6ee7b7" fill-opacity="0.16" stroke="#6ee7b7" stroke-opacity="0.6"/>
+    <text x="52" y="36" text-anchor="middle" fill="#6ee7b7" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="12" font-weight="700">STEP 3</text>
+    <text x="20" y="72" fill="#f7fbff" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="20" font-weight="700">Agent 先搜后看</text>
+    <text x="20" y="98" fill="#9db6d8" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13">不瞎猜，图与文字一定来自同一帧</text>
+
+    <rect x="20" y="118" width="276" height="32" rx="8" fill="#0b182d" stroke="#28466e"/>
+    <text x="34" y="139" fill="#dce9fa" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13">1. 文字检索、速览大纲与 1–10 条对比</text>
+
+    <rect x="20" y="158" width="276" height="32" rx="8" fill="#0b182d" stroke="#ff7a45" stroke-opacity="0.55"/>
+    <text x="34" y="179" fill="#ffe1d4" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13">2. 按时间码取回原片帧 + 同帧文字</text>
+
+    <rect x="20" y="198" width="276" height="28" rx="8" fill="#0b182d" stroke="#28466e"/>
+    <text x="34" y="217" fill="#dce9fa" font-family="'Microsoft YaHei UI', 'PingFang SC', sans-serif" font-size="13">3. 输出带时间码与原图引用的回答</text>
+  </g>
+</svg>
